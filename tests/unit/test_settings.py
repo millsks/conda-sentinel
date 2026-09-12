@@ -31,6 +31,8 @@ from conda_sentinel.collectors.pypi_release import PyPIReleaseCollector
 from conda_sentinel.collectors.python_readiness import COLLECTOR_NAME as PYTHON_READINESS_NAME
 from conda_sentinel.collectors.python_readiness import READINESS_DISPATCH_OFFSET
 from conda_sentinel.collectors.python_readiness import PythonReadinessCollector
+from conda_sentinel.collectors.resolve_identity import COLLECTOR_NAME as RESOLVE_IDENTITY_NAME
+from conda_sentinel.collectors.resolve_identity import IdentityResolutionCollector
 from conda_sentinel.collectors.source_release import COLLECTOR_NAME as SOURCE_RELEASE_NAME
 from conda_sentinel.collectors.source_release import SourceReleaseCollector
 from conda_sentinel.collectors.sweep import COLLECTOR_KWARG
@@ -1283,6 +1285,7 @@ EXPECTED_SWEEP_ENTRIES = (
     "cpm-sweep-kev",
     "cpm-sweep-license",
     "cpm-sweep-python-readiness",
+    "cpm-sweep-resolve-identity",
 )
 
 
@@ -1392,7 +1395,7 @@ def test_every_schedule_entry_fires_the_dispatch_task_by_the_name_it_declares(mo
 def test_the_schedule_dispatches_each_per_package_collector_exactly_once():
     """One entry per collector, and the cadences are the collectors' own.
 
-    Asserted against the eight collector modules' declared cadences rather than
+    Asserted against the nine collector modules' declared cadences rather than
     against intervals written out here: a literal in this file would be a third
     spelling of a number that already lives in two places, and it would keep
     passing while the schedule and the collectors drifted.
@@ -1417,6 +1420,7 @@ def test_the_schedule_dispatches_each_per_package_collector_exactly_once():
         KEV_NAME: KevCollector.cadence,
         LICENSE_NAME: LicenseCollector.cadence,
         PYTHON_READINESS_NAME: PythonReadinessCollector.cadence,
+        RESOLVE_IDENTITY_NAME: IdentityResolutionCollector.cadence,
     }
     assert len(base.CELERY_BEAT_SCHEDULE) == len(dispatched)
 

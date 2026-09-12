@@ -5,20 +5,28 @@ source ... and writes `inventory_snapshots` -- append-only rows carrying the
 source's package key, the internal usage signals as observed, `observed_at`, and
 the run's correlation identifiers." This module is that table, the one read
 against it, and -- since `CPM-CURRENCY-S01` through `CPM-CURRENCY-S04`,
-`CPM-SECURITY-S01` through `CPM-SECURITY-S03` and `CPM-PY314-S01` and
-`CPM-PY314-S02` -- the nine surface tables beside it: upstream releases, PyPI
+`CPM-SECURITY-S01` through `CPM-SECURITY-S03`, `CPM-PY314-S01`, `CPM-PY314-S02`
+and `CPM-IDENTITY-S08` -- the ten tables beside it: upstream releases, PyPI
 releases, conda-forge feedstocks, published conda packages, advisory matches, KEV
-cross-references, licence findings, static Python-readiness assessments and
-verified Python build results.
+cross-references, licence findings, static Python-readiness assessments,
+verified Python build results and package-identity resolutions.
 
-**One module, ten tables, and no shared columns beyond the ones every evidence
+**One module, eleven tables, and no shared columns beyond the ones every evidence
 row carries.** `CPM-AD-7` gives each collector its own evidence table, which is a
 rule about tables rather than about files: `inventory_snapshots`,
 `source_release_snapshots`, `pypi_release_snapshots`, `feedstock_snapshots`,
 `conda_package_snapshots`, `vulnerability_findings`, `kev_findings`,
-`license_findings`, `python_readiness_assessments` and
-`python_verification_results` are written by ten collectors
-that share nothing but the log.
+`license_findings`, `python_readiness_assessments`,
+`python_verification_results` and `identity_resolution_snapshots` are written by
+eleven collectors that share nothing but the log.
+
+**The last is evidence of a resolution rather than of a surface.** `CPM-FR-1`'s
+resolver (`CPM-IDENTITY-S08`) reads two public documents and hands what it found
+to `identity`'s `record_resolution`; what the package row then says is identity,
+and what each document said and what was chosen is this table's append-only
+row. The mapping outcomes live on `identity.PackageMapping`, because they are
+what is *currently concluded*; this row is what one run *observed*, and it is
+what gives the review queue's outcomes their evidence.
 
 **The last two are one requirement split across two tables, deliberately.**
 `CPM-FR-14` reads a package's *declared* metadata and, separately and on demand,
@@ -140,6 +148,7 @@ from conda_sentinel.core.finding_keys import FindingKeyed
 from conda_sentinel.core.models import AppendOnlyError
 from conda_sentinel.core.models import AppendOnlyModel
 from conda_sentinel.core.outcomes import OutcomeState
+from conda_sentinel.identity.models import IdentityConfidence
 from conda_sentinel.identity.models import Package
 
 if TYPE_CHECKING:
@@ -154,6 +163,8 @@ __all__ = [
     "ESTABLISHED_ABSENCE_CONSTRAINT",
     "FEEDSTOCK_FACTS_CONSTRAINT",
     "FEEDSTOCK_READ_INDEX",
+    "IDENTITY_RESOLUTION_FACTS_CONSTRAINT",
+    "IDENTITY_RESOLUTION_READ_INDEX",
     "KEV_APPLICABILITY_CONSTRAINT",
     "KEV_FACTS_CONSTRAINT",
     "KEV_READ_INDEX",
@@ -181,6 +192,7 @@ __all__ = [
     "VULNERABILITY_READ_INDEX",
     "CondaPackageSnapshot",
     "FeedstockSnapshot",
+    "IdentityResolutionSnapshot",
     "InventoryReadError",
     "InventorySnapshot",
     "KevFinding",
@@ -695,6 +707,36 @@ VERIFICATION_EVIDENCE_CONSTRAINT: Final[str] = "verification_says_where_it_ran"
 VERIFICATION_REASON_CONSTRAINT: Final[str] = "verification_not_applicable_states_its_reason"
 VERIFICATION_SERIES_CONSTRAINT: Final[str] = "verification_names_the_series_it_ran"
 VERIFICATION_READ_INDEX: Final[str] = "py_verify_pkg_observed"
+
+#: How wide the `project_urls` key column is. A key is a label a project author
+#: typed -- `Source`, `Source Code`, `Homepage` -- so it is sized as a name, on
+#: the terms `identity/models.py` sizes one; `collectors/resolve_identity.py`
+#: records only a key from its own short precedence list, so the bound is never
+#: approached.
+_REPOSITORY_KEY_LENGTH: Final[int] = 128
+
+#: How wide the recorded-confidence column is: the same 32 `identity/models.py`
+#: gives `Package.confidence`, restated rather than imported on the terms
+#: `_TRACE_ID_LENGTH` states. Its longest value is `inventory-derived`,
+#: seventeen characters.
+_CONFIDENCE_LENGTH: Final[int] = 32
+
+#: The name of the constraint `identity_resolution_snapshots` carries, and the
+#: read index its freshness query needs.
+#:
+#: One biconditional and **no unique constraint of any kind** (`CPM-AD-2`): an
+#: `ok` row is one on which `record_resolution` was reached, so it records the
+#: confidence the package holds afterwards; a row that is not `ok` never reached
+#: the recorder, so it records no confidence, no repository, no key, no PyPI
+#: question, answer or locator, and no held-back claim. `feedstocks` is deliberately outside the
+#: constraint: a JSON column compares differently on the two backends this
+#: product runs against, and an empty list on a sentinel row is what the writer
+#: guarantees rather than what the database checks.
+#:
+#: Django caps an index name at 30 characters, which is why it does not spell out
+#: `identity_resolution`.
+IDENTITY_RESOLUTION_FACTS_CONSTRAINT: Final[str] = "resolution_facts_present_exactly_when_recorded"
+IDENTITY_RESOLUTION_READ_INDEX: Final[str] = "id_resolution_pkg_observed"
 
 
 class InventoryReadError(ValueError):
@@ -2985,3 +3027,181 @@ class PythonVerificationResult(AppendOnlyModel):
         series = self.python_series or "(no series)"
         where = f"{self.platform}/{self.architecture}" if self.platform and self.architecture else "(nowhere named)"
         return f"Python {series} for {scope} on {where}: {self.state} at {when}"
+
+
+class IdentityResolutionSnapshot(AppendOnlyModel):
+    """One run of the identity resolver over one package. Table `identity_resolution_snapshots`.
+
+    `CPM-FR-1` resolves each package to a source repository, its release-ecosystem
+    identity and zero or more feedstocks, and `CPM-IDENTITY-S08` is the collector
+    that does it. The mappings it establishes are written to the package row and
+    to `identity.PackageMapping` through `record_resolution` -- identity is
+    mutated through that door and no other (`CPM-AD-14`) -- and this row is the
+    evidence behind them: what each source said, which `project_urls` key was
+    chosen, and what confidence the package held once the recorder had finished.
+
+    **`state` is over `OutcomeState` and is about the *run*, never about the
+    package** (`CPM-AD-5`). `ok` is a run that read conda-forge's index and
+    reached the recorder -- whatever the recorder concluded, including that
+    nothing was established and the package stays `unmapped`; `not_found` is
+    the index answering that it has no entry, on which PyPI was never asked and
+    nothing was recorded; `error` is a look that failed or a document that could
+    not be read; `not_applicable` is the row shape every collector must be able
+    to write and this one never asks for, because resolution applies to every
+    package.
+
+    **`confidence_recorded` is what the package holds after the run, not what
+    the resolver claimed.** The recorder holds a lower claim back from a
+    `verified` package while still recording its findings, and
+    `downgrade_refused` says when that happened. A reader comparing the two
+    columns can tell "resolved to inventory-derived" from "found things, and a
+    person's verification stood".
+
+    **`PROTECT`, and it is required rather than preferred**
+    (`EVIDENCE.02-AUDIT-001`), on the terms `InventorySnapshot.package` states.
+
+    `observed_at` and `objects` come from `AppendOnlyModel`: the instant is
+    supplied by the writer from an injected `Clock` (`CPM-AD-26`) and the manager
+    is the one that offers no `update()` and no `delete()` (`CPM-AD-2`).
+    """
+
+    #: The package this resolution is about, by the integer primary key
+    #: `CPM-AD-3` fixes. Non-nullable: a resolution is always of a package.
+    package = models.ForeignKey(
+        Package,
+        on_delete=models.PROTECT,
+        related_name="identity_resolution_snapshots",
+        verbose_name=_("package"),
+    )
+
+    #: The locator the base read -- conda-forge's feedstock-outputs index entry
+    #: for this package. The PyPI locator the bounded second call read is named
+    #: in `detail` when it matters. Blank on a row where no locator was built.
+    source = models.CharField(_("source"), max_length=_LOCATOR_LENGTH, blank=True, default="")
+
+    #: What the run concluded, over `OutcomeState` and emitted verbatim
+    #: (`CPM-AD-24`). See the class docstring for what each value means here.
+    state = models.CharField(_("state"), max_length=_STATE_LENGTH, choices=OutcomeState.choices)
+
+    #: The source repository the run chose and normalised, in the one form the
+    #: upstream-release collector reads, or blank when none was established.
+    #: As wide as `Package.source_repository_url`, which is what the recorder
+    #: writes the same value to; `_LOCATOR_LENGTH` is the same 512 and the same
+    #: kind of string -- a URL this collector built.
+    repository_url = models.URLField(_("repository URL"), max_length=_LOCATOR_LENGTH, blank=True, default="")
+
+    #: Which `project_urls` key won the documented precedence, as the project
+    #: spelled it, or blank when no key did. Populated whether or not the value
+    #: under it was readable: a `Source` link that was rejected is still the key
+    #: the project labelled its source with, and `repository_url` beside it says
+    #: whether anything came of it -- so a reader can see that `Homepage` rather
+    #: than `Source` is what resolved this package, or that `Source` named
+    #: something this product does not read.
+    repository_key = models.CharField(_("repository key"), max_length=_REPOSITORY_KEY_LENGTH, blank=True, default="")
+
+    #: Whether PyPI answered at all -- `200` or `404` -- as opposed to a call
+    #: that failed, a `304` to an unconditional request, or a document that
+    #: could not be read. A fact about the observation rather than a status, on
+    #: the terms `FeedstockSnapshot`'s `absence_established` states, and the
+    #: machine-readable half of what `detail` says in prose. `False` on a
+    #: sentinel row, where PyPI was never reached.
+    pypi_asked = models.BooleanField(_("PyPI asked"), default=False)
+
+    #: Whether PyPI holds a project under the package's name. `False` both when
+    #: PyPI said no and when PyPI could not be asked; `pypi_asked` and the
+    #: `release_ecosystem` mapping's outcome tell those apart.
+    pypi_found = models.BooleanField(_("PyPI found"), default=False)
+
+    #: The PyPI locator the bounded second call used, or blank when none could be
+    #: built -- a conda name that is not a PyPI name -- and blank on a sentinel
+    #: row, where PyPI was never reached.
+    pypi_source = models.CharField(_("PyPI source"), max_length=_LOCATOR_LENGTH, blank=True, default="")
+
+    #: The feedstock names conda-forge's index listed, in its order, stripped and
+    #: lower-cased, with a name that appears twice -- or twice under two
+    #: spellings of one repository -- listed once. The `-feedstock` suffix is
+    #: not here: it lives on `identity.Feedstock.name`, which records the
+    #: repository. Empty on a sentinel row and on an entry that lists none.
+    feedstocks = models.JSONField(_("feedstocks"), default=list, blank=True)
+
+    #: The package-identity confidence the package holds once the recorder has
+    #: finished, in `IdentityConfidence`'s own spelling. Blank on every row that
+    #: never reached the recorder -- see `Meta.constraints`.
+    confidence_recorded = models.CharField(
+        _("confidence recorded"),
+        max_length=_CONFIDENCE_LENGTH,
+        choices=IdentityConfidence.choices,
+        blank=True,
+        default="",
+    )
+
+    #: Whether the recorder held this run's confidence claim back because the
+    #: package is `verified`. A fact about the write, not a status. `False` on
+    #: every row that never reached the recorder.
+    downgrade_refused = models.BooleanField(_("downgrade refused"), default=False)
+
+    #: What the collector or the base had to say -- the sentinel path's reason,
+    #: the rejected repository URL and why, that PyPI had no project or could not
+    #: be asked, that the index lists no feedstock and the rows already recorded
+    #: were kept. Empty when both documents answered and everything was
+    #: established.
+    detail = models.TextField(_("detail"), blank=True, default="")
+
+    #: The `trace_id` of the task that made this observation, formatted `032x`
+    #: (`CPM-AD-15`). Empty when no span was active, which never blocks a write.
+    trace_id = models.CharField(_("trace id"), max_length=_TRACE_ID_LENGTH, blank=True, default="")
+
+    class Meta:
+        """The table `CPM-IDENTITY-S08` adds, not the `collectors_identityresolutionsnapshot` Django derives.
+
+        **No unique constraint of any kind** (`CPM-AD-2`, `CPM-AD-7`). Two runs
+        over one package are two rows, which is how a reader sees what the
+        sources said last week beside what they say today.
+        """
+
+        db_table = "identity_resolution_snapshots"
+        verbose_name = _("identity resolution snapshot")
+        verbose_name_plural = _("identity resolution snapshots")
+        indexes = [
+            # `core/freshness.py`'s `latest_observation` reads exactly this, on
+            # the terms `RELEASE_READ_INDEX` states.
+            models.Index(fields=["package", "-observed_at"], name=IDENTITY_RESOLUTION_READ_INDEX),
+        ]
+        constraints = [
+            # The biconditional: a row that reached the recorder records the
+            # confidence the package holds afterwards, and a row that did not
+            # records none of the recorder's facts. `state` and every column
+            # tested are NOT NULL, so this is always true or false and never the
+            # third thing a SQL CHECK can be.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(state=OutcomeState.OK) & ~models.Q(confidence_recorded=""))
+                    | (
+                        ~models.Q(state=OutcomeState.OK)
+                        & models.Q(
+                            confidence_recorded="",
+                            repository_url="",
+                            repository_key="",
+                            pypi_asked=False,
+                            pypi_found=False,
+                            pypi_source="",
+                            downgrade_refused=False,
+                        )
+                    )
+                ),
+                name=IDENTITY_RESOLUTION_FACTS_CONSTRAINT,
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return the state, the confidence and when it was observed.
+
+        Returns:
+            A one-line summary, read off `package_id` rather than off `package`
+            for the reason `SourceReleaseSnapshot.__str__` gives.
+
+        """
+        confidence = self.confidence_recorded or "nothing recorded"
+        scope = "no package" if self.package_id is None else f"package {self.package_id}"
+        when = "never" if self.observed_at is None else self.observed_at.isoformat()
+        return f"identity resolution for {scope}: {self.state}, {confidence}, at {when}"

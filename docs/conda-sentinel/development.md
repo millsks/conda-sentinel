@@ -493,8 +493,8 @@ different things.
 costs an afternoon.
 
 ```python
-reverse("conda_sentinel_api:package-health")   # /conda-sentinel/api/v1/packages/
-reverse("api:user-me")                          # /api/users/me/
+reverse("conda_sentinel_api:package-health")  # /conda-sentinel/api/v1/packages/
+reverse("api:user-me")  # /api/users/me/
 ```
 
 ### An unknown version says so
@@ -595,9 +595,10 @@ API call `health_queryset` rather than each building one.
 ```python
 from conda_sentinel.core.serializer_fields import StatusField
 
+
 class CellSerializer(serializers.Serializer):
-    status = StatusField()          # never null, never blank, never absent
-    note = serializers.CharField(allow_blank=True)   # a field with no value: blank is fine
+    status = StatusField()  # never null, never blank, never absent
+    note = serializers.CharField(allow_blank=True)  # a field with no value: blank is fine
 ```
 
 `unknown` is one of `CPM-FR-5`'s five outcomes and it is the load-bearing one — it is

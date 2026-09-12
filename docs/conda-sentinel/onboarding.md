@@ -189,8 +189,10 @@ codebase's habit of arguing a decision where the decision lives.
 
 ## Part 3 — Where the data actually comes from
 
-Ten collectors, ten evidence tables, one collector per table. Nothing else in the
-system may write to an evidence table.
+Eleven collectors, eleven evidence tables, one collector per table. Nothing else in
+the system may write to an evidence table — and one collector, the identity
+resolver, additionally writes *identity*, through the one door `CPM-AD-14` leaves
+open.
 
 | Collector | Evidence table | Reads | Freshness target |
 |---|---|---|---|
@@ -204,6 +206,7 @@ system may write to an evidence table.
 | `license` | `LicenseFinding` | `https://api.anaconda.org/package/…` | 2 days |
 | `python_readiness` | `PythonReadinessAssessment` | `https://pypi.org/pypi/…` | 14 days |
 | `py314_verification` | `PythonVerificationResult` | **a build backend you declare** | 30 days |
+| `resolve_identity` | `IdentityResolutionSnapshot` | `https://raw.githubusercontent.com/conda-forge/feedstock-outputs/…` and `https://pypi.org/pypi/…` | 2 days |
 
 Three of those say *you declare*. **They ship with no source and observe nothing until
 you configure one.** That is deliberate: this component will not pick a security feed
@@ -223,6 +226,7 @@ it end to end now.
 
 ```python
 from conda_sentinel.core.registry import registered_collectors
+
 for collector in registered_collectors():
     print(collector.name, collector.evidence_model.__name__, collector.freshness_target)
 ```
@@ -250,7 +254,7 @@ pixi run local-stack
 brings up Redis and PostgreSQL in Docker and then runs all four together.
 [What that costs and why it uses non-default ports](running-it.md#the-full-local-stack).
 
-Then read [Asynchronous work](asynchronous-work.md) — the four queues, all thirteen
+Then read [Asynchronous work](asynchronous-work.md) — the four queues, all fourteen
 tasks, what beat actually fires, and the two tasks **nothing fires**, which is the
 single most surprising thing in this system.
 

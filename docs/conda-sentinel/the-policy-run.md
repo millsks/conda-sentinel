@@ -42,8 +42,8 @@ filled in.
 
 ## 3 — Collection
 
-One collector, one upstream, one question. Ten of them, each writing its own evidence
-table.
+One collector, one upstream, one question. Eleven of them, each writing its own
+evidence table.
 
 Three properties, and each is a decision:
 
