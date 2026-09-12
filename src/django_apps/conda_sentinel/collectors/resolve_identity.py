@@ -333,9 +333,9 @@ PROJECT_URLS_FIELD: Final[str] = "project_urls"
 REPOSITORY_PRECEDENCE: Final[tuple[str, ...]] = ("Source", "Source Code", "Repository", "Code", "GitHub")
 HOMEPAGE_KEY: Final[str] = "Homepage"
 #: The well-known issue-tracker labels, consulted after `Homepage` and only when
-#: the link is `github.com/<owner>/<repo>/issues`: GitHub issues live in the
-#: repository, so that path names it without inference. Any other tracker is not
-#: a repository.
+#: the link is `github.com/<owner>/<repo>` or `github.com/<owner>/<repo>/issues`:
+#: GitHub issues live in the repository, so either path names it without
+#: inference. Any other tracker is not a repository.
 ISSUES_KEYS: Final[tuple[str, ...]] = ("Issues", "Issue Tracker", "Bug Tracker", "Tracker")
 _ISSUES_SEGMENT: Final[str] = "issues"
 
@@ -757,9 +757,9 @@ def normalised_label(key: str) -> str:
 def _issues_repository(url: object) -> str | None:
     """Return the repository an issue-tracker link names, or `None`.
 
-    Pure. Only `github.com/<owner>/<repo>/issues` counts: the `issues` segment
-    is what says the link is the repository's own tracker rather than some
-    other page under the owner.
+    Pure. `github.com/<owner>/<repo>` and `github.com/<owner>/<repo>/issues`
+    both count -- `sqlalchemy` labels the repository root itself `Issue
+    Tracker` -- and nothing else under the owner does.
 
     Args:
         url: The value, as the document spelled it.
@@ -775,9 +775,11 @@ def _issues_repository(url: object) -> str | None:
     except ValueError:
         return None
     segments = [segment for segment in parts.path.split("/") if segment]
-    if len(segments) != _REPOSITORY_SEGMENTS + 1 or segments[-1].lower() != _ISSUES_SEGMENT:
+    if len(segments) == _REPOSITORY_SEGMENTS + 1 and segments[-1].lower() == _ISSUES_SEGMENT:
+        segments = segments[:-1]
+    if len(segments) != _REPOSITORY_SEGMENTS:
         return None
-    return normalised_repository(urlunsplit((parts.scheme, parts.netloc, "/".join(segments[:-1]), "", "")))
+    return normalised_repository(urlunsplit((parts.scheme, parts.netloc, "/".join(segments), "", "")))
 
 
 def _tracker_repository(by_key: Mapping[str, tuple[str, str]]) -> ChosenRepository | None:

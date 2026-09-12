@@ -193,9 +193,9 @@ document changes them.
 against the stack, 2026-09-12). The first live run left nine of a hundred unresolved; two were the
 resolver's: `xarray` labels its repository `source-code`, which PEP 753's normalisation (lower-case,
 strip everything but letters and digits) makes the same label as `Source Code`; and `sqlalchemy`
-publishes only `Issue Tracker: github.com/sqlalchemy/sqlalchemy/issues`, whose `/issues` path names
+publishes only `Issue Tracker: github.com/sqlalchemy/sqlalchemy/`, and a github.com owner/repo -- root or `/issues` -- under a tracker label names
 the repository without inference. So keys are compared by normalised label, and the well-known
-tracker labels are consulted last, only for `github.com/<owner>/<repo>/issues`. The other seven
+tracker labels are consulted last, only for a github.com owner/repo or its `/issues` page. The other seven
 (`numba`, `protobuf`, `hypercorn` publish no repository; `git`, `sqlite`, `redis-py`, `pytorch` have
 no PyPI project under the conda name) are honest `not_found`s.
 

@@ -546,32 +546,34 @@ def test_keys_are_matched_on_their_pep_753_label_the_way_pypi_reads_them(key: st
 
 
 def test_a_repositorys_own_github_issue_tracker_names_it_when_nothing_else_does() -> None:
-    """`sqlalchemy` publishes only an `Issue Tracker`; its `/issues` path names the repository without inference."""
-    chosen = repository_from(
+    """`sqlalchemy` publishes only an `Issue Tracker`, and it is the repository root; an `/issues` path counts too."""
+    root = repository_from(
         {
             "Documentation": "https://docs.sqlalchemy.org",
             "Homepage": "https://www.sqlalchemy.org",
-            "Issue Tracker": "https://github.com/sqlalchemy/sqlalchemy/issues",
+            "Issue Tracker": "https://github.com/sqlalchemy/sqlalchemy/",
         },
     )
+    issues = repository_from({"Issues": "https://github.com/sqlalchemy/sqlalchemy/issues"})
 
-    assert chosen.key == "Issue Tracker"
-    assert chosen.normalised == "https://github.com/sqlalchemy/sqlalchemy"
+    assert root.key == "Issue Tracker"
+    assert root.normalised == "https://github.com/sqlalchemy/sqlalchemy"
+    assert issues.normalised == "https://github.com/sqlalchemy/sqlalchemy"
     assert ISSUES_KEYS == ("Issues", "Issue Tracker", "Bug Tracker", "Tracker")
 
 
 @pytest.mark.parametrize(
     "tracker",
     [
-        "https://github.com/psf/requests",
+        "https://github.com/psf",
         "https://github.com/psf/requests/pulls",
         "https://gitlab.com/x/y/-/issues",
         "https://bugs.python.org/",
         "https://github.com/psf/requests/issues/42",
     ],
 )
-def test_an_issue_tracker_that_is_not_a_repositorys_own_github_issues_page_names_nothing(tracker: str) -> None:
-    """Only `github.com/<owner>/<repo>/issues` counts; a bare repository under an issues label is not read as one."""
+def test_an_issue_tracker_that_is_not_a_repository_or_its_own_github_issues_page_names_nothing(tracker: str) -> None:
+    """Only `github.com/<owner>/<repo>` and its `/issues` page count; nothing else under the owner does."""
     chosen = repository_from({"Issues": tracker})
 
     assert chosen.normalised == ""
