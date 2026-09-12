@@ -173,15 +173,29 @@ queue holding two items looks like a queue.
     `unknown` follow, and they are worth telling apart:
 
     - **Delayed** — observed by the stack's own sweeps, on their own cadence and
-      under their own allowances. `pypi_release` is daily at 60 requests a minute,
+      under their own allowances. **No sweep fires when the stack starts**: beat's
+      interval entries start their clock when they are created, so a daily sweep first
+      fires a day after the stack first came up and a weekly one a week after. On day
+      one nothing observes anything unless you dispatch it by hand — one
+      `cpm.collect.sweep` per collector, from a shell carrying the stack's environment:
+
+      ```bash
+      DATABASE_URL="postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" \
+      REDIS_URL="redis://localhost:6380/0" CELERY_TASK_ALWAYS_EAGER=0 \
+      pixi run -e dev python manage.py shell -c "
+      from conda_sentinel.collectors.tasks import collect_sweep
+      for name in ('pypi_release', 'feedstock', 'python_readiness', 'source_release'):
+          collect_sweep.delay(collector=name)
+      "
+      ```
+
+      Then the allowances set the pace. `pypi_release` is 60 requests a minute,
       charged four per collection, so a sweep gets through about fifteen packages a
-      minute and the rest are refused as rate-limited until the next day.
-      `source_release` is daily at **60 an hour**, charged four per collection — about
-      fifteen packages an hour, so the 98 resolved packages take several daily sweeps
-      to cover. `feedstock` and `python_readiness` are **weekly**; their first sweep
-      fires when the stack starts. Until each has reached a package, feedstock
-      presence, upstream-release currency and Python 3.14 readiness read
-      <span class="cs-state unknown">unknown</span>.
+      minute and the rest are refused as rate-limited until the next sweep.
+      `source_release` is **60 an hour**, charged four per collection — about fifteen
+      packages an hour, so the 98 resolved packages take several sweeps to cover.
+      Until each has reached a package, feedstock presence, upstream-release currency
+      and Python 3.14 readiness read <span class="cs-state unknown">unknown</span>.
     - **Unreachable on the local stack at all** — published-conda currency needs
       `CPM_MONITORED_CHANNELS`, which is empty; 3.14 verification is only ever
       triggered by hand. So `not_applicable` on the readiness column, `awaiting_build`

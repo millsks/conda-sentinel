@@ -174,7 +174,7 @@ compared with itself). Feedstock presence, upstream-release currency and Python 
 `unknown` until the stack's sweeps observe them, and that takes longer than minutes: `source_release`
 is daily at 60 requests an hour charged `1 + retries` per collection, so about fifteen packages an
 hour and several daily sweeps to cover 98; `pypi_release` is daily at 60 a minute on the same charge;
-`feedstock` and `python_readiness` are weekly, their first sweep firing at stack start.
+`feedstock` and `python_readiness` are weekly. **No sweep fires at stack start** -- beat's interval entries start their clock when created (verified: `last_run None`, `total 0` on a fresh stack), so day one needs a hand dispatch, which `running-it.md` now gives.
 Published-conda and 3.14 verification stay `unknown` locally -- the first needs
 `CPM_MONITORED_CHANNELS`, the second is only ever triggered by hand -- so `not_applicable`,
 `awaiting_build` and priority `p8`/`p9` are never reached on the local stack. That is the product's
