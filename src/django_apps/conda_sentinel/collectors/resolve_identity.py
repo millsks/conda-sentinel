@@ -108,6 +108,7 @@ from typing import TYPE_CHECKING
 from typing import ClassVar
 from typing import Final
 from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from django.db import models
 from django.db import transaction
@@ -158,6 +159,7 @@ __all__ = [
     "HOMEPAGE_KEY",
     "INDEX_LISTS_NONE_DETAIL",
     "INFO_FIELD",
+    "ISSUES_KEYS",
     "MAX_DOCUMENT_CHARACTERS",
     "NO_PYPI_PROJECT_DETAIL",
     "NO_REPOSITORY_DETAIL",
@@ -188,6 +190,7 @@ __all__ = [
     "conda_purl",
     "feedstocks_in",
     "index_locator",
+    "normalised_label",
     "normalised_name",
     "normalised_repository",
     "project_locator",
@@ -322,11 +325,23 @@ INFO_FIELD: Final[str] = "info"
 PROJECT_URLS_FIELD: Final[str] = "project_urls"
 
 #: The `project_urls` keys that name a source repository, in the order one is
-#: chosen, and the one key consulted only when none of them is present. Matched
-#: case-insensitively on the stripped key; see the module docstring for why a
-#: key outside this list never wins.
+#: chosen, and the two consulted only when none of them is present. Keys are
+#: matched on their PEP 753 normalised label -- lower-cased, with every
+#: character that is not a letter or a digit removed -- so `source-code`,
+#: `Source_Code` and `Source Code` are one label, which is how PyPI itself reads
+#: them. See the module docstring for why a key outside these lists never wins.
 REPOSITORY_PRECEDENCE: Final[tuple[str, ...]] = ("Source", "Source Code", "Repository", "Code", "GitHub")
 HOMEPAGE_KEY: Final[str] = "Homepage"
+#: The well-known issue-tracker labels, consulted after `Homepage` and only when
+#: the link is `github.com/<owner>/<repo>/issues`: GitHub issues live in the
+#: repository, so that path names it without inference. Any other tracker is not
+#: a repository.
+ISSUES_KEYS: Final[tuple[str, ...]] = ("Issues", "Issue Tracker", "Bug Tracker", "Tracker")
+_ISSUES_SEGMENT: Final[str] = "issues"
+
+#: What is not a letter or a digit, removed when a `project_urls` label is
+#: normalised (PEP 753).
+_NOT_LABEL: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
 
 #: The path segments that lead *into* a repository rather than naming one, and
 #: are stripped with everything after them.
@@ -723,15 +738,80 @@ def normalised_repository(url: object) -> str | None:
     return f"https://{GITHUB_WEB_HOST}/{owner}/{repository.removesuffix(_GIT_SUFFIX)}"
 
 
+def normalised_label(key: str) -> str:
+    """Return a `project_urls` key as the label PyPI compares it by (PEP 753).
+
+    Pure. Lower-cased, with every character that is not a letter or a digit
+    removed, so `Source Code`, `source-code` and `Source_Code` are one label.
+
+    Args:
+        key: The key, as the document spelled it.
+
+    Returns:
+        The normalised label; empty for a key with no letter or digit in it.
+
+    """
+    return _NOT_LABEL.sub("", key.lower())
+
+
+def _issues_repository(url: object) -> str | None:
+    """Return the repository an issue-tracker link names, or `None`.
+
+    Pure. Only `github.com/<owner>/<repo>/issues` counts: the `issues` segment
+    is what says the link is the repository's own tracker rather than some
+    other page under the owner.
+
+    Args:
+        url: The value, as the document spelled it.
+
+    Returns:
+        The normalised repository URL, or `None`.
+
+    """
+    if not isinstance(url, str):
+        return None
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    segments = [segment for segment in parts.path.split("/") if segment]
+    if len(segments) != _REPOSITORY_SEGMENTS + 1 or segments[-1].lower() != _ISSUES_SEGMENT:
+        return None
+    return normalised_repository(urlunsplit((parts.scheme, parts.netloc, "/".join(segments[:-1]), "", "")))
+
+
+def _tracker_repository(by_key: Mapping[str, tuple[str, str]]) -> ChosenRepository | None:
+    """Return the repository the first well-known issue-tracker label names, or `None`.
+
+    Args:
+        by_key: The document's links, keyed by normalised label.
+
+    Returns:
+        The choice, or `None` when no tracker label is present or none names a
+        repository's own GitHub issues page.
+
+    """
+    for wanted in ISSUES_KEYS:
+        entry = by_key.get(normalised_label(wanted))
+        if entry is None:
+            continue
+        key, url = entry
+        normalised = _issues_repository(url)
+        if normalised is not None:
+            return ChosenRepository(key=key.strip(), url=url.strip(), normalised=normalised)
+    return None
+
+
 def repository_from(project_urls: Mapping[str, str]) -> ChosenRepository:
     """Choose the source repository a project's `project_urls` names, by the documented precedence.
 
     Pure. See the module docstring for the rule: the first key of
     `REPOSITORY_PRECEDENCE` that is present wins, readable or not; `Homepage` is
-    consulted only when none of them is, and only counts when it normalises.
-    Keys are matched after stripping and lower-casing, and when two of the
-    document's keys collapse to one that way the first in document order is the
-    one read.
+    consulted only when none of them is, and only counts when it normalises;
+    one of `ISSUES_KEYS` is consulted last, and only counts when it is the
+    repository's own GitHub tracker. Keys are matched on their PEP 753
+    normalised label, and when two of the document's keys collapse to one that
+    way the first in document order is the one read.
 
     Args:
         project_urls: The document's `project_urls`, as `project_urls_in` read
@@ -745,9 +825,9 @@ def repository_from(project_urls: Mapping[str, str]) -> ChosenRepository:
     for key, value in project_urls.items():
         # First occurrence in document order wins when two keys collapse to one
         # after stripping and lower-casing, so the choice is deterministic.
-        by_key.setdefault(key.strip().lower(), (key, value))
+        by_key.setdefault(normalised_label(key), (key, value))
     for wanted in REPOSITORY_PRECEDENCE:
-        entry = by_key.get(wanted.lower())
+        entry = by_key.get(normalised_label(wanted))
         if entry is None:
             continue
         key, url = entry
@@ -761,20 +841,29 @@ def repository_from(project_urls: Mapping[str, str]) -> ChosenRepository:
                 ),
             )
         return ChosenRepository(key=key.strip(), url=url.strip(), normalised=normalised)
-    homepage = by_key.get(HOMEPAGE_KEY.lower())
+    homepage = by_key.get(normalised_label(HOMEPAGE_KEY))
     if homepage is not None:
         key, url = homepage
         normalised = normalised_repository(url)
         if normalised is not None:
             return ChosenRepository(key=key.strip(), url=url.strip(), normalised=normalised)
+    tracker = _tracker_repository(by_key)
+    if tracker is not None:
+        return tracker
+    if homepage is not None:
+        key, url = homepage
         return ChosenRepository(
             detail=(
-                f"{NO_REPOSITORY_DETAIL}: the project labels none of {list(REPOSITORY_PRECEDENCE)} and its "
-                f"{key.strip()!r} link is not a GitHub repository because {_repository_fault(url)}"
+                f"{NO_REPOSITORY_DETAIL}: the project labels none of {list(REPOSITORY_PRECEDENCE)}, its "
+                f"{key.strip()!r} link is not a GitHub repository because {_repository_fault(url)}, and no "
+                f"issue tracker names one"
             ),
         )
     return ChosenRepository(
-        detail=f"{NO_REPOSITORY_DETAIL}: the project labels none of {list(REPOSITORY_PRECEDENCE)} and no homepage",
+        detail=(
+            f"{NO_REPOSITORY_DETAIL}: the project labels none of {list(REPOSITORY_PRECEDENCE)}, no homepage, and "
+            f"no issue tracker names one"
+        ),
     )
 
 

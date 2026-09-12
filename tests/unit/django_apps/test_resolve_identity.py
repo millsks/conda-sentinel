@@ -42,6 +42,7 @@ from conda_sentinel.collectors.resolve_identity import FEEDSTOCK_OUTPUTS_HOST
 from conda_sentinel.collectors.resolve_identity import GITHUB_WEB_HOSTS
 from conda_sentinel.collectors.resolve_identity import HOMEPAGE_KEY
 from conda_sentinel.collectors.resolve_identity import INDEX_LISTS_NONE_DETAIL
+from conda_sentinel.collectors.resolve_identity import ISSUES_KEYS
 from conda_sentinel.collectors.resolve_identity import MAX_DOCUMENT_CHARACTERS
 from conda_sentinel.collectors.resolve_identity import NO_PYPI_PROJECT_DETAIL
 from conda_sentinel.collectors.resolve_identity import NO_REPOSITORY_DETAIL
@@ -67,6 +68,7 @@ from conda_sentinel.collectors.resolve_identity import ResolutionLocatorError
 from conda_sentinel.collectors.resolve_identity import conda_purl
 from conda_sentinel.collectors.resolve_identity import feedstocks_in
 from conda_sentinel.collectors.resolve_identity import index_locator
+from conda_sentinel.collectors.resolve_identity import normalised_label
 from conda_sentinel.collectors.resolve_identity import normalised_name
 from conda_sentinel.collectors.resolve_identity import normalised_repository
 from conda_sentinel.collectors.resolve_identity import project_locator
@@ -523,12 +525,74 @@ def test_homepage_is_used_only_when_no_higher_key_is_present_and_it_is_a_reposit
     assert "requests.readthedocs.io" in not_a_repository.detail
 
 
-def test_a_key_outside_the_list_never_wins_however_github_shaped_its_value() -> None:
-    """A `Bug Tracker` pointing at GitHub is not a source repository."""
-    chosen = repository_from({"Bug Tracker": "https://github.com/psf/requests/issues", "Funding": "https://x.y"})
+def test_a_key_outside_the_lists_never_wins_however_github_shaped_its_value() -> None:
+    """A `Changelog` pointing into GitHub is not a source repository."""
+    chosen = repository_from(
+        {"Changelog": "https://github.com/psf/requests/blob/main/HISTORY.md", "Funding": "https://x.y"},
+    )
 
     assert chosen == ChosenRepository(detail=chosen.detail)
     assert chosen.detail.startswith(NO_REPOSITORY_DETAIL)
+
+
+@pytest.mark.parametrize("key", ["Source Code", "source-code", "Source_Code", "SOURCECODE", " source  code "])
+def test_keys_are_matched_on_their_pep_753_label_the_way_pypi_reads_them(key: str) -> None:
+    """`xarray` labels its repository `source-code`; PyPI treats that and `Source Code` as one label."""
+    chosen = repository_from({"homepage": "https://xarray.dev/", key: "https://github.com/pydata/xarray"})
+
+    assert chosen.key == key.strip()
+    assert chosen.normalised == "https://github.com/pydata/xarray"
+    assert normalised_label(key) == "sourcecode"
+
+
+def test_a_repositorys_own_github_issue_tracker_names_it_when_nothing_else_does() -> None:
+    """`sqlalchemy` publishes only an `Issue Tracker`; its `/issues` path names the repository without inference."""
+    chosen = repository_from(
+        {
+            "Documentation": "https://docs.sqlalchemy.org",
+            "Homepage": "https://www.sqlalchemy.org",
+            "Issue Tracker": "https://github.com/sqlalchemy/sqlalchemy/issues",
+        },
+    )
+
+    assert chosen.key == "Issue Tracker"
+    assert chosen.normalised == "https://github.com/sqlalchemy/sqlalchemy"
+    assert ISSUES_KEYS == ("Issues", "Issue Tracker", "Bug Tracker", "Tracker")
+
+
+@pytest.mark.parametrize(
+    "tracker",
+    [
+        "https://github.com/psf/requests",
+        "https://github.com/psf/requests/pulls",
+        "https://gitlab.com/x/y/-/issues",
+        "https://bugs.python.org/",
+        "https://github.com/psf/requests/issues/42",
+    ],
+)
+def test_an_issue_tracker_that_is_not_a_repositorys_own_github_issues_page_names_nothing(tracker: str) -> None:
+    """Only `github.com/<owner>/<repo>/issues` counts; a bare repository under an issues label is not read as one."""
+    chosen = repository_from({"Issues": tracker})
+
+    assert chosen.normalised == ""
+    assert chosen.detail.startswith(NO_REPOSITORY_DETAIL)
+
+
+def test_a_higher_key_still_wins_over_an_issue_tracker_and_a_homepage_repository_beats_it() -> None:
+    """The fallback is last: `Homepage` that normalises wins over `Issues`, and any precedence key wins over both."""
+    homepage_first = repository_from(
+        {"Issues": "https://github.com/a/a/issues", "Homepage": "https://github.com/b/b"},
+    )
+    source_first = repository_from(
+        {
+            "Issues": "https://github.com/a/a/issues",
+            "Homepage": "https://github.com/b/b",
+            "Source": "https://github.com/c/c",
+        },
+    )
+
+    assert homepage_first.normalised == "https://github.com/b/b"
+    assert source_first.normalised == "https://github.com/c/c"
 
 
 def test_an_unreadable_source_link_is_recorded_as_rejected_with_the_url_and_why() -> None:

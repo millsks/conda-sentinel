@@ -189,6 +189,16 @@ every call -- so a transient PyPI failure recorded as `error` would un-select a 
 two PyPI-backed kinds re-assert what the package currently holds; only a real 404 or a readable
 document changes them.
 
+**Labels are matched the way PyPI matches them, and a repository's own tracker counts** (run
+against the stack, 2026-09-12). The first live run left nine of a hundred unresolved; two were the
+resolver's: `xarray` labels its repository `source-code`, which PEP 753's normalisation (lower-case,
+strip everything but letters and digits) makes the same label as `Source Code`; and `sqlalchemy`
+publishes only `Issue Tracker: github.com/sqlalchemy/sqlalchemy/issues`, whose `/issues` path names
+the repository without inference. So keys are compared by normalised label, and the well-known
+tracker labels are consulted last, only for `github.com/<owner>/<repo>/issues`. The other seven
+(`numba`, `protobuf`, `hypercorn` publish no repository; `git`, `sqlite`, `redis-py`, `pytorch` have
+no PyPI project under the conda name) are honest `not_found`s.
+
 **Repository choice.** `_PRECEDENCE = ("Source", "Source Code", "Repository", "Code", "GitHub")`,
 matched case-insensitively on the stripped key; then `Homepage` only if it normalises. Keys outside
 the list never win, however github-shaped their value.
