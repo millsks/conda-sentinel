@@ -198,27 +198,29 @@ On a *demo* component it is mostly not, and it is worth knowing why before you t
 | Collector | Against the seeded demo inventory |
 |---|---|
 | `inventory` | **Fails.** `watchlist.csv` ships with no rows, on purpose |
-| `source_release` | Records `not_found` for every package — the demo's repository URLs are fixtures (`https://github.com/demo/<name>`) |
-| `pypi_release`, `python_readiness` | Genuinely work. The demo's purls are real (`pkg:pypi/django`), so these query pypi.org and get real answers |
-| `feedstock` | Mostly works — the demo's feedstock URLs follow conda-forge's real naming |
-| `resolve_identity` | Selects the two packages the seeder leaves `unmapped` (`internal-telemetry-sdk` and `internal-feature-flags`; the rest are seeded `verified` and never offered a downgrade) and **makes a live call** to `raw.githubusercontent.com` for each — conda-forge has no entry for either, so each ends in a `not_found` sentinel row and nothing is recorded on the package |
+| `resolve_identity` | **Already ran, at seed time, for all hundred.** `stack-seed` runs it inline over every package against the real conda-forge index and the real PyPI project document, so a fresh seed already carries the repository, purls and feedstocks each source stated — and a `not_found` row for the two `internal-*` packages conda-forge has no entry for. The daily sweep then re-offers all 98 `inventory-derived` packages at once, and under the real allowance (60 requests a minute, charged four per collection) about fifteen get through and the rest are refused as rate-limited — they show as `failed` runs on the Coverage screen that day, which is expected rather than a fault, and each is offered again the next day. The ones that do run read the same documents and record nothing new |
+| `source_release`, `pypi_release`, `feedstock`, `python_readiness` | Genuinely work, because the mappings they select on were observed rather than seeded: `source_release` reads the repository PyPI named, `feedstock` reads the feedstock conda-forge listed. These are the sweeps that turn the `unknown` a fresh seed shows for upstream currency, feedstock presence and readiness into real verdicts |
 | `conda_package`, `license` | Observe nothing. Both need `CPM_MONITORED_CHANNELS`, which is empty |
 | `vulnerability`, `kev`, `py314_verification` | Observe nothing. Each needs a source you declare |
 
-So a sweep over the demo gives you a Coverage screen that is *partly* honest and an
-evidence log with real observations mixed into fixtures.
+So a sweep over the demo gives you a Coverage screen that is honest for the
+collectors that ran and `never run` for the ones that need a source you have not
+declared — and an evidence log in which every row names a source somebody can open.
 
-!!! danger "Do not hand-trigger a collector sweep against the demo inventory"
+!!! danger "A collector sweep writes permanent observations"
 
     Every one of those rows writes **real observations into an append-only log**, on
-    top of the demo evidence you were looking at. `CPM-AD-2` means none of it can be
-    taken back: the `not_found` a `source_release` sweep records about
-    `github.com/demo/django` is permanent, and every replayed policy run reads it.
+    top of the seeded evidence you were looking at. `CPM-AD-2` means none of it can be
+    taken back: what a `source_release` sweep records about `django`'s repository
+    today is permanent, and every replayed policy run reads it. That is the product
+    working as designed — the seed no longer plants anything a sweep would contradict
+    — but it is worth knowing before you trigger one by hand that you are adding to
+    the record rather than refreshing it.
 
-    If you want to see collection work, the honest way is a **real watchlist** — even
-    a three-row one — and a `cpm.collect.inventory` run before any sweep. If you only
-    wanted to prove the worker is alive, send `cpm.policy.run` instead: it computes,
-    and it writes no evidence at all.
+    If you want to see collection work over an inventory of your own, the honest way
+    is a **real watchlist** — even a three-row one — and a `cpm.collect.inventory`
+    run before any sweep. If you only wanted to prove the worker is alive, send
+    `cpm.policy.run` instead: it computes, and it writes no evidence at all.
 
 ### Two tasks nothing fires
 

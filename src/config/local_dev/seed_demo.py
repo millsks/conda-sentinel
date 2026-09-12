@@ -24,8 +24,20 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger("config.local_dev.se
 def main() -> dict[str, object]:
     """Set up Django, seed the demo inventory, and record what was written.
 
+    The completion event carries the seeder's whole summary: the policy version
+    the run applied, the rollup row count, the inline `resolve_identity` pass's
+    four counts, and what the shipped parameter file leaves unconfigured. The
+    counts are what to read first. A healthy seed against the network says
+    `not_on_conda_forge=2` -- the two `internal-*` names, which conda-forge has no
+    entry for -- and `unreachable=0`; every package `unreachable` is the resolver
+    telling you it could not reach conda-forge or PyPI, or was refused by one of
+    them, not the seed failing, and a second seed once they answer resolves it.
+    `verified_kept` counts packages a person has set `verified`, which a re-seed
+    leaves alone.
+
     Returns:
-        What was seeded, and what the shipped parameter file leaves unconfigured.
+        What was seeded, the resolution counts, and what the shipped parameter
+        file leaves unconfigured.
 
     Raises:
         ImproperlyConfigured: The run is not local. Propagated rather than rendered

@@ -8,7 +8,8 @@ service running** — no Postgres, no Redis, no identity provider.
 ```bash
 pixi install                    # the environment
 pixi run migrate                # SQLite, locally
-pixi run -e dev seed-demo       # a hundred packages, their evidence, and a policy run
+# a hundred packages, their evidence, a live identity resolution, and a policy run
+pixi run -e dev seed-demo
 pixi run runserver              # http://localhost:8000/
 ```
 
@@ -80,10 +81,13 @@ nothing.
 
 ## What the seeder does, and how
 
-It writes a hundred packages and **evidence** for them — release snapshots, advisories, a
-KEV cross-reference, licence findings, readiness assessments, feedstock snapshots —
-and then **runs a real policy pass** over them. A hundred rollup rows, at the shipped
-policy version, in about two seconds.
+It writes a hundred packages as `unmapped` shells, runs the real `resolve_identity`
+collector over every one of them — live, against conda-forge's index and PyPI — and
+then writes **evidence** with a real source behind each row: advisories, a KEV
+cross-reference, licence findings where the roster states a licence, and a PyPI
+release snapshot for each package the resolver has just found on PyPI. Then it
+**runs a real policy pass** over all of it. A hundred rollup rows, at the shipped
+policy version, in about half a minute online.
 
 The distinction that matters: **it writes no derived status directly.** `CPM-AD-10`
 gives the application layer no write path to one, so the seeder produces evidence and
@@ -108,12 +112,11 @@ conda-forge ships that are **not Python at all** (git, nodejs, cmake, ffmpeg, sq
 well known and less so, because a roster of household names would not show you what an
 unfamiliar package looks like on these screens.
 
-They are chosen to put something in every state: an advisory whose fix conda-forge
-already ships and one where no fix exists, a licence needing review, packages behind
-upstream, an inactive feedstock and an absent one, a package proven not to build on
-Python 3.14, a lookup that broke, and two internal packages nothing can identify, so
-you can see what <span class="cs-state unknown">unknown</span> looks like across a
-whole row.
+They are chosen to put something in every state the seeded evidence can honestly
+reach: advisories matched and none matched, a KEV listing and its absence, a licence
+needing review and one nothing declared, and two internal packages conda-forge has no
+entry for, so you can see what <span class="cs-state unknown">unknown</span> looks
+like across a whole row.
 
 A hundred rather than ten so the screens are judged as screens: at ten rows nothing
 paginates, every table fits above the fold, sorting is instant on any design, and a
@@ -130,8 +133,60 @@ queue holding two items looks like a queue.
     lists software known to be exploited in the wild, and almost nothing on PyPI is in
     it.
 
-    Everything around them is a fixture: no collector ran, no build was performed, and
-    the versions on a package with no advisory are plausible rather than observed.
+    The versions and licences beside them are what PyPI and conda-forge stated when
+    the roster was written. **Nothing else in the roster is asserted.** Which
+    repository a package lives in, what its purls are and whether conda-forge has a
+    feedstock for it are *observed* at seed time: the seeder runs the real
+    `resolve_identity` collector over every package, live against conda-forge's
+    `feedstock-outputs` index and PyPI's project document, so `django` carries
+    `https://github.com/django/django` because PyPI said so and the two `internal-*`
+    packages are `unmapped` because conda-forge said there is no such package.
+
+!!! note "A fresh seed needs the network, and shows `unknown` where nothing has looked yet"
+
+    `seed-demo` and `stack-seed` reach `raw.githubusercontent.com` and `pypi.org`
+    for every package — about two hundred back-to-back requests to two public hosts,
+    because the seed runs the resolver **unmetered** (the daily sweep keeps the real
+    allowance). A healthy seed prints
+
+    ```
+    resolved=98 not_on_conda_forge=2 unreachable=0 verified_kept=0
+    ```
+
+    `not_on_conda_forge=2` is the two `internal-*` names, which the index has no
+    entry for; it is the healthy number. Anything `unreachable` is a source that
+    could not be asked or that refused — a `429` from either host lands a package
+    there — and that package stays `unmapped` until a **second seed** resolves it
+    (which appends a second observation of everything else, as any re-seed does).
+    Offline, the seed still completes: after three refused connections in a row the
+    resolver stops asking, the summary reports `unreachable=100`, one warning names
+    each package it asked about and one says how many it did not, and every package
+    stays `unmapped` with every verdict gated
+    <span class="cs-state unknown">unknown</span>. `verified_kept` counts packages a
+    person has set `verified` since the last seed, which a re-seed leaves alone.
+
+    What a fresh seed shows on first paint is exactly what has been observed: identity
+    real, advisories real. The PyPI surface of currency reads
+    <span class="cs-state ok">current</span> **by construction**: PyPI is the only
+    surface seeded, so the authority is being compared with itself; the comparison
+    means something only once another surface has been observed. Two kinds of
+    `unknown` follow, and they are worth telling apart:
+
+    - **Delayed** — observed by the stack's own sweeps, on their own cadence and
+      under their own allowances. `pypi_release` is daily at 60 requests a minute,
+      charged four per collection, so a sweep gets through about fifteen packages a
+      minute and the rest are refused as rate-limited until the next day.
+      `source_release` is daily at **60 an hour**, charged four per collection — about
+      fifteen packages an hour, so the 98 resolved packages take several daily sweeps
+      to cover. `feedstock` and `python_readiness` are **weekly**; their first sweep
+      fires when the stack starts. Until each has reached a package, feedstock
+      presence, upstream-release currency and Python 3.14 readiness read
+      <span class="cs-state unknown">unknown</span>.
+    - **Unreachable on the local stack at all** — published-conda currency needs
+      `CPM_MONITORED_CHANNELS`, which is empty; 3.14 verification is only ever
+      triggered by hand. So `not_applicable` on the readiness column, `awaiting_build`
+      on remediation and priority buckets `p8`/`p9` never appear locally, whatever you
+      wait for.
 
 !!! note "One column still comes out flat, deliberately"
 
@@ -147,6 +202,12 @@ queue holding two items looks like a queue.
     at an *older* version still produces
     <span class="cs-state unknown">unknown</span> buckets — which is the point of
     versioning the rules rather than the code.
+
+    On a fresh seed most of the ten cannot fire anyway: every rule that conditions
+    on remediation readiness, feedstock presence or Python readiness is conditioning
+    on a surface nothing has observed yet, so the 28 vulnerable packages land in
+    `p3` and the other 72 read <span class="cs-state unknown">unknown</span> until
+    the sweeps above have run.
 
 ## Running a policy pass yourself
 
@@ -211,7 +272,7 @@ of the request, and inline execution hides every consequence of that.
 For the real shape:
 
 ```bash
-pixi run -e dev stack-seed    # containers, migrations, personas and demo data
+pixi run -e dev stack-seed    # containers, migrations, personas, demo data, live identity resolution
 pixi run local-stack          # web, worker, beat, flower
 ```
 
@@ -244,7 +305,10 @@ finish), and then runs `docker-down`.
     Seeding one and starting the other gives you a product with no packages and — more
     confusingly — **no personas**, so there is no way to sign in and discover that it
     is empty. That is what `stack-seed` is for: it migrates and seeds the database the
-    stack is about to serve, in one command.
+    stack is about to serve, in one command, and resolves every package's identity
+    live on the way — so it needs the network, and a fresh stack shows real
+    repositories and feedstocks on first paint and `unknown` for what its sweeps have
+    not yet observed.
 
     `local-stack` migrates on its own (`depends-on`), so a fresh clone finds a schema.
     It deliberately does **not** seed: evidence is append-only, so a stack that seeded

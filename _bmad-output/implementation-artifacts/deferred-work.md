@@ -13,3 +13,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/stories/cpm-identity-s08-resolution-finds-its-mappings.md`
   summary: The collector name `resolve_identity` is also a work-type vocabulary value (`policies/outcomes.py`, `surface/tone.py:143`), so the two share one derived label and tone on different screens.
   evidence: Both vocabularies are keyed by bare value and `test_no_label_carries_the_slug_separator` sweeps them into one set, so the collision is invisible to the tests; renaming either is a vocabulary change with its own migration.
+- source_spec: `_bmad-output/implementation-artifacts/stories/cpm-platform-s08-the-demo-asserts-nothing-it-never-observed.md`
+  summary: A name-keyed resolution reads whatever PyPI project shares a conda package's name, so `nodejs`, `ffmpeg` and `ripgrep` (unrelated PyPI projects exist) can be recorded with an unrelated repository and `pkg:pypi/<name>`.
+  evidence: The resolver asks PyPI by the canonical name and has no package-type or cross-ecosystem source to refuse a coincidence; the demo roster's native packages make it visible. Closing it is the cross-ecosystem mapping (`CROSS_ECOSYSTEM`, today always `not_found`) or a package-type source, neither of which a seeder change can supply.

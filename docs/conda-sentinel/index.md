@@ -68,7 +68,8 @@ disagree with the API, because both call the same projection.
 
 The consequence worth knowing before you deploy: **nothing is derived until a policy
 run happens.** A freshly seeded database shows `unknown` everywhere, correctly, until
-one does.
+one does — and even the local demo seed, which runs one, shows `unknown` for anything
+its sweeps have not yet observed rather than a value nobody measured.
 
 ## Identity gates everything
 

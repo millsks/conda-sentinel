@@ -51,8 +51,9 @@ pixi run local-stack
 That is the **real product**: Redis and PostgreSQL in containers, then gunicorn with
 the deployed worker class, a Celery worker draining all four queues, beat scheduling
 the sweeps, and flower watching it. `stack-seed` brings the containers up, migrates
-the database and puts a hundred packages and six personas in it; `local-stack` starts
-the four processes.
+the database, puts a hundred packages and six personas in it and resolves every
+package's identity live against conda-forge and PyPI (so it needs the network);
+`local-stack` starts the four processes.
 
 !!! tip "Start with the whole stack, not just the web process"
 
@@ -91,10 +92,16 @@ system.
 
 ### 1.2 What you are looking at
 
-The hundred packages are a **fixture** — but not entirely. The advisory identifiers,
-severities and affected ranges are real, taken from OSV.dev, and the single KEV
-listing is a real CISA catalogue entry. Look one up. The versions on packages with no
-advisory are plausible rather than observed. [What the seeder does, and
+The hundred package *names* are a roster; almost nothing else on the screen is. The
+advisory identifiers, severities and affected ranges are real, taken from OSV.dev,
+and the single KEV listing is a real CISA catalogue entry — look one up. Each
+package's repository, purls and feedstock were **observed at seed time** by the real
+`resolve_identity` collector reading conda-forge's index and PyPI's project document,
+which is why `django` points at `github.com/django/django` and why two `internal-*`
+names are `unmapped`: conda-forge has no entry for them. The versions and licences
+are what PyPI and conda-forge stated when the roster was written; the daily sweeps
+observe the current ones. Anything the sweeps have not observed yet reads `unknown`
+rather than a value nobody measured. [What the seeder does, and
 how](running-it.md#what-the-seeder-does-and-how).
 
 Nothing on those screens was written by the seeder directly. It wrote *evidence* and
@@ -170,8 +177,12 @@ blank cell is ambiguous — it could mean "nothing to report" — and this produ
 to produce ambiguity in the column that says how worried to be.
 
 **Exercise.** Find `internal-telemetry-sdk` on the packages screen. Every status on it
-is `unknown` and its confidence chip says `unmapped`. It is also the only reason the
-identity queue has anything in it.
+is `unknown` and its confidence chip says `unmapped` — and it is unmapped because
+conda-forge has no such package: the seeder ran the real `resolve_identity` collector
+over it, the index answered `404`, and the evidence log holds that `not_found` row.
+It and `internal-feature-flags` are the only reason the identity queue has anything
+in it. Then find `django`: its repository is `https://github.com/django/django`
+because PyPI said so, not because a fixture did.
 
 ### 2.4 Policy is versioned, and runs are replayable
 

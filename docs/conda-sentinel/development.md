@@ -41,14 +41,43 @@ ships that are not Python at all, which is where `not_applicable` comes from.
 
 **The advisories are real**: identifier, severity and affected range come from
 OSV.dev, and the single KEV listing is a real CISA catalogue entry with its real date.
-Everything around them is a fixture.
+The versions and licences are what PyPI and conda-forge stated. Nothing else in the
+roster is asserted — a roster row is exactly a name, a version pair, an advisory, a
+KEV listing and a licence, and a unit test pins that shape.
 
-**It writes evidence, never a verdict.** Every status the seeded screens show was
-concluded by the pass that owns it, from the parameter file that ships. Identity
-goes through `resolve_package_shell` and `record_resolution` (`CPM-AD-14`,
-`CPM-AD-25`), never `Package.objects.create` — so the unmapped package in the demo
-is genuinely unmapped and the confidence gate blanking its row is the gate working,
-not a fixture imitating it.
+**It writes evidence, never a verdict, and asserts nothing it never observed.**
+Every status the seeded screens show was concluded by the pass that owns it, from
+the parameter file that ships. Identity goes through `resolve_package_shell` only
+(`CPM-AD-14`, `CPM-AD-25`), never `Package.objects.create` and never
+`record_resolution`: every package is seeded as a shell at `unmapped`, and the real
+`resolve_identity` collector is then run inline over all hundred, live against
+conda-forge's index and PyPI, so the repositories, purls and feedstocks on the
+screens are what the sources said. The two `internal-*` packages are unmapped
+because conda-forge has no entry for them, and the confidence gate blanking their
+rows is the gate working, not a fixture imitating it. Feedstock presence,
+upstream-release currency and Python readiness read `unknown` on a fresh seed until
+the stack's sweeps observe them — the seed no longer paints them.
+
+**It needs the network, and copes without it.** Online it takes about half a minute
+and makes roughly two hundred back-to-back requests to `raw.githubusercontent.com`
+and `pypi.org`, because the resolver runs *unmetered* at seed time — the daily sweep
+keeps the real allowance. A healthy seed prints `resolved=98 not_on_conda_forge=2
+unreachable=0 verified_kept=0`: the two `not_on_conda_forge` are the `internal-*`
+names conda-forge has no entry for, and that is the healthy number. A `429` from
+either host lands a package `unreachable` and `unmapped`; the recovery is a second
+seed, which appends a second observation of everything else. Offline, after three
+refused connections in a row the resolver stops asking, the summary reports
+`unreachable=100`, one warning names each package asked about and one says how many
+were not, and the seed still completes with a policy run. `verified_kept` counts
+packages a person has set `verified` since the last seed, which a re-seed never
+re-resolves. The integration suite seeds through a scripted transport and never
+opens a socket.
+
+The evidence it writes follows what the resolver found: a PyPI release snapshot only
+for a package whose release-ecosystem mapping the resolver just established (so
+`git` and `sqlite` carry none), a licence finding only where the roster states a
+licence (a blank one seeds nothing, not a `not_found` claiming conda-forge was
+asked), and an advisory and KEV row for every package.
 
 Two consequences worth expecting:
 
@@ -56,8 +85,9 @@ Two consequences worth expecting:
   records `license_rules = []` deliberately — PRD Open Question 4 — so that column is
   inert until someone records a rule set at a new version. `priority_rules` was empty
   the same way until `2026.09.4` recorded ten, so priority buckets are real from that
-  version on and seven of the ten fire on this roster. The seeder reads which
-  parameters are still empty off the version it ran, rather than saying it in prose.
+  version on; which of the ten fire depends on what the sweeps have observed since
+  the seed. The seeder reads which parameters are still empty off the version it
+  ran, rather than saying it in prose.
 - **Running it twice appends.** Evidence is append-only (`CPM-AD-2`), so a second
   run adds a second observation of each fact rather than replacing the first. That
   is realistic, and it is what gives the package detail view's superseded-evidence

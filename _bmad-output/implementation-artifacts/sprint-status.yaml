@@ -40,7 +40,7 @@
 # exists, not that its contents are final.
 
 generated: 09-02-2026 18:00
-last_updated: 09-12-2026 14:00
+last_updated: 09-12-2026 17:30
 project: conda-package-supply-chain-monitor
 project_key: CPM
 tracking_system: file-system
@@ -56,6 +56,7 @@ development_status:
   cpm-platform-s05-a-hundred-packages-real-advisories: done
   cpm-platform-s06-the-stack-seeds-what-it-serves: done
   cpm-platform-s07-a-sign-in-goes-somewhere-that-exists: done
+  cpm-platform-s08-the-demo-asserts-nothing-it-never-observed: done
   epic-platform-retrospective: optional
 
   # CPM-EP-EVIDENCE: An evidence log that cannot lie
