@@ -668,6 +668,20 @@ def test_two_spellings_of_one_repository_are_one_feedstock() -> None:
         "not json",
         "[" * 100_000 + "]" * 100_000,
     ],
+    ids=[
+        "feedstocks-is-a-string",
+        "feedstocks-is-null",
+        "no-feedstocks-field",
+        "feedstock-is-a-number",
+        "feedstock-is-blank",
+        "feedstock-has-a-slash",
+        "feedstock-wider-than-its-column",
+        "document-is-a-list",
+        "not-json",
+        # Named rather than derived: the derived id is the 200,000-character
+        # document, which Windows refuses to put in `PYTEST_CURRENT_TEST`.
+        "nested-past-the-recursion-limit",
+    ],
 )
 def test_an_index_entry_whose_shape_has_changed_is_refused_rather_than_read_past(body: str) -> None:
     """The matrix's malformed row: `ResolutionDocumentError`, which the base turns into an `error` row.
