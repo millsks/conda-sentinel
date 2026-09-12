@@ -103,6 +103,7 @@ EVIDENCE_MODEL_LABELS: Final[frozenset[str]] = frozenset(
     {
         "collectors.CondaPackageSnapshot",
         "collectors.FeedstockSnapshot",
+        "collectors.IdentityResolutionSnapshot",
         "collectors.InventorySnapshot",
         "collectors.KevFinding",
         "collectors.LicenseFinding",

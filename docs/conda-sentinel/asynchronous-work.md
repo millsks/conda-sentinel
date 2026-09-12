@@ -78,7 +78,7 @@ captured.
 
 ## Every task
 
-Thirteen, and the name is the routing:
+Fourteen, and the name is the routing:
 
 | Task | Queue | What it does |
 |---|---|---|
@@ -92,6 +92,7 @@ Thirteen, and the name is the routing:
 | `cpm.collect.kev` | `collect` | Whether those advisories are in the KEV catalogue |
 | `cpm.collect.license` | `collect` | One package's declared licence |
 | `cpm.collect.python_readiness` | `collect` | Static Python 3.14 assessment from metadata |
+| `cpm.collect.resolve_identity` | `collect` | Resolves one package's mappings from conda-forge's feedstock-outputs index and PyPI, and records them through `identity` |
 | `cpm.verify.py314_build` | `verify` | Actually builds one package against 3.14 |
 | `cpm.policy.run` | `policy` | One policy run over the whole inventory |
 | `cpm.export.run` | `export` | Produces one report export a person asked for |
@@ -109,10 +110,11 @@ worked.
 
 ## What beat actually fires
 
-Eight entries, one per **per-package** collector, each firing the one dispatcher:
+Nine entries, one per **per-package** collector, each firing the one dispatcher:
 
 | Entry | Collector | Every | Offset |
 |---|---|---|---|
+| `cpm-sweep-resolve-identity` | `resolve_identity` | 1 day | — |
 | `cpm-sweep-source-release` | `source_release` | 1 day | — |
 | `cpm-sweep-pypi-release` | `pypi_release` | 1 day | — |
 | `cpm-sweep-conda-package` | `conda_package` | 1 day | — |
@@ -124,6 +126,13 @@ Eight entries, one per **per-package** collector, each firing the one dispatcher
 
 The three offsets exist for different reasons — KEV reads what the vulnerability
 collector wrote, and the other two share a host with a sweep on the same tick.
+The identity resolver carries none, deliberately: the four sweeps that select on
+the mappings it records — `source_release`, `pypi_release` and `feedstock` on the
+same tick, `python_readiness` three hours later — select nothing it has not yet
+resolved, so on the first day they select nothing and on the next they select
+everything it resolved. A one-cadence lag for the three, and the same lag or a
+same-day catch-up for `python_readiness` depending on how fast the resolver's
+tasks drain, stated here rather than closed with a fourth offset.
 [The full argument, and what the offsets do not
 buy](operations.md#the-schedule-is-data-and-it-is-reconciled-against-the-collectors-at-start-up).
 
@@ -136,9 +145,9 @@ days out of seven with every gate green.
 
 ### A running beat does not mean anything has run
 
-The eight entries above are **intervals, not clock times**. `django_celery_beat` gives a
+The nine entries above are **intervals, not clock times**. `django_celery_beat` gives a
 new entry a `last_run_at` of "now" when it first registers it, so **the first fire is one
-whole interval later** — a day for the six daily sweeps, a week for the two weekly ones.
+whole interval later** — a day for the seven daily sweeps, a week for the two weekly ones.
 
 So on a stack you started a minute ago:
 
@@ -149,7 +158,7 @@ cpm-sweep-vulnerability    enabled=True  interval=every 86400 seconds  last_run=
 ```
 
 Everything is healthy. Nothing has run. The Coverage screen will say **never run** for
-all ten collectors, and that is the screen working: the only runs in the ledger are the
+all eleven collectors, and that is the screen working: the only runs in the ledger are the
 seeder's, filed under `local-dev-demo-seed`, which is deliberately not a registered
 collector name so that seeding cannot make a real collector look healthy.
 
@@ -192,6 +201,7 @@ On a *demo* component it is mostly not, and it is worth knowing why before you t
 | `source_release` | Records `not_found` for every package — the demo's repository URLs are fixtures (`https://github.com/demo/<name>`) |
 | `pypi_release`, `python_readiness` | Genuinely work. The demo's purls are real (`pkg:pypi/django`), so these query pypi.org and get real answers |
 | `feedstock` | Mostly works — the demo's feedstock URLs follow conda-forge's real naming |
+| `resolve_identity` | Selects the two packages the seeder leaves `unmapped` (`internal-telemetry-sdk` and `internal-feature-flags`; the rest are seeded `verified` and never offered a downgrade) and **makes a live call** to `raw.githubusercontent.com` for each — conda-forge has no entry for either, so each ends in a `not_found` sentinel row and nothing is recorded on the package |
 | `conda_package`, `license` | Observe nothing. Both need `CPM_MONITORED_CHANNELS`, which is empty |
 | `vulnerability`, `kev`, `py314_verification` | Observe nothing. Each needs a source you declare |
 
@@ -223,8 +233,8 @@ evidence log with real observations mixed into fixtures.
     happen.
 
 The reason it is like this rather than broken: cadence is data. `django_celery_beat`'s
-`DatabaseScheduler` rewrites the eight entries above from settings on every beat start
-— those eight are a *declaration*, and changing one is a pull request. But a schedule
+`DatabaseScheduler` rewrites the nine entries above from settings on every beat start
+— those nine are a *declaration*, and changing one is a pull request. But a schedule
 entry that settings does not declare lives in the database tables and survives. So the
 intended path is:
 

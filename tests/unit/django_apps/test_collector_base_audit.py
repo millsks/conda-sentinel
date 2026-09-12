@@ -360,6 +360,15 @@ THE_LICENSE_COLLECTOR: Final[str] = "django_apps/conda_sentinel/collectors/licen
 #: `CPM-AD-7` forbids that read and this collector does not take it, which
 #: `MODULES_PERMITTED_TO_READ_ANOTHER_COLLECTORS_EVIDENCE` holds it to by name.
 THE_READINESS_COLLECTOR: Final[str] = "django_apps/conda_sentinel/collectors/python_readiness.py"
+
+#: `CPM-IDENTITY-S08`'s collector, and the ninth remote reader. Named for the
+#: reasons the first eight are, and for one more: it is the first collector that
+#: *writes* outside its own evidence table -- through `identity`'s
+#: `record_resolution`, inside a transaction it opens itself -- so it is the
+#: module where a reader most needs to see that the transaction sits inside
+#: `translate` and never around the run recorder, and that the two hosts it reads
+#: are reached through the injected transport and nothing it opened for itself.
+THE_RESOLUTION_COLLECTOR: Final[str] = "django_apps/conda_sentinel/collectors/resolve_identity.py"
 THE_NEW_MODULES: Final[tuple[str, ...]] = (
     "django_apps/conda_sentinel/core/collection.py",
     THE_CONDA_PACKAGE_COLLECTOR,
@@ -371,6 +380,7 @@ THE_NEW_MODULES: Final[tuple[str, ...]] = (
     THE_PYPI_COLLECTOR,
     THE_READINESS_COLLECTOR,
     THE_RELEASE_COLLECTOR,
+    THE_RESOLUTION_COLLECTOR,
     THE_RESPONSE_CACHE,
     THE_SWEEP_DISPATCH,
     THE_TRANSPORT,

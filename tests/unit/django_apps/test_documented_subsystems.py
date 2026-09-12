@@ -205,7 +205,7 @@ def test_the_two_unscheduled_tasks_are_still_unscheduled() -> None:
 
 
 def test_every_scheduled_entry_is_in_the_beat_table() -> None:
-    """Eight sweeps, and an operator reads this table to know what should have run.
+    """Nine sweeps, and an operator reads this table to know what should have run.
 
     An entry missing from it is a nightly job nobody knows to look for when it stops.
     """
@@ -337,7 +337,7 @@ def test_the_primer_names_every_collector_and_the_table_it_writes() -> None:
     """Part 3's table is a reader's index of where the data comes from.
 
     A collector missing from it is a source somebody does not know is being read --
-    which matters here more than usual, because three of the ten ship with no source
+    which matters here more than usual, because three of the eleven ship with no source
     declared and observe nothing until an operator configures one. Somebody who never
     learned a collector exists never learns theirs is inert.
     """
@@ -356,7 +356,7 @@ def test_the_primer_names_every_collector_and_the_table_it_writes() -> None:
 def test_the_primer_is_honest_about_which_collectors_ship_without_a_source() -> None:
     """The three that observe nothing until configured are the ones to say so about.
 
-    A primer that listed all ten as though they worked out of the box would send a new
+    A primer that listed all eleven as though they worked out of the box would send a new
     maintainer looking for a bug in the vulnerability column, which is reading
     `unknown` for the honest reason.
     """

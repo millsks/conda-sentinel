@@ -94,6 +94,7 @@ from conda_sentinel.collectors.models import InventorySnapshot
 from conda_sentinel.collectors.py314_verification import Py314VerificationCollector
 from conda_sentinel.collectors.pypi_release import PyPIReleaseCollector
 from conda_sentinel.collectors.python_readiness import PythonReadinessCollector
+from conda_sentinel.collectors.resolve_identity import IdentityResolutionCollector
 from conda_sentinel.collectors.source_release import SourceReleaseCollector
 from conda_sentinel.collectors.sweep import SWEEP_TASK_NAME
 from conda_sentinel.collectors.sweep import dispatch
@@ -133,6 +134,7 @@ __all__ = [
     "COLLECT_LICENSE_TASK_NAME",
     "COLLECT_PYPI_RELEASE_TASK_NAME",
     "COLLECT_PYTHON_READINESS_TASK_NAME",
+    "COLLECT_RESOLVE_IDENTITY_TASK_NAME",
     "COLLECT_SOURCE_RELEASE_TASK_NAME",
     "COLLECT_VULNERABILITY_TASK_NAME",
     "INGEST_TASK_NAME",
@@ -162,6 +164,7 @@ __all__ = [
     "ingest_inventory",
     "inventory_adapter",
     "records_in",
+    "resolve_identity",
     "verify_py314_build",
     "withdraw_inventory_adapter",
 ]
@@ -237,6 +240,14 @@ COLLECT_LICENSE_TASK_NAME: Final[str] = "cpm.collect.license"
 #: work and belongs where collection work goes; `CPM-PY314-S02` declares the
 #: `cpm.verify.` name.
 COLLECT_PYTHON_READINESS_TASK_NAME: Final[str] = "cpm.collect.python_readiness"
+
+#: The identity-resolution task's declared name, on the same terms
+#: (`CPM-IDENTITY-S08`, `CPM-FR-1`): the `cpm.collect.` namespace routes it to
+#: the `collect` queue, and the name is the collector's. It reads two public
+#: documents and hands what it found to `identity`'s recorder, which is
+#: collection work whatever it writes afterwards -- and `CPM-AD-20` puts every
+#: automated resolver that calls out on this queue through the shared base.
+COLLECT_RESOLVE_IDENTITY_TASK_NAME: Final[str] = "cpm.collect.resolve_identity"
 
 #: The Python 3.14 verification task's declared name, and the first task this
 #: module declares outside the `cpm.collect.` namespace (`CPM-PY314-S02`,
@@ -1769,6 +1780,56 @@ def collect_python_readiness(*, package_id: int, force: bool = False) -> str:
         return str(collector.collect(package_id=package_id, force=force).state.value)
 
 
+@shared_task(name=COLLECT_RESOLVE_IDENTITY_TASK_NAME)  # type: ignore[untyped-decorator]
+def resolve_identity(*, package_id: int, force: bool = False) -> str:
+    """Resolve one package's mappings from conda-forge's index and PyPI (`CPM-FR-1`).
+
+    Package-scoped on the same terms as the collection tasks above: one package
+    per task (`CPM-AD-7`), one package's ledger row (`CPM-AD-23`), and no
+    transport passed -- the base builds one from the collector's declared
+    timeout and retry count.
+
+    What is different is what the run *writes*. Every other collector's evidence
+    is its own table and nothing else; this one hands what it found to
+    `identity`'s `record_resolution` -- the one door `CPM-AD-14` leaves open --
+    and its evidence row is the record of what each source said and what was
+    chosen. The recording and the row's construction share one per-package
+    transaction the collector opens inside `translate`, nested inside the run
+    recorder and never around it.
+
+    It declares **no schedule and no time limit**: cadence is data in
+    `django_celery_beat` (`CPM-AD-20`, `CPM-NFR-2`) and the inherited limits are
+    settings' (`CPM-AD-9`). `cpm-sweep-resolve-identity` is what fires it.
+
+    Args:
+        package_id: The package to resolve, by the integer primary key
+            `CPM-AD-3` fixes. Keyword only, as every per-package task's is.
+        force: Bypass the observation window, for `CPM-UJ-1`'s manually triggered
+            recollection.
+
+    Returns:
+        How the run ended, as the `RunState` value the ledger row carries.
+
+    Raises:
+        RunLedgerError: When `package_id` names no package. The recorder checks
+            the key before it writes the opening row (`CPM-EVIDENCE-S09`), so
+            this leaves nothing behind at all.
+        ResolutionLocatorError: When the package's row cannot be resolved through
+            the recorder -- a blank source or key -- or its name cannot be turned
+            into a locator. The ledger row is finalized `failed` carrying the
+            reason.
+        ResolutionDocumentError: When conda-forge's index served something that
+            is not an index entry. An `error` evidence row is written first and
+            the ledger row is `failed`; nothing is recorded on the package.
+        ResolutionError: When the recorder refuses what it was handed. The
+            per-package transaction is rolled back, an `error` row is written
+            and the ledger row is `failed`.
+
+    """
+    with IdentityResolutionCollector(clock=SystemClock()) as collector:
+        return str(collector.collect(package_id=package_id, force=force).state.value)
+
+
 @shared_task(name=VERIFY_PY314_TASK_NAME)  # type: ignore[untyped-decorator]
 def verify_py314_build(*, package_id: int) -> str:
     """Build and import one package under Python 3.14 and record what happened (`CPM-FR-14`).
@@ -1874,7 +1935,7 @@ def collect_sweep(*, collector: str) -> str:
     module that takes a *collector* rather than a package. What it does is
     `collectors/sweep.py`'s dispatch: select, enqueue in chunks, and finalize one
     run-ledger row scoped to no package. It collects nothing itself and makes no
-    outbound call, so nothing about the eight collectors' guarantees changes: every
+    outbound call, so nothing about the nine collectors' guarantees changes: every
     observation is still written by the per-package task through the collector
     base, in that package's own transaction and under that package's own ledger
     row (`CPM-AD-23`).

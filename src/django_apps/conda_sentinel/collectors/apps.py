@@ -218,6 +218,7 @@ class CollectorsConfig(AppConfig):
         from conda_sentinel.collectors.py314_verification import Py314VerificationCollector  # noqa: PLC0415
         from conda_sentinel.collectors.pypi_release import PyPIReleaseCollector  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.python_readiness import PythonReadinessCollector  # noqa: PLC0415 - see above
+        from conda_sentinel.collectors.resolve_identity import IdentityResolutionCollector  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.source_release import SourceReleaseCollector  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.sweep import cadence_reconciliation_fault  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.tasks import InventoryIngestionCollector  # noqa: PLC0415 - see above
@@ -241,6 +242,7 @@ class CollectorsConfig(AppConfig):
             LicenseCollector,
             PythonReadinessCollector,
             Py314VerificationCollector,
+            IdentityResolutionCollector,
         ):
             if registrations().get(collector.name) is not collector:
                 register(collector)

@@ -77,6 +77,7 @@ from conda_sentinel.collectors.license import COLLECTOR_NAME as LICENSE_NAME
 from conda_sentinel.collectors.py314_verification import COLLECTOR_NAME as PY314_VERIFICATION_NAME
 from conda_sentinel.collectors.pypi_release import COLLECTOR_NAME as PYPI_RELEASE_NAME
 from conda_sentinel.collectors.python_readiness import COLLECTOR_NAME as PYTHON_READINESS_NAME
+from conda_sentinel.collectors.resolve_identity import COLLECTOR_NAME as RESOLVE_IDENTITY_NAME
 from conda_sentinel.collectors.source_release import COLLECTOR_NAME as SOURCE_RELEASE_NAME
 from conda_sentinel.collectors.sweep import COLLECTOR_KWARG
 from conda_sentinel.collectors.sweep import SWEEP_TASK_NAME
@@ -254,13 +255,14 @@ def test_the_registry_this_repository_ships_passes_condition_ten() -> None:
     second, `CPM-CURRENCY-S02` the third, `CPM-CURRENCY-S03` the fourth,
     `CPM-CURRENCY-S04` the fifth, `CPM-SECURITY-S01` the sixth,
     `CPM-SECURITY-S02` the seventh, `CPM-SECURITY-S03` the eighth,
-    `CPM-PY314-S01` the ninth and `CPM-PY314-S02` the tenth, so the
-    registry a deployed boot sweeps is no longer empty: `CollectorsConfig.ready()`
-    registers inventory ingestion, upstream release collection, PyPI release
-    collection, feedstock collection, published-conda-package collection,
-    vulnerability collection, KEV cross-referencing, licence collection, static
-    Python-readiness assessment and Python 3.14 verification during
-    `django.setup()`, and the sweep meets all ten on every boot in this tree.
+    `CPM-PY314-S01` the ninth, `CPM-PY314-S02` the tenth and `CPM-IDENTITY-S08`
+    the eleventh, so the registry a deployed boot sweeps is no longer empty:
+    `CollectorsConfig.ready()` registers inventory ingestion, upstream release
+    collection, PyPI release collection, feedstock collection,
+    published-conda-package collection, vulnerability collection, KEV
+    cross-referencing, licence collection, static Python-readiness assessment,
+    Python 3.14 verification and identity resolution during `django.setup()`,
+    and the sweep meets all eleven on every boot in this tree.
     That is asserted rather than assumed, and both halves matter -- the roster is
     what it is meant to be, and stage two passes over it without a fixture in
     sight.
@@ -300,6 +302,7 @@ def test_the_registry_this_repository_ships_passes_condition_ten() -> None:
             LICENSE_NAME,
             PYTHON_READINESS_NAME,
             PY314_VERIFICATION_NAME,
+            RESOLVE_IDENTITY_NAME,
         ],
     )
 
@@ -352,9 +355,9 @@ def _schedule_with(*entries: tuple[str, timedelta | None]) -> dict[str, dict[str
     """Return the shipped `CELERY_BEAT_SCHEDULE` plus one dispatch entry per pair.
 
     **Built on top of the shipped schedule rather than replacing it**, and that is
-    forced rather than tidy: all ten real collectors are registered in this
-    process and eight of them declare a cadence, so a schedule that dropped their
-    entries would make every case here refuse for eight reasons it was not written
+    forced rather than tidy: all eleven real collectors are registered in this
+    process and nine of them declare a cadence, so a schedule that dropped their
+    entries would make every case here refuse for nine reasons it was not written
     about. What each case configures is
     one *additional* disagreement.
 

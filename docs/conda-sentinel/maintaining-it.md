@@ -65,8 +65,8 @@ reaches the pull request every time.
 The one that recurs, twice in a single day at one point:
 
 ```python
-str(path.relative_to(root))     # "a\b" on Windows, "a/b" everywhere else
-path.relative_to(root).as_posix()   # always "a/b"
+str(path.relative_to(root))  # "a\b" on Windows, "a/b" everywhere else
+path.relative_to(root).as_posix()  # always "a/b"
 ```
 
 **Any test comparing a path as a string uses `as_posix()`.** Same for `parametrize`

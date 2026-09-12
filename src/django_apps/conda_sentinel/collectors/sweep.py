@@ -3,20 +3,21 @@
 `CPM-NFR-1` asks for "full-inventory collection at 10,000 packages ... without
 manual batching" and `CPM-FR-15` for "a collector failure leaves every other
 collector's run unaffected and the overall run reported as partial success, not
-failure". **Seven collectors are registered and six of them are swept one package
-at a time** -- the seventh, inventory ingestion, is run-scoped and reads one
-document naming many packages (`CPM-AD-25`), so a dispatch refuses it by name.
-Those six are what this module runs, and it is deliberately the smallest thing
-that can: **a dispatch never collects.**
+failure". **Eleven collectors are registered and nine of them are swept one
+package at a time** -- inventory ingestion is run-scoped and reads one document
+naming many packages (`CPM-AD-25`), so a dispatch refuses it by name, and Python
+3.14 verification is triggered rather than swept and declares no cadence. Those
+nine are what this module runs, and it is deliberately the smallest thing that
+can: **a dispatch never collects.**
 
-Wherever a count appears below, "registered" means the seven `collectors/apps.py`
-adopts and "swept" means the six that declare a cadence and a selection.
+Wherever a count appears below, "registered" means the eleven `collectors/apps.py`
+adopts and "swept" means the nine that declare a cadence and a selection.
 `tests/integration/startup/test_stage_two_collector_registry.py` asserts both
 rosters.
 
 **Why a dispatch rather than a sweep.** `core/collection.py` already has a
 run-scoped `sweep()` for the one collector that reads a document naming many
-packages. The six swept here read one locator *per package*, so their sweep is
+packages. The nine swept here read one locator *per package*, so their sweep is
 not a
 bigger read -- it is *many runs*. Doing it inside one task would put ten thousand
 collections under one soft time limit and one ledger row, which is exactly what
@@ -65,13 +66,13 @@ second inventory on top of the first. Together those are what stop a source that
 cannot be drained inside its cadence from accumulating an unbounded queue.
 
 **Which packages a collector can be asked about is the collector's own
-knowledge.** Each of the six swept collectors already refuses, from `source_for`,
+knowledge.** Each of the nine swept collectors already refuses, from `source_for`,
 the packages it cannot answer about -- or, for the two security collectors', offers
 the whole inventory because each owes every package a row either way -- and each
 recorded that as a deferred item saying the selection belonged here. It is
 declared on the collector all the same (`Collector.selectable_packages`), because
 the set a collector can answer about is the complement of its own refusals: a
-table of six preconditions in *this* module would be a second place to edit
+table of nine preconditions in *this* module would be a second place to edit
 whenever a collector's refusals changed,
 and the two would diverge silently. What this module owns is the dispatch, not
 the predicate.
@@ -180,10 +181,10 @@ RESERVED_COLLECTOR_NAME: Final[str] = SWEEP_TASK_NAME.rpartition(NAME_SEPARATOR)
 COLLECTOR_KWARG: Final[str] = "collector"
 
 #: The keyword every per-package collection task takes its package under. Every
-#: one of the six swept collectors declares `def collect_x(*, package_id: int,
+#: one of the nine swept collectors declares `def collect_x(*, package_id: int,
 #: force: bool = False)`, keyword-only and deliberately so -- a dispatch that
 #: enqueued positionally could not be wrong about *which* argument, but it could
-#: be wrong about a task whose signature grew, and the six tasks say in as many
+#: be wrong about a task whose signature grew, and the nine tasks say in as many
 #: words
 #: that keyword-only is what stops a collection being enqueued for the wrong
 #: package.
@@ -322,7 +323,7 @@ def _streamed(collector: type[Collector], selection: Iterable[int]) -> Iterator[
     `CPM-NFR-1`'s ten thousand primary keys in memory whatever else this module
     does -- the cache is the queryset's, not the loop's. `.iterator()` is what
     turns it into a server-side stream, and it is applied here rather than inside
-    each collector so that the six selections stay ordinary querysets a case can
+    each collector so that the nine selections stay ordinary querysets a case can
     read and compare.
 
     **Anything that is already an iterator is taken as it is, and anything else is

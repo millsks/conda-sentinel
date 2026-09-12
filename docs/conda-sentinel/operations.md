@@ -44,7 +44,7 @@ deployed sweep.
 
 ## What every collector calls itself on the wire
 
-Each of the five collectors sends the same `User-Agent`, declared once in
+Every collector sends the same `User-Agent`, declared once in
 `src/django_apps/conda_sentinel/collectors/agent.py`. It is built from the
 **distribution name**, the version the running build reports and the project URL:
 
@@ -1170,15 +1170,87 @@ know how fast its answers actually go out of date.
 kind of evidence produced that answer, is a policy over this table and the static one
 beside it, and no such policy exists yet.
 
+## The identity resolver reads two public indexes, and is the one collector that writes identity
+
+`cpm.collect.resolve_identity` resolves a package's mappings (`CPM-FR-1`) by
+asking two hosts, in a fixed order. First conda-forge's **feedstock-outputs index**
+at `https://raw.githubusercontent.com/conda-forge/feedstock-outputs/main/outputs/…`,
+one small JSON file per package naming the feedstocks that build it; then PyPI's
+project document at `https://pypi.org/pypi/<name>/json`, for whether a project
+exists under the package's name and which of its `project_urls` is the source
+repository. It sends **no credential** to either — both are public and take none —
+and its declared allowance is sixty requests a minute, the same courtesy bound the
+PyPI collector declares.
+
+**The index is the base's call and PyPI is the second, and the order has a cost
+worth knowing.** The collector base makes exactly one fetch and, when that
+document is absent, writes the `not_found` row itself without reaching the
+collector's own code. On a conda watchlist a package is far more often on
+conda-forge and absent from PyPI than the reverse, so the index goes first — which
+means **a package absent from conda-forge's index has no PyPI identity resolved by
+this collector**. Its run records `not_found`, nothing is written to the package,
+and it is offered again next cadence. The `detail` on that row says PyPI was not
+asked.
+
+**The second call is neither cached nor charged to the allowance.** The base
+remembers and revalidates the index answer only, and charges `1 + retries` once,
+before the first call. The PyPI call inside the collector is retried by the same
+transport, spends none of the counter, and is re-transferred on every run — the
+same deferred gap `collectors/feedstock.py` records for its own second call. What
+that call *cannot* do is fail the run: a transport failure, a `304` to a request
+that carried no validator, or a document that cannot be read becomes a sentence in
+`detail` beside what the index established, and the row's `pypi_asked` column
+reads `False`.
+
+**A failure to ask PyPI never lowers what an earlier run established.** When PyPI
+could not be asked, the two PyPI-derived mappings — `release_ecosystem` and
+`source_repository` — re-assert whatever the package currently holds: an
+`established` outcome and its stored purl or URL are carried forward unchanged, and
+only a mapping that was not established records `error`. A real `404`, or a
+readable document naming no usable repository, still decides the mappings afresh.
+So a transient outage at pypi.org cannot take a package out of the sweeps that
+select on those mappings; `detail` says the mappings were re-asserted.
+
+**This is the only collector that writes `identity`, and it does so through one
+door.** Every other collector writes its own evidence table and nothing else. This
+one hands what the two documents established to `identity`'s `record_resolution`
+— the same function every automated resolution must use (`CPM-AD-14`) — which
+writes the package's mappings, its feedstock rows and one outcome row per mapping
+kind, and refuses to lower a `verified` package's confidence or to touch the pair
+the package is found by. The collector itself never saves a package, mapping or
+feedstock row. The confidence it claims is `inventory-derived` when anything was
+established and `unmapped` when nothing was; it corrects no name.
+
+**Its own table, `identity_resolution_snapshots`, is the evidence behind the
+review queue.** One row per package per run: which locator was read, whether PyPI
+answered and at which locator, which `project_urls` key won and what it normalised
+to, the feedstock names the index listed, and the confidence the package held once
+the recorder had finished. At a daily cadence that is **one row per package per
+day, and nothing prunes it**, on the same terms every evidence table here
+accumulates.
+
+**`downgrade_refused` on a row means a `verified` package was recollected by
+hand.** The sweep never offers a `verified` package — a person's identity is never
+offered a downgrade — but a manual `cpm.collect.resolve_identity` for one still
+runs, and the recorder records what was found while holding the confidence claim
+back. The row then carries `confidence_recorded = verified` and
+`downgrade_refused = True`: the findings landed, the person's verdict stood, and a
+reader can tell that from a row where the claim was simply accepted.
+
+**Which packages a sweep offers.** Every package whose package-identity confidence
+is not `verified`, excluding a shell no source claims — a blank `identity_source`
+or `associator_key` cannot be found by the recorder, so offering it would fail it on
+every sweep.
+
 ## The full-inventory sweep: what beat fires, and what it does not do
 
-**Ten collectors are registered and eight of them are swept one package at a
-time.** The ninth is inventory ingestion, which reads one document naming many
-packages and is deliberately absent from the schedule below. The tenth is Python 3.14
-verification, which is *triggered* rather than swept and is absent from the schedule
-for a different reason: it is not run across the inventory at all, by design, and a
-schedule entry naming it is refused at the first tick. Every count in this
-section is the eight unless it says otherwise. What runs those eight across the
+**Eleven collectors are registered and nine of them are swept one package at a
+time.** One of the other two is inventory ingestion, which reads one document naming
+many packages and is deliberately absent from the schedule below. The other is Python
+3.14 verification, which is *triggered* rather than swept and is absent from the
+schedule for a different reason: it is not run across the inventory at all, by
+design, and a schedule entry naming it is refused at the first tick. Every count in
+this section is the nine unless it says otherwise. What runs those nine across the
 whole inventory is one **dispatch** task, `cpm.collect.sweep`, fired by
 `django_celery_beat` once per collector at the cadence that collector declares
 (`CPM-NFR-1`, `CPM-FR-15`).
@@ -1187,10 +1259,10 @@ whole inventory is one **dispatch** task, `cpm.collect.sweep`, fired by
 packages it can be asked about, and enqueues one ordinary per-package collection
 task for each — `cpm.collect.source_release`, `cpm.collect.pypi_release`,
 `cpm.collect.feedstock`, `cpm.collect.conda_package`,
-`cpm.collect.vulnerability`, `cpm.collect.kev`, `cpm.collect.license` or
-`cpm.collect.python_readiness`, exactly the tasks a manual recollection uses. It
-makes no outbound call, writes no evidence and holds no transaction. Every
-guarantee described in the eight sections above therefore holds
+`cpm.collect.vulnerability`, `cpm.collect.kev`, `cpm.collect.license`,
+`cpm.collect.python_readiness` or `cpm.collect.resolve_identity`, exactly the tasks
+a manual recollection uses. It makes no outbound call, writes no evidence and holds
+no transaction. Every guarantee described in the sections above therefore holds
 unchanged under a sweep: one package per task, one package per ledger row, one
 package per transaction (`CPM-AD-23`).
 
@@ -1258,11 +1330,29 @@ The shipped pairs are:
 | `kev` | daily, offset one hour |
 | `license` | daily, offset two hours |
 | `python_readiness` | weekly, offset three hours |
+| `resolve_identity` | daily |
 
 The daily entries that carry no offset fire together, from one instant, and that is
 accepted rather than overlooked: a dispatch enqueues and returns, so what lands at
 once is a handful of cheap tasks rather than a handful of inventories of I/O, and
 the collections they enqueue are paced by each collector's own rate limiter.
+
+**The identity resolver carries no offset, and the four sweeps that depend on it
+run behind it.** `cpm-sweep-resolve-identity` is what records the mappings
+`source_release`, `pypi_release`, `feedstock` and `python_readiness` select on.
+The first three fire on the same daily tick it does, so on the day a package is
+first ingested they select nothing for it, and on the next day they select it with
+the mappings the resolver recorded the day before — one cadence behind.
+`python_readiness` fires three hours later, so its lag is the same when the
+resolver's tasks have not drained by then and nothing when they have. Closing the
+lag would mean a fourth phased entry, which is a change to the start-up
+reconciliation's own test and is not one this schedule makes. To resolve a fresh
+watchlist in one sitting, dispatch `cpm.collect.sweep` with
+`collector="resolve_identity"`, then **wait for the `collect` queue to drain** —
+watch it in Flower, or wait until every `resolve_identity` run in the ledger has
+left `running` — and only then dispatch the others. A dispatch only enqueues, so
+dispatching the four straight after the resolver reproduces the race: their
+selections run before the resolver's per-package tasks have recorded anything.
 
 **Three entries carry an offset, and for different reasons.** The KEV entry is
 offset by an hour because it cross-references what the vulnerability collector
@@ -1305,12 +1395,16 @@ has reached the mapping it reads, so a dispatch offers:
 | `kev` | **every package** — or none at all, until you declare a KEV source |
 | `license` | **every package** — or none at all, until you declare channels |
 | `python_readiness` | those whose release-ecosystem mapping is `established` **for PyPI** *and* whose recorded purl is a `pkg:pypi/…` one, or whose mapping is `not_applicable` |
+| `resolve_identity` | every package whose package-identity confidence is not `verified` and that a source has filed under a non-blank `(identity_source, associator_key)` — a person's identity is never offered a downgrade, and a shell the recorder cannot find is never offered at all |
 
 A package a collector would refuse is never enqueued, so its ledger does not fill
-with `failed` runs for every package nobody has resolved. **Until a resolver
-populates those mappings, the two release sweeps and the feedstock sweep will
-select few packages or none, and record that honestly as a `succeeded` dispatch
-with nothing enqueued.**
+with `failed` runs for every package nobody has resolved. **Until the identity
+resolver has populated those mappings, the two release sweeps and the feedstock
+sweep will select few packages or none, and record that honestly as a `succeeded`
+dispatch with nothing enqueued.** The resolver reads conda-forge's
+`feedstock-outputs` index first and PyPI second, so a package absent from that
+index has no PyPI identity resolved by it: its run records `not_found`, nothing is
+written to the package, and it is offered again next cadence.
 
 **The published-package sweep selects nothing until the two settings above are
 declared**, and that is deliberate rather than a gap. Its question applies to

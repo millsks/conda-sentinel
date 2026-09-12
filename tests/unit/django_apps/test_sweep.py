@@ -4,12 +4,13 @@ Everything about `collectors/sweep.py` that is decidable with no database, no
 broker and no clock. The dispatch itself opens a run-ledger row, so every case
 that *runs* one is in `tests/integration/django_apps/test_sweep.py`; what is here
 is the arithmetic and the shapes -- the derived task name, the chunking, the
-declared constants, the seven swept collectors' cadences, and the three places one
-name is spelled in two modules and has to agree. "Swept" is the seven that declare
-a cadence and a selection; the eighth registered collector, inventory ingestion, is
-run-scoped and a dispatch refuses it by name.
+declared constants, the nine swept collectors' cadences, and the three places one
+name is spelled in two modules and has to agree. "Swept" is the nine that declare
+a cadence and a selection; of the other two registered collectors, inventory
+ingestion is run-scoped and a dispatch refuses it by name, and Python 3.14
+verification is triggered rather than swept.
 
-**The seven swept collectors' selections are asserted here as queries rather than
+**The nine swept collectors' selections are asserted here as queries rather than
 as results.** `selectable_packages` answers with a lazy queryset, and a queryset's
 `model` and its `query` are readable without a database -- which is what lets the
 unit tier pin *which table each collector selects from and on what condition*,
@@ -57,6 +58,9 @@ from conda_sentinel.collectors.pypi_release import PyPIReleaseCollector
 from conda_sentinel.collectors.python_readiness import COLLECTOR_NAME as PYTHON_READINESS_NAME
 from conda_sentinel.collectors.python_readiness import READINESS_CADENCE
 from conda_sentinel.collectors.python_readiness import PythonReadinessCollector
+from conda_sentinel.collectors.resolve_identity import COLLECTOR_NAME as RESOLVE_IDENTITY_NAME
+from conda_sentinel.collectors.resolve_identity import RESOLUTION_CADENCE
+from conda_sentinel.collectors.resolve_identity import IdentityResolutionCollector
 from conda_sentinel.collectors.source_release import COLLECTOR_NAME as SOURCE_RELEASE_NAME
 from conda_sentinel.collectors.source_release import SOURCE_RELEASE_CADENCE
 from conda_sentinel.collectors.source_release import SourceReleaseCollector
@@ -80,6 +84,7 @@ from conda_sentinel.collectors.tasks import COLLECT_KEV_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECT_LICENSE_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECT_PYPI_RELEASE_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECT_PYTHON_READINESS_TASK_NAME
+from conda_sentinel.collectors.tasks import COLLECT_RESOLVE_IDENTITY_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECT_SOURCE_RELEASE_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECT_VULNERABILITY_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECTOR_NAME as INVENTORY_COLLECTOR_NAME
@@ -115,10 +120,10 @@ SWEEP_MODULE: Final[Path] = (
     Path(__file__).resolve().parents[3] / "src" / "django_apps" / "conda_sentinel" / "collectors" / "sweep.py"
 )
 
-#: The eight per-package collectors and the cadence each declares, as one table
-#: the cases below parametrize over. A tuple of triples rather than eight cases,
+#: The nine per-package collectors and the cadence each declares, as one table
+#: the cases below parametrize over. A tuple of triples rather than nine cases,
 #: because every one of the assertions is the same sentence about a different
-#: collector and writing it out eight times is how seven of them stop being
+#: collector and writing it out nine times is how eight of them stop being
 #: updated.
 PER_PACKAGE_COLLECTORS: Final[tuple[tuple[type[Collector], str, timedelta], ...]] = (
     (SourceReleaseCollector, SOURCE_RELEASE_NAME, SOURCE_RELEASE_CADENCE),
@@ -129,6 +134,7 @@ PER_PACKAGE_COLLECTORS: Final[tuple[tuple[type[Collector], str, timedelta], ...]
     (KevCollector, KEV_NAME, KEV_CADENCE),
     (LicenseCollector, LICENSE_NAME, LICENSE_CADENCE),
     (PythonReadinessCollector, PYTHON_READINESS_NAME, READINESS_CADENCE),
+    (IdentityResolutionCollector, RESOLVE_IDENTITY_NAME, RESOLUTION_CADENCE),
 )
 
 #: The calls a dispatch may not make, and each is a different rule.
@@ -203,6 +209,7 @@ def test_the_dispatch_task_takes_its_collector_under_the_keyword_the_module_name
         (KevCollector, COLLECT_KEV_TASK_NAME),
         (LicenseCollector, COLLECT_LICENSE_TASK_NAME),
         (PythonReadinessCollector, COLLECT_PYTHON_READINESS_TASK_NAME),
+        (IdentityResolutionCollector, COLLECT_RESOLVE_IDENTITY_TASK_NAME),
     ],
     ids=lambda value: getattr(value, "__name__", value),
 )
@@ -272,7 +279,7 @@ def test_the_base_defaults_leave_a_collector_that_declares_neither_untouched() -
 
 
 def test_the_event_keys_are_the_same_on_both_events_the_dispatch_emits() -> None:
-    """One schema per key, on the terms `core/collection.py` fixes for its seven.
+    """One schema per key, on the terms `core/collection.py` fixes for its own.
 
     A `detail` that is a sentence on one event and an exception's text on another
     is two schemas wearing one key, and a log query written against either would
@@ -586,7 +593,7 @@ def test_every_per_package_selection_is_lazy_rather_than_a_list(
     yet is the property, and it is asserted for both shapes a lazy selection
     takes.
 
-    **Five of the seven answer with a queryset and two may answer with a
+    **Seven of the nine answer with a queryset and two may answer with a
     generator.** The two collectors that read a *declared adapter* return an empty
     *generator* when their own source is not declared, so that the warning naming
     the missing source is emitted where a dispatch draws the selection rather than

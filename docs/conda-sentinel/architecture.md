@@ -18,7 +18,7 @@ always the copy. Identifiers are preserved so the full text stays findable: ever
 | App | Owns | Tables |
 |---|---|---|
 | `identity` | who a package **is** | `packages`, `package_mappings`, `feedstocks`, `identity_overrides` |
-| `collectors` | what upstreams **said** | ten evidence tables |
+| `collectors` | what upstreams **said** | eleven evidence tables |
 | `policies` | what the product **concludes** | eight derived tables |
 | `core` | the run ledger, the rollup, the shared kernel | `policy_runs`, `collection_runs`, `package_health`, `background_jobs` |
 | `workflow` | work items and their history | `workflow_items`, `workflow_transitions` |

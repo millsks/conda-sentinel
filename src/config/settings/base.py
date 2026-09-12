@@ -688,10 +688,10 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 # **The numbers are written here rather than imported, and that is the design
 # rather than a shortcut.** CPM-AD-20 makes cadence *data*: this dictionary is
 # what django_celery_beat's DatabaseScheduler seeds its tables from. What it does
-# **not** buy is an operator changing one of *these seven* intervals without a
+# **not** buy is an operator changing one of *these nine* intervals without a
 # deploy -- the scheduler rewrites every entry it finds here on each beat start,
 # so a value edited in the admin is live only until beat restarts. Cadence as data
-# is what lets a *later* schedule be added or changed in the tables; these seven
+# is what lets a *later* schedule be added or changed in the tables; these nine
 # are the declaration, and changing one is a pull request. docs/conda-sentinel/operations.md says
 # the same thing to an operator.
 #
@@ -816,6 +816,22 @@ CELERY_BEAT_SCHEDULE = {
         # below compares this interval with the collector's declared cadence in both
         # directions, so the two cannot drift.
         "options": {"countdown": 3 * 60 * 60},
+    },
+    "cpm-sweep-resolve-identity": {
+        "task": "cpm.collect.sweep",
+        "schedule": timedelta(days=1),
+        "kwargs": {"collector": "resolve_identity"},
+        # No options and no phase, deliberately (CPM-IDENTITY-S08). This is the
+        # resolver the four mapping-selecting sweeps depend on -- source_release,
+        # pypi_release and feedstock select nothing until it has recorded a
+        # mapping, and python_readiness selects on the same release-ecosystem
+        # mapping three hours later -- so on the first day it runs the three on
+        # its tick select nothing and on the second they select everything it
+        # resolved; python_readiness's lag depends on whether the resolver's
+        # tasks have drained by its offset. An offset that put this entry ahead
+        # of them would be a fourth phased entry, which is a change to the
+        # reconciliation test this entry does not make; the lag is stated in
+        # docs/conda-sentinel/operations.md instead.
     },
 }
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html#worker-send-task-events
