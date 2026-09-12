@@ -584,12 +584,14 @@ beat = { cmd = "celery -A config.celery_app beat -l INFO --scheduler django_cele
 # COMPONENT_RUNTIME=local; bare `pixi run seed-personas` resolves in `default`,
 # reads *deployed*, and is correctly refused with ImproperlyConfigured.
 seed-personas = { cmd = "python -m config.local_dev.seed", default-environment = "default", description = "Seed the local development personas" }
-# The demo inventory (local only). It writes packages and *evidence* and then runs
-# the real policy engine over both, so every status the screens show was concluded
-# by the pass that owns it -- see src/config/local_dev/demo_data.py for why nothing
-# here fabricates a verdict. Refuses outside a local run: evidence is append-only,
-# so a fictional observation cannot be taken back.
-seed-demo = { cmd = "python -m config.local_dev.seed_demo", default-environment = "default", description = "Seed a local demo inventory with evidence behind it" }
+# The demo inventory (local only). It writes packages and *evidence*, runs the real
+# `resolve_identity` collector over every package -- live, against conda-forge's
+# index and PyPI, so it needs the network -- and then runs the real policy engine
+# over all of it, so every status the screens show was concluded by the pass that
+# owns it -- see src/config/local_dev/demo_data.py for why nothing here fabricates
+# a verdict or asserts an identity it never observed. Refuses outside a local run:
+# evidence is append-only, so an observation cannot be taken back.
+seed-demo = { cmd = "python -m config.local_dev.seed_demo", default-environment = "default", description = "Seed a local demo inventory with evidence behind it; resolves identity live against conda-forge and PyPI (needs the network)" }
 # The local programmatic credential (FR-20). Mints a JWT signed by the keypair
 # `src/config/local_dev/keys.py` generates on demand into the gitignored
 # `.local-dev-keys/`, which local settings point the JWKS location at, so the
@@ -684,7 +686,7 @@ flower = { cmd = "celery -A config.celery_app flower --address=127.0.0.1 --port=
 # copies of one database URL is exactly the shape that produced the defect, and a
 # fifth task added later that seeds the wrong database would reproduce it.
 stack-migrate = { cmd = "python manage.py migrate", default-environment = "dev", env = { REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["docker-up"], description = "Apply migrations to the local stack's PostgreSQL" }
-stack-seed = { cmd = "python -m config.local_dev.seed_demo", default-environment = "dev", env = { CELERY_TASK_ALWAYS_EAGER = "1", REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-personas"], description = "Seed personas and the demo inventory into the local stack" }
+stack-seed = { cmd = "python -m config.local_dev.seed_demo", default-environment = "dev", env = { CELERY_TASK_ALWAYS_EAGER = "1", REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-personas"], description = "Seed personas and the demo inventory into the local stack; resolves identity live against conda-forge and PyPI" }
 stack-personas = { cmd = "python -m config.local_dev.seed", default-environment = "dev", env = { REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-migrate"], description = "Seed the local development personas into the local stack" }
 
 # `depends-on` carries the migration, so a fresh clone's first `local-stack` finds a

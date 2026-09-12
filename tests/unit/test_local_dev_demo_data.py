@@ -1,51 +1,83 @@
-"""The demo seeder's declarations: refused outside a local run, and spelled correctly.
+"""The demo seeder's declarations: refused outside a local run, spelled correctly, and asserting nothing invented.
 
-Two things are checked here and the second is the one the module's own docstring
-promises. `config/local_dev/demo_data.py` writes evidence with **string literals**
-for the states -- `"normalized"`, `"inferred_compatible"`, `"established"` -- because
-`core/outcomes.py`'s `outcome_type` composes each vocabulary per domain and a member
-reference is invisible to the type checker. A literal that drifted from the column's
-declared choices would fail at the first `IntegrityError` on somebody's laptop,
-halfway through seeding, with a constraint name and no hint which value was wrong.
-That is exactly what happened while the module was being written -- twice -- so the
-reconciliation is a test.
+Three things are checked here. The first two are the module's own promises: the
+refusal fires before any row is written, and the one state literal the seeder writes
+-- `"normalized"` -- is a value its column declares, because `core/outcomes.py`'s
+`outcome_type` composes each vocabulary per domain and a member reference is
+invisible to the type checker. A literal that drifted would fail at the first
+`IntegrityError` on somebody's laptop, halfway through seeding, with a constraint
+name and no hint which value was wrong.
+
+**The third is the shape of the roster, and it is this module's reason to exist
+since `CPM-PLATFORM-S08`.** The seeder used to assert what it never observed: every
+package `verified` with a repository at `github.com/demo/<name>`, a feedstock
+asserted or denied by a hand-kept flag, an invented build, an invented readiness. So
+`DemoPackage` is pinned to exactly the seven fields that have a real source behind
+them, the module is swept for the fictional URL and for the `verified` literal, and
+the limiter the inline resolver runs through is checked to permit -- because a
+resolver that ran metered would refuse most of the roster and the demo would look
+like the network was down.
 
 **The refusal is checked before any row is written**, which is the whole of why it
-matters: `CPM-AD-2` makes evidence append-only, so a fictional observation written by
-a deployed component cannot be deleted and would be read by every replayed policy run
+matters: `CPM-AD-2` makes evidence append-only, so an observation written by a
+deployed component cannot be deleted and would be read by every replayed policy run
 afterwards. A refusal that fired after the first insert would be no refusal at all.
 
-Reads declarations and model metadata: no database writes, no policy run. What the
-seeder actually produces is `tests/integration/test_local_dev_demo_seeding.py`.
+Reads declarations and model metadata: no database writes, no policy run, no
+network. What the seeder actually produces is
+`tests/integration/test_local_dev_demo_seeding.py`.
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
 import re
 from datetime import date
+from datetime import timedelta
 from typing import Final
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
-from conda_sentinel.collectors.models import CondaPackageSnapshot
 from conda_sentinel.collectors.models import LicenseFinding
 from conda_sentinel.collectors.models import PyPIReleaseSnapshot
-from conda_sentinel.collectors.models import PythonReadinessAssessment
-from conda_sentinel.collectors.models import SourceReleaseSnapshot
 from conda_sentinel.collectors.models import VulnerabilityFinding
+from conda_sentinel.collectors.resolve_identity import COLLECTOR_NAME
+from conda_sentinel.collectors.resolve_identity import RESOLUTION_RATE_LIMIT
+from conda_sentinel.core.rate_limit import RateLimiter
 from conda_sentinel.core.registry import registered_collectors
-from conda_sentinel.identity.models import MappingOutcome
+from conda_sentinel.identity.models import IdentityConfidence
 from config.local_dev import demo_data
+from tests.clocks import FIXED_INSTANT
 
 #: The literals the seeder writes, and the model whose `state` column has to accept
 #: each. Written out rather than read from the module's private names, so the pairing
 #: is stated here and a rename on either side is a failing case rather than a test
 #: that quietly checks a value against itself.
-DECLARED_STATES: Final[tuple[tuple[str, type], ...]] = (
-    ("normalized", LicenseFinding),
-    ("inferred_compatible", PythonReadinessAssessment),
+DECLARED_STATES: Final[tuple[tuple[str, type], ...]] = (("normalized", LicenseFinding),)
+
+#: The seven fields a roster row may carry, and the only seven.
+#:
+#: Each has a source a reader can check: the name and version pair are what PyPI
+#: and conda-forge state, the advisory is OSV's, the two KEV fields are CISA's, and
+#: the licence is the artifact's own metadata. A field naming a repository, a
+#: feedstock, a build or a readiness was a fact nobody observed, and every one of
+#: them has been removed -- so this set is exact rather than a lower bound, and an
+#: eighth field is a failing case until it can say where its value comes from.
+REAL_SOURCED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"name", "upstream_version", "installed_version", "advisory", "kev_listed", "kev_catalogued", "licence"},
 )
+
+#: The fictional repository host the first draft of the seeder asserted for every
+#: package, and the confidence it asserted it at. Neither may appear in the module.
+THE_FICTIONAL_HOST: Final[str] = "github.com/demo"
+
+#: The queryset methods a `confidence=` keyword may be handed: reads, never writes.
+QUERYSET_READS: Final[frozenset[str]] = frozenset({"filter", "exclude"})
+
+#: The two names conda-forge has no entry for, which the resolver leaves `unmapped`.
+THE_NOT_PACKAGES: Final[frozenset[str]] = frozenset({"internal-telemetry-sdk", "internal-feature-flags"})
 
 #: How many packages the demo seeds.
 #:
@@ -73,18 +105,6 @@ def test_every_state_literal_is_one_its_column_declares(value: str, model: type)
     declared = {choice for choice, _label in model._meta.get_field("state").choices}  # noqa: SLF001 - model metadata
 
     assert value in declared, f"{model.__name__}.state does not accept {value!r}; it accepts {sorted(declared)}"
-
-
-def test_the_mapping_outcome_literals_are_ones_the_vocabulary_declares() -> None:
-    """The identity resolution's own vocabulary, checked the same way.
-
-    `MappingOutcome` is composed by `outcome_type` too, so `_ESTABLISHED` and
-    `_NOT_FOUND` are literals for the same reason and can drift for the same reason.
-    """
-    declared = set(MappingOutcome.values)
-
-    assert "established" in declared
-    assert "not_found" in declared
 
 
 def test_the_demo_collector_is_not_a_registered_collector() -> None:
@@ -121,27 +141,140 @@ def test_the_roster_covers_every_state_the_screens_must_distinguish() -> None:
     """
     assert any(demo.advisory for demo in demo_data.DEMO_PACKAGES), "no adverse verdict"
     assert any(not demo.advisory for demo in demo_data.DEMO_PACKAGES), "nothing found by a lookup"
-    assert any(not demo.feedstock for demo in demo_data.DEMO_PACKAGES), "nothing to find"
-    assert any(demo.python_evidence == "none" for demo in demo_data.DEMO_PACKAGES), "no question that does not apply"
-
-    assert any(demo.errored for demo in demo_data.DEMO_PACKAGES), "no lookup that broke"
-    assert any(not demo.identified for demo in demo_data.DEMO_PACKAGES), "nothing for the confidence gate to blank"
+    assert any(not demo.licence for demo in demo_data.DEMO_PACKAGES), "no package whose licence is left to the sweep"
+    names = {demo.name for demo in demo_data.DEMO_PACKAGES}
+    assert names >= THE_NOT_PACKAGES, "nothing for the resolver to find absent and the confidence gate to blank"
 
 
-def test_the_roster_covers_both_kinds_of_python_evidence() -> None:
-    """`CPM-PY314-S03` made the kind of evidence part of the verdict.
+def test_every_roster_row_carries_only_real_sourced_fields() -> None:
+    """The shape `CPM-PLATFORM-S08` fixed: seven fields, each with a source somebody can check.
 
-    The detail view traces a verified verdict to the build and an inferred one to the
-    metadata, and a demo carrying only one kind would exercise one branch.
-
-    The values are named for the *evidence* -- `build`, `metadata` -- rather than for
-    the verdict. `verified` is also an `IdentityConfidence` value, and comparing
-    against it reads like a second confidence gate; the confidence-gate audit said so
-    when the module was first written.
+    Exact rather than a subset in both directions. A field dropped would be a
+    source the demo stopped showing; a field added is the failure this exists for --
+    the first draft grew `identified`, `feedstock`, `feedstock_idle_days`,
+    `fix_reached`, `python_evidence` and `errored`, every one an observation nobody
+    made, and a reviewer who checked any of them found nothing.
     """
-    kinds = {demo.python_evidence for demo in demo_data.DEMO_PACKAGES}
+    fields = frozenset(demo_data.DemoPackage.__dataclass_fields__)
 
-    assert {"build", "metadata", "none"} <= kinds
+    assert fields == REAL_SOURCED_FIELDS, sorted(fields ^ REAL_SOURCED_FIELDS)
+
+
+def test_no_roster_row_names_a_repository_feedstock_readiness_or_build() -> None:
+    """The matrix's roster row, stated over the names rather than the values.
+
+    A roster field is a claim the seeder will write, so a field whose name says
+    "repository" or "feedstock" is a claim about something only the resolver and the
+    sweeps observe. The set is the vocabulary the removed fields used and the
+    vocabulary a re-introduction would reach for.
+    """
+    fields = {field.casefold() for field in demo_data.DemoPackage.__dataclass_fields__}
+    invented = {"repository", "repo", "feedstock", "readiness", "python", "build", "identified", "errored", "fix"}
+
+    assert [field for field in fields if any(word in field for word in invented)] == []
+
+
+def test_nothing_in_the_module_names_the_fictional_repository_host() -> None:
+    """`github.com/demo/<name>` was a URL every package carried and nothing ever served.
+
+    Swept over the module's source text rather than over the roster's values,
+    because the host was never a roster value -- it was an f-string in the code that
+    wrote the resolution, and that is where it would come back.
+    """
+    source = inspect.getsource(demo_data)
+
+    assert THE_FICTIONAL_HOST not in source
+
+
+def test_the_seeder_never_spells_the_verified_confidence() -> None:
+    """The seeder claims no confidence at all, so the literal has no business in it.
+
+    `verified` is the confidence a *person* establishes (`CPM-AD-4`); the first draft
+    wrote it for ninety-eight packages nobody had looked at. What the seeder writes
+    now is a shell through `resolve_package_shell`, and what the resolver claims is
+    its own to decide -- so the string appearing here again would be the first draft
+    coming back. Swept as the bare quoted literal: the word appears in prose about
+    why it must not, and prose is not a claim.
+    """
+    source = inspect.getsource(demo_data)
+    literal = re.compile(rf"""["']{re.escape(IdentityConfidence.VERIFIED.value)}["']""")
+
+    assert literal.search(source) is None
+
+
+def test_the_seeder_calls_no_recorder_and_sets_no_confidence() -> None:
+    """Identity is written through two doors and the seeder opens only the first.
+
+    `resolve_package_shell` creates the shell; `record_resolution` is the resolver's
+    to call, through `IdentityResolutionCollector.collect`. A seeder that called the
+    recorder itself would be back to asserting mappings, whatever it asserted -- and
+    a `confidence=` handed to anything that writes is the seeder deciding what it
+    may claim. A `confidence=` on a queryset *read* (`filter`, `exclude`) is the
+    seeder asking what the resolver concluded, which is the one thing it may do
+    with a confidence and is how the summary is counted. Read off the syntax tree
+    rather than the text: the module's prose names the recorder to say why it is
+    not called, and prose is not a call.
+    """
+    tree = ast.parse(inspect.getsource(demo_data))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    called = {_called_name(call) for call in calls}
+    keywords = {keyword.arg for call in calls if _called_name(call) not in QUERYSET_READS for keyword in call.keywords}
+
+    assert "record_resolution" not in called
+    assert "confidence" not in keywords
+    assert "resolve_package_shell" in called
+    assert "IdentityResolutionCollector" in called
+
+
+def _called_name(call: ast.Call) -> str:
+    """Return the bare name a call reaches for, however it was spelled.
+
+    Args:
+        call: The call node.
+
+    Returns:
+        The final name segment -- `record_resolution` for both `record_resolution(...)`
+        and `services.record_resolution(...)` -- or the empty string for a call whose
+        target is not a name at all.
+
+    """
+    target = call.func
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    if isinstance(target, ast.Name):
+        return target.id
+    return ""
+
+
+def test_the_unmetered_limiter_permits_and_satisfies_the_protocol() -> None:
+    """The resolver runs inline through a limiter that always says yes.
+
+    Its declared allowance charges `1 + retries` per collection through a counter
+    every worker shares, so a hundred inline collections through the real limiter
+    would refuse most of the roster and the demo would look like the network was
+    down. Checked against the protocol so a renamed method fails here rather than
+    as a hundred `AttributeError`s halfway through a seed.
+    """
+    limiter = demo_data._Unmetered()  # noqa: SLF001 - the local-dev class under test
+
+    assert isinstance(limiter, RateLimiter)
+    assert limiter.acquire(collector=COLLECTOR_NAME, limit=RESOLUTION_RATE_LIMIT, now=FIXED_INSTANT, cost=1)
+    assert limiter.acquire(
+        collector=COLLECTOR_NAME,
+        limit=RESOLUTION_RATE_LIMIT,
+        now=FIXED_INSTANT + timedelta(days=1),
+        cost=RESOLUTION_RATE_LIMIT.calls * 2,
+    )
+
+
+def test_the_unreachable_streak_limit_is_small_and_positive() -> None:
+    """Three in a row: enough to tell "the network is down" from one flaky answer.
+
+    Offline, each collection waits out the transport's timeout and retries before
+    it fails; a limit of a hundred would be no limit, and a limit of one would
+    abandon ninety-nine packages for a single refused connection.
+    """
+    assert 1 < demo_data.UNREACHABLE_STREAK_LIMIT < len(demo_data.DEMO_PACKAGES)
 
 
 def test_the_roster_carries_a_kev_listing_and_a_non_listing() -> None:
@@ -200,20 +333,14 @@ def test_no_demo_package_declares_a_verdict() -> None:
     assert fields & verdict_shaped == set(), sorted(fields & verdict_shaped)
 
 
-@pytest.mark.parametrize("model", [SourceReleaseSnapshot, PyPIReleaseSnapshot, CondaPackageSnapshot])
-def test_the_release_snapshots_accept_the_ok_state_the_seeder_writes(model: type) -> None:
-    """Three tables where the determinate value *is* `ok`, unlike the two above.
+def test_the_pypi_snapshot_accepts_the_ok_state_the_seeder_writes() -> None:
+    """The one table the seeder writes whose determinate value *is* `ok`.
 
-    Which is the trap: `LicenseFinding` calls its determinate state `normalized` and
-    `PythonReadinessAssessment` calls its `inferred_compatible`, while these three
-    call theirs `ok`. Writing `ok` to the first two is the mistake the seeder made,
-    and this is the case that says the other three are not the same.
-
-    Args:
-        model: The evidence model under test.
-
+    Which is the trap: `LicenseFinding` calls its determinate state `normalized`,
+    while this one calls its `ok`. Writing `ok` to the first is the mistake the
+    seeder made, and this is the case that says the other is not the same.
     """
-    declared = {choice for choice, _label in model._meta.get_field("state").choices}  # noqa: SLF001 - model metadata
+    declared = {choice for choice, _label in PyPIReleaseSnapshot._meta.get_field("state").choices}  # noqa: SLF001
 
     assert "ok" in declared
 
@@ -229,31 +356,6 @@ def test_the_vulnerability_table_does_not_accept_ok() -> None:
 
     assert "ok" not in declared
     assert "matched" in declared
-
-
-def test_a_package_with_no_feedstock_still_seeds_one_snapshot() -> None:
-    """`FeedstockSnapshot.absence_established` separates two things that look alike.
-
-    "We looked and there is no feedstock" and "we did not look" are different, and
-    `CPM-FR-5` turns on a reader being able to tell them apart. The demo seeds the
-    first, so the screen shows a `not_found` a reviewer can trust.
-    """
-    absent = [demo for demo in demo_data.DEMO_PACKAGES if not demo.feedstock]
-
-    assert absent != []
-
-
-def test_an_idle_feedstock_is_older_than_the_shipped_inactivity_threshold() -> None:
-    """The feedstock pass reads a threshold from the parameter file.
-
-    The demo's idle feedstock has to be idle by *that* measure, not by a number
-    chosen here -- otherwise the row renders `present_and_maintained` and the
-    inactive state never appears on the screen.
-    """
-    shipped_threshold_days = 180
-    idle = max(demo.feedstock_idle_days for demo in demo_data.DEMO_PACKAGES)
-
-    assert idle > shipped_threshold_days
 
 
 def _parsed(version: str) -> tuple[int, ...] | None:
@@ -429,41 +531,3 @@ def test_a_compound_licence_is_recorded_as_an_expression(licence: str, method: s
     recognised = "spdx-expression" if demo_data._COMPOUND.search(licence) else "spdx-identifier"  # noqa: SLF001
 
     assert recognised == method
-
-
-def test_the_roster_answers_the_python_question_both_ways() -> None:
-    """`CPM-FR-24` exists to tell a package that is ready from one that is not.
-
-    Every seeded package used to come out ready, which made the product's headline
-    column render one tone across the whole screen -- and made two of the shipped
-    priority rules, `p8` and `p9`, unreachable by anything the demo could produce.
-    """
-    kinds = {demo.python_evidence for demo in demo_data.DEMO_PACKAGES}
-
-    assert {"build", "metadata", "metadata-incompatible", "build-failed", "none"} <= kinds
-
-
-def test_the_roster_pushes_a_fix_to_every_surface_the_remediation_pass_reads() -> None:
-    """Otherwise the screen that separates "act today" from "wait" shows one value.
-
-    `policies/remediation.py` decides between `ready`, `awaiting_build` and
-    `awaiting_packaging` by reading which surface carries the fixed version, and the
-    priority rules `p1` and `p2` turn on that difference. A roster where the fix had
-    reached exactly one surface put every vulnerable package in `p3` -- "no fix is in
-    sight" -- including the ones whose fix conda-forge was already shipping.
-    """
-    reached = {demo.fix_reached for demo in demo_data.DEMO_PACKAGES if demo.advisory}
-
-    assert reached == {"release", "recipe", "channel"}
-
-
-def test_only_a_package_with_an_advisory_says_how_far_its_fix_got() -> None:
-    """The field is meaningless without one, and a value on a clean row would read as one.
-
-    `_surface_version` ignores it in that case, so a stray value changes nothing and
-    would sit in the roster looking like it did -- which is the kind of dead
-    declaration somebody later reasons from.
-    """
-    stray = [demo.name for demo in demo_data.DEMO_PACKAGES if demo.advisory is None and demo.fix_reached != "release"]
-
-    assert stray == []
