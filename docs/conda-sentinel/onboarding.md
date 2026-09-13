@@ -268,8 +268,9 @@ brings up Redis and PostgreSQL in Docker and then runs all four together.
 [What that costs and why it uses non-default ports](running-it.md#the-full-local-stack).
 
 Then read [Asynchronous work](asynchronous-work.md) — the four queues, all fourteen
-tasks, what beat actually fires, and the two tasks **nothing fires**, which is the
-single most surprising thing in this system.
+tasks, what beat actually fires, and the two tasks **no schedule fires** — only
+`ingest_inventory` and `run_policy`, run by hand or as scheduled admin processes —
+which is the single most surprising thing in this system.
 
 **Exercise.** You started this in Part 1. Read the worker's banner in that terminal
 — it names the queues it is consuming and, one line above them, its transport:
@@ -350,6 +351,9 @@ failure looks like.
 | Why does Coverage say every collector has *never run*? | Expected on a fresh stack — [beat's first fire is one interval away](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run) |
 | Is anything not being collected? | The **Coverage** screen |
 | Did last night's sweeps run? | Coverage, and the run ledger |
+| Nothing has swept yet and I do not want to wait a day | `pixi run stack-run dispatch_sweep --all` (deployed: `pixi run sweep`) |
+| The watchlist changed | `pixi run stack-run ingest_inventory` (deployed: `pixi run ingest`) |
+| Evidence is in and nothing has computed a verdict | `pixi run stack-run run_policy` (deployed: `pixi run policy-run`) |
 | Is the queue backing up? | flower |
 | Why does this package say that? | The package detail page |
 | Why did it say that in March? | Replay: `pixi run manage replay_policy_run` |
@@ -386,7 +390,7 @@ You are through the primer when you can do all of these without looking them up:
 - [ ] Say what the confidence gate does — and why it *writes* rather than hides
 - [ ] Point at the file that decides what counts as a licence problem
 - [ ] Name the four Celery queues and say why they are four and not one
-- [ ] Say which two tasks nothing fires, and how you would fire them
+- [ ] Say which two tasks no schedule fires, and which commands fire them
 - [ ] Trace a person from an OIDC claim to being refused a queue
 - [ ] Add a package to the watchlist and say what happens on the next sweep
 - [ ] Move a queue item from `open` to `resolved` and name every step

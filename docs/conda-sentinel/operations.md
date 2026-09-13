@@ -1271,6 +1271,70 @@ rate-limited or misconfigured source fails its own collector's dispatch and no
 other, so it costs you that surface for that cadence rather than a day of
 monitoring everywhere else.
 
+### Dispatching by hand, and the three admin processes
+
+Beat's interval entries start their clock when they are created, so a fresh
+component sweeps nothing for a day and its weekly surfaces for a week. The
+`dispatch_sweep` management command enqueues the same `cpm.collect.sweep` beat
+fires, for the collectors you name or for every swept one:
+
+```sh
+pixi run stack-run dispatch_sweep pypi_release feedstock   # in this order
+pixi run stack-run dispatch_sweep --all                    # every collector swept per package
+```
+
+It refuses, before anything is enqueued and with the swept names listed, a name
+the dispatch would refuse: blank, repeated, the reserved `sweep`, one nothing
+registers, one that is not swept per package (the run-scoped and the
+triggered-only collectors above), or one whose per-package task Celery does not
+hold. So a typo is a non-zero exit and not a `failed` row on the ledger; a broker
+that refuses part-way through a list is reported with how many were enqueued
+before it and which name it refused. Each name that passes is
+one enqueue and one printed line carrying the task id; under settings that make
+every task eager the line carries the dispatch row's state and how many packages
+it offered instead.
+
+A dispatch that arrives while the collector's previous one is still draining is
+finalised `skipped` — the dispatcher's overlap guard, not a fault — and from the
+command that reads as `<collector>: run N skipped, offered 0 package(s)` under
+eager settings, or as an ordinary enqueue line whose row then shows `skipped` on
+the Coverage screen. Name each collector once; the command refuses a repeated
+name for the same reason.
+
+`CPM-OPERATE-S02` declares three `[[admin_processes]]` in `component.toml` on
+exactly `prune`'s terms — each a root pixi task running a management command,
+`schedule = "deployment-repository"`, no cadence in the component. The
+mechanism, and the environment such a job must carry, is the accelerator's
+[deployment page](../accelerator/deployment.md):
+
+| Admin process | Task | Command | Enqueues |
+|---|---|---|---|
+| `ingest` | `pixi run ingest` | `ingest_inventory [--force]` | `cpm.collect.inventory` |
+| `sweep` | `pixi run sweep` | `dispatch_sweep --all` | one `cpm.collect.sweep` per registered collector that is swept per package |
+| `policy-run` | `pixi run policy-run` | `run_policy [--version V]` | `cpm.policy.run` at the newest recorded version |
+
+Locally the same commands run against the stack through `pixi run stack-run
+<command>`; deployed, the deployment repository schedules `pixi run <task>`. None
+of the three collects, computes or writes a ledger row in the caller: each calls
+the task's `.delay()` and whether that runs inline or on a worker is the settings
+module's decision (`CELERY_TASK_ALWAYS_EAGER`), never the command's.
+
+Three things to know before scheduling any of them:
+
+- **`sweep` is a one-shot, not a cadence.** It is for the day after a first
+  deploy, or a day-one dispatch by hand, when beat's interval entries have not yet
+  ticked. Scheduled beside beat it would double-dispatch everything beat already
+  fires, and it fires the daily and the weekly surfaces at once against
+  allowances that were sized for one collector per tick. `ingest` and
+  `policy-run` are the two that belong on a cadence.
+- **All three need a reachable broker**, unlike `prune`: each is one `.delay()`,
+  so a job environment without `REDIS_URL` (or with `CELERY_TASK_ALWAYS_EAGER`
+  set) does the work in the job itself rather than on a worker.
+- **An `ingest` with no declared adapter fails on the worker before the recorder
+  opens**, so nothing reaches the Coverage screen or the run ledger — the failure
+  is visible only in flower or the worker log. The command itself exits 0 with
+  the task id in that case; it enqueued, which is all it promised.
+
 ### A dispatch row's state is about enqueueing and nothing else
 
 This is the sentence to read twice. A dispatch's ledger row says what the
@@ -1668,17 +1732,25 @@ own default, and it is deliberately not a clean value.
 ### Running it, and where the result lands
 
 There is no beat entry (see above). A run is enqueued as the `cpm.policy.run`
-task on the `policy` queue, or executed in-process. Locally, from a shell that
-carries [the stack's environment](running-it.md#a-shell-against-the-stack):
+task on the `policy` queue, or executed in-process, by the `run_policy`
+management command. Locally, through a command that carries
+[the stack's environment](running-it.md#a-shell-against-the-stack):
 
 ```sh
-pixi run stack-shell -c '
-from conda_sentinel.core.tasks import run_policy
-run_policy.delay("<your policy version>")
-'
+pixi run stack-run run_policy                      # the newest recorded version
+pixi run stack-run run_policy --version 2026.09.3  # a named one
 ```
 
-!!! warning "The quoting here is not interchangeable, and the environment is not either"
+Deployed, it is `pixi run policy-run` — one of
+[the three admin processes](#dispatching-by-hand-and-the-three-admin-processes).
+The command validates the version against the parameter file first (an unrecorded
+one is refused, listing the recorded ones, and nothing is enqueued), calls the
+task's `.delay()` with it, and prints the task id; under a settings module that
+makes every task eager it prints the run's state and rollup-row count instead.
+"Newest" is numeric, segment by segment, so `2026.09.10` is newer than
+`2026.09.4`.
+
+!!! warning "The quoting of a `-c` one-liner is not interchangeable, and the environment is not either"
 
     **Outer single quotes, inner double quotes.** `pixi run` re-parses the task's
     arguments through its own task shell, which strips inner *single* quotes: the
@@ -1690,11 +1762,11 @@ run_policy.delay("<your policy version>")
     one-liner, whether through `manage`, `stack-shell` or `stack-run`. A body that
     needs both kinds of quote goes in a file: `pixi run stack-shell < script.py`.
 
-    **`stack-shell`, locally.** A bare `pixi run -e dev manage shell` opens against
+    **`stack-run`, locally.** A bare `pixi run -e dev manage run_policy` runs against
     the SQLite file, and `src/config/settings/local.py` defaults
-    `CELERY_TASK_ALWAYS_EAGER` to true, so `run_policy.delay(...)` there runs the
-    pass inline against a database the stack never reads. `stack-shell` and
-    `stack-run` carry the stack's `DATABASE_URL`, `REDIS_URL` and
+    `CELERY_TASK_ALWAYS_EAGER` to true, so the task runs the pass inline against a
+    database the stack never reads — the command's report line says so.
+    `stack-shell` and `stack-run` carry the stack's `DATABASE_URL`, `REDIS_URL` and
     `CELERY_TASK_ALWAYS_EAGER=0`. In the `default` environment any of these fails
     with `RuntimeError: Model class conda_sentinel.core.models.CollectionRun
     doesn't declare an explicit app_label and isn't in an application in

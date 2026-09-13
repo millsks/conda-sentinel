@@ -197,3 +197,26 @@ replacement = "stop-before-start"
 name = "prune"
 task = "prune"
 schedule = "deployment-repository"
+
+# The three operating processes (`CPM-OPERATE-S02`). Each runs a management
+# command that enqueues an existing task -- inventory ingestion, a dispatch of
+# every swept collector, a policy run at the newest recorded version -- so that
+# a deployment can schedule the re-read of the watchlist, the day-one sweep and
+# the verdict computation that nothing in `CELERY_BEAT_SCHEDULE` fires. Like
+# `prune`, each declares that the process exists and what it is called, and
+# leaves the cadence to the deployment repository.
+
+[[admin_processes]]
+name = "ingest"
+task = "ingest"
+schedule = "deployment-repository"
+
+[[admin_processes]]
+name = "sweep"
+task = "sweep"
+schedule = "deployment-repository"
+
+[[admin_processes]]
+name = "policy-run"
+task = "policy-run"
+schedule = "deployment-repository"

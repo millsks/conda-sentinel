@@ -177,16 +177,16 @@ queue holding two items looks like a queue.
       interval entries start their clock when they are created, so a daily sweep first
       fires a day after the stack first came up and a weekly one a week after. On day
       one nothing observes anything unless you dispatch it by hand — one
-      `cpm.collect.sweep` per collector, from [a shell carrying the stack's
-      environment](#a-shell-against-the-stack):
+      `cpm.collect.sweep` per collector, through the `dispatch_sweep` command
+      [carrying the stack's environment](#a-shell-against-the-stack):
 
       ```bash
-      pixi run stack-shell -c '
-      from conda_sentinel.collectors.tasks import collect_sweep
-      for name in ("pypi_release", "feedstock", "python_readiness", "source_release"):
-          collect_sweep.delay(collector=name)
-      '
+      pixi run stack-run dispatch_sweep pypi_release feedstock python_readiness source_release
+      pixi run stack-run dispatch_sweep --all   # or every collector that is swept per package
       ```
+
+      Each name is one enqueue and one printed line with the task id; a name the
+      dispatch would refuse is refused first, before anything is enqueued.
 
       Then the allowances set the pace. `pypi_release` is 60 requests a minute,
       charged four per collection, so a sweep gets through about fifteen packages a
@@ -224,33 +224,32 @@ queue holding two items looks like a queue.
 
 ## Running a policy pass yourself
 
-There is no management command for a first run, **and nothing schedules one**. The
-task `cpm.policy.run` is registered and routable, but no beat entry fires it and no
-sweep chains it — so a deployed component collects evidence and never computes a
-verdict from it until an operator arranges the run. See
+**Nothing schedules one.** The task `cpm.policy.run` is registered and routable, but
+no beat entry fires it and no sweep chains it — so a deployed component collects
+evidence and never computes a verdict from it until an operator arranges the run. See
 [Asynchronous work](asynchronous-work.md#two-tasks-nothing-fires) for what to do about
-that; locally the seeder executes a run inline, and you can run one by hand, from
-[a shell against the stack](#a-shell-against-the-stack):
+that; locally the seeder executes a run inline, and you can run one by hand, through
+the `run_policy` command [against the stack](#a-shell-against-the-stack):
 
-```python
-# pixi run stack-shell
-from conda_sentinel.core.clock import SystemClock
-from conda_sentinel.core.policy_run import execute_policy_run
-from conda_sentinel.policies.parameters import parameters_file, parameters_from
-
-source = parameters_file()
-newest = sorted(parameters_from(source.read_text(encoding="utf-8"), source=source))[-1]
-
-execute_policy_run(policy_version=newest, clock=SystemClock())
+```sh
+pixi run stack-run run_policy                      # the newest recorded version
+pixi run stack-run run_policy --version 2026.09.1  # a named recorded version
 ```
 
-**Read rather than written down**, which is what the seeder does and for the same
-reason: a version pinned in prose is one that stops being the newest the day somebody
-records another, and this page would then be telling you to run the old rules.
+The command enqueues `cpm.policy.run` and prints the task id; on the stack the
+worker runs it, and the home page's "rollup computed" stamp moves when it lands.
+Deployed, the same command is `pixi run policy-run`, the admin process
+`component.toml` declares for a deployment repository to schedule.
 
-The version must be one the parameter file **records**. An unrecorded version fails
-every package rather than falling back to a default — a verdict whose rules nobody
-wrote down is not a verdict this product will produce.
+**Read rather than written down**, which is what the seeder does and for the same
+reason: without `--version` the command derives the newest version the parameter
+file records, so a version pinned in prose cannot stop being the newest the day
+somebody records another.
+
+The version must be one the parameter file **records**. An unrecorded `--version` is
+refused before anything is enqueued, listing the recorded ones — a run at it would
+fail every package rather than falling back to a default, because a verdict whose
+rules nobody wrote down is not a verdict this product will produce.
 
 To reproduce what a past run concluded, pass its cut-off as well; see
 [Operating Conda-Sentinel](operations.md#replaying-a-run).

@@ -83,6 +83,14 @@ pixi run docker-down       # stop it, keeping the data
 pixi run local-stack-down  # after honcho died without Ctrl-C: free 8000 and 5555
 pixi run stack-shell       # a Django shell against the stack, not the SQLite file
 pixi run stack-run <cmd>   # any management command against the stack
+
+# Operating it: the three admin processes a deployment schedules, each enqueueing
+# an existing task. Through stack-run they land on the stack's worker; through
+# bare `pixi run <task>` in the default local environment they run inline against
+# the SQLite file, because that environment makes every task eager.
+pixi run stack-run ingest_inventory     # re-read the watchlist   (deployed: pixi run ingest)
+pixi run stack-run dispatch_sweep --all # sweep every collector   (deployed: pixi run sweep)
+pixi run stack-run run_policy           # compute the verdicts    (deployed: pixi run policy-run)
 ```
 
 `pixi run ci` is the gate, and it is the same sequence locally and in CI:

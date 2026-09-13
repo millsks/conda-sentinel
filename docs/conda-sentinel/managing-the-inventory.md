@@ -175,5 +175,5 @@ After changing the watchlist, the questions worth asking in order:
 | Which collectors *cannot* be asked about it yet? | The Coverage screen |
 
 Locally you can do the whole loop without waiting for a schedule: edit
-`watchlist-development.csv`, then run the ingestion and a policy pass by hand from a
-shell. [How](running-it.md#running-a-policy-pass-yourself).
+`watchlist-development.csv`, then `pixi run stack-run ingest_inventory` and
+`pixi run stack-run run_policy`. [How](running-it.md#running-a-policy-pass-yourself).
