@@ -82,7 +82,7 @@ Fourteen, and the name is the routing:
 
 | Task | Queue | What it does |
 |---|---|---|
-| `cpm.collect.inventory` | `collect` | Ingests the watchlist; creates package shells and inventory snapshots |
+| `cpm.collect.inventory` | `collect` | Ingests the inventory -- the governed table, or the watchlist file; creates package shells and inventory snapshots |
 | `cpm.collect.sweep` | `collect` | **The dispatcher.** Takes a collector name, selects the packages it can be asked about, enqueues one per-package task each |
 | `cpm.collect.source_release` | `collect` | One package's upstream releases |
 | `cpm.collect.pypi_release` | `collect` | One package's PyPI releases |
@@ -207,8 +207,8 @@ On a *demo* component it is mostly not, and it is worth knowing why before you t
 
 | Collector | Against the seeded demo inventory |
 |---|---|
-| `inventory` | **Fails.** `watchlist.csv` ships with no rows, on purpose |
-| `resolve_identity` | **Already ran, at seed time, for all hundred.** `stack-seed` runs it inline over every package against the real conda-forge index and the real PyPI project document, so a fresh seed already carries the repository, purls and feedstocks each source stated — and a `not_found` row for the two `internal-*` packages conda-forge has no entry for. The daily sweep then re-offers all 98 `inventory-derived` packages at once, and under the real allowance (60 requests a minute, charged four per collection) about fifteen get through and the rest are refused as rate-limited — they show as `failed` runs on the Coverage screen that day, which is expected rather than a fault, and each is offered again the next day. The ones that do run read the same documents and record nothing new |
+| `inventory` | **Works, and creates nothing new.** `stack-seed` imported the development watchlist into the `inventory` table and ingested it, and the stack reads that table (`CPM_INVENTORY_SOURCE=database`), so `pixi run stack-run ingest_inventory` appends one snapshot per package and records nothing absent. Retire a row on `/conda-sentinel/inventory/` first and the next ingestion records that package `not_found` |
+| `resolve_identity` | **Already ran, at seed time, for all 148.** `stack-seed` runs it inline over every package the watchlist names against the real conda-forge index and the real PyPI project document, so a fresh seed already carries the repository, purls and feedstocks each source stated — and a `not_found` row for the two `internal-*` packages conda-forge has no entry for. The daily sweep then re-offers all 146 `inventory-derived` packages at once, and under the real allowance (60 requests a minute, charged four per collection) about fifteen get through and the rest are refused as rate-limited — they show as `failed` runs on the Coverage screen that day, which is expected rather than a fault, and each is offered again the next day. The ones that do run read the same documents and record nothing new |
 | `source_release`, `pypi_release`, `feedstock`, `python_readiness` | Genuinely work, because the mappings they select on were observed rather than seeded: `source_release` reads the repository PyPI named, `feedstock` reads the feedstock conda-forge listed. These are the sweeps that turn the `unknown` a fresh seed shows for upstream currency, feedstock presence and readiness into real verdicts |
 | `conda_package`, `license` | Observe nothing. Both need `CPM_MONITORED_CHANNELS`, which is empty |
 | `vulnerability`, `kev`, `py314_verification` | Observe nothing. Each needs a source you declare |
@@ -228,7 +228,8 @@ declared — and an evidence log in which every row names a source somebody can 
     the record rather than refreshing it.
 
     If you want to see collection work over an inventory of your own, the honest way
-    is a **real watchlist** — even a three-row one — and an ingestion
+    is a **real watchlist** — even a three-row one — imported into the table
+    (`pixi run stack-run import_watchlist your.csv --replace`) and an ingestion
     (`pixi run stack-run ingest_inventory`, which enqueues `cpm.collect.inventory`)
     before any sweep. If you only wanted to prove the worker is alive, run
     `pixi run stack-run run_policy` instead: it computes, and it writes no evidence

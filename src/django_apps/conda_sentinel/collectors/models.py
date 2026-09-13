@@ -118,6 +118,7 @@ from typing import TYPE_CHECKING
 from typing import ClassVar
 from typing import Final
 
+from django.conf import settings
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -148,6 +149,7 @@ from conda_sentinel.core.finding_keys import FindingKeyed
 from conda_sentinel.core.models import AppendOnlyError
 from conda_sentinel.core.models import AppendOnlyModel
 from conda_sentinel.core.outcomes import OutcomeState
+from conda_sentinel.core.roles import INVENTORY_CHANGE_CODENAME
 from conda_sentinel.identity.models import IdentityConfidence
 from conda_sentinel.identity.models import Package
 
@@ -165,6 +167,18 @@ __all__ = [
     "FEEDSTOCK_READ_INDEX",
     "IDENTITY_RESOLUTION_FACTS_CONSTRAINT",
     "IDENTITY_RESOLUTION_READ_INDEX",
+    "INVENTORY_ACTIVE_NAME_CONSTRAINT",
+    "INVENTORY_CHANGE_AUTHOR_CONSTRAINT",
+    "INVENTORY_CHANGE_READ_INDEX",
+    "INVENTORY_CHANGE_REASON_CONSTRAINT",
+    "INVENTORY_KEY_CONSTRAINT",
+    "INVENTORY_KEY_FIELD",
+    "INVENTORY_NAME_FIELD",
+    "INVENTORY_OPTIONAL_SIGNALS",
+    "INVENTORY_REASON_CONSTRAINT",
+    "INVENTORY_REQUIRED_SIGNALS",
+    "INVENTORY_RETIRED_INDEX",
+    "INVENTORY_SIGNALS",
     "KEV_APPLICABILITY_CONSTRAINT",
     "KEV_FACTS_CONSTRAINT",
     "KEV_READ_INDEX",
@@ -193,6 +207,8 @@ __all__ = [
     "CondaPackageSnapshot",
     "FeedstockSnapshot",
     "IdentityResolutionSnapshot",
+    "InventoryChange",
+    "InventoryEntry",
     "InventoryReadError",
     "InventorySnapshot",
     "KevFinding",
@@ -210,6 +226,12 @@ __all__ = [
 #: `associator_key`: it is a key some other system chose, not a word a person
 #: picked, and neither its shape nor its bound is this product's to guess at.
 _KEY_LENGTH: Final[int] = 512
+
+#: How wide the inventory table's `package_name` column is: `identity.Package`'s
+#: `canonical_name` width, because that is the column the name lands in when the
+#: ingestion collector resolves the shell. Restated rather than imported from
+#: `identity/services.py`, which reaches this application's models.
+_ENTRY_NAME_LENGTH: Final[int] = 128
 
 #: How wide the `state` column is. `OutcomeState`'s longest value is
 #: `not_applicable`, fourteen characters, and the rest is headroom. Not sized
@@ -737,6 +759,51 @@ _CONFIDENCE_LENGTH: Final[int] = 32
 #: `identity_resolution`.
 IDENTITY_RESOLUTION_FACTS_CONSTRAINT: Final[str] = "resolution_facts_present_exactly_when_recorded"
 IDENTITY_RESOLUTION_READ_INDEX: Final[str] = "id_resolution_pkg_observed"
+
+#: The governed inventory table's vocabulary (`CPM-OPERATE-S03`): the key a row is
+#: filed under, the name it carries, and the six usage signals a row may state.
+#:
+#: Spelled here, beside the model that declares the columns, and reconciled by
+#: `tests/unit/django_apps/test_inventory_service.py` against the two other places
+#: the same names live -- `collectors/watchlist.py`'s column contract and
+#: `collectors/tasks.py`'s record contract. Neither can be imported here: the
+#: first is imported at settings time and the second reaches this module. Three
+#: spellings reconciled by test is the shape every shared vocabulary in this
+#: application takes.
+INVENTORY_KEY_FIELD: Final[str] = "source_package_key"
+INVENTORY_NAME_FIELD: Final[str] = "package_name"
+INVENTORY_REQUIRED_SIGNALS: Final[tuple[str, ...]] = ("internal_component_count", "internal_lob_count")
+INVENTORY_OPTIONAL_SIGNALS: Final[tuple[str, ...]] = ("apps", "platforms", "downloads", "versions")
+INVENTORY_SIGNALS: Final[tuple[str, ...]] = (*INVENTORY_REQUIRED_SIGNALS, *INVENTORY_OPTIONAL_SIGNALS)
+
+#: The governed inventory table's constraints and indexes, by name.
+#:
+#: `INVENTORY_KEY_CONSTRAINT` is what makes a key one row: `inventory` is not
+#: evidence -- it is the reference data the ingestion collector *reads* -- so a
+#: unique constraint is permitted on it, and a second row for one key would be two
+#: claims about one package with no rule for choosing. `INVENTORY_ACTIVE_NAME_CONSTRAINT`
+#: is the same rule over the *name*, among active rows only: the name becomes
+#: `Package.canonical_name`, which is unique and create-only, so two active rows
+#: with one name are two shells the next ingestion cannot both create -- the
+#: `IntegrityError` this story exists to close, arriving one step later. A
+#: retired row keeps its name and stays out of the constraint, so a package can be
+#: retired under one key and re-added under another. `INVENTORY_REASON_CONSTRAINT`
+#: refuses a row that does not say why it was last changed, at the column, so the
+#: service's own refusal of a blank reason is enforced rather than intended;
+#: `INVENTORY_CHANGE_REASON_CONSTRAINT` does the same on the audit row, and
+#: `INVENTORY_CHANGE_AUTHOR_CONSTRAINT` makes every audit row name exactly one of
+#: a person and a file.
+#: `INVENTORY_RETIRED_INDEX` serves the database adapter's one read -- the active
+#: rows, which are the rows whose `retired_at` is NULL -- and
+#: `INVENTORY_CHANGE_READ_INDEX` serves the audit trail's one read, newest change
+#: per entry first, on the terms `identity/models.py`'s `OVERRIDE_READ_INDEX` does.
+INVENTORY_KEY_CONSTRAINT: Final[str] = "inventory_key_is_one_row"
+INVENTORY_ACTIVE_NAME_CONSTRAINT: Final[str] = "inventory_active_name_is_one_row"
+INVENTORY_REASON_CONSTRAINT: Final[str] = "inventory_change_states_its_reason"
+INVENTORY_CHANGE_REASON_CONSTRAINT: Final[str] = "inventory_change_row_states_its_reason"
+INVENTORY_CHANGE_AUTHOR_CONSTRAINT: Final[str] = "inventory_change_names_a_person_or_a_file"
+INVENTORY_RETIRED_INDEX: Final[str] = "inventory_retired_at"
+INVENTORY_CHANGE_READ_INDEX: Final[str] = "inv_change_entry_observed"
 
 
 class InventoryReadError(ValueError):
@@ -3205,3 +3272,269 @@ class IdentityResolutionSnapshot(AppendOnlyModel):
         scope = "no package" if self.package_id is None else f"package {self.package_id}"
         when = "never" if self.observed_at is None else self.observed_at.isoformat()
         return f"identity resolution for {scope}: {self.state}, {confidence}, at {when}"
+
+
+class InventoryEntry(models.Model):
+    """One package the inventory names, as governed reference data. Table `inventory`.
+
+    `CPM-OPERATE-S03` moves the watchlist from a CSV inside the wheel to this
+    table, so that adding a package is an audited write rather than a release, and
+    so that the demo seeder and every pod read the one inventory. It is the
+    reference data the ingestion collector *reads* through `DatabaseInventoryAdapter`
+    (`CPM-AD-29`), and it is deliberately **not** evidence: it carries no
+    `observed_at`, inherits no `AppendOnlyModel`, and is mutated in place -- which is
+    what `CPM-AD-2`'s exemption for reference data means. What *is* append-only is
+    the record of every change, `InventoryChange` below, written in the same
+    transaction as the change it records (`CPM-AD-14`).
+
+    **Retirement is a column, never a deletion.** A row the inventory no longer
+    names carries a `retired_at`; the adapter answers the active rows only, so the
+    next ingestion observes the package absent and writes its `not_found` snapshot
+    (`CPM-AD-25`). The row, its audit trail and the package all stay.
+
+    **Blank is missing, never zero.** All six signals are nullable integers, on the
+    terms `InventorySnapshot`'s are: NULL records that the source did not say and
+    stays distinguishable from a stored `0`. The two required counts are required by
+    the *service* rather than by the column, so that this table can hold a row in
+    whatever state a reviewed import handed it and still refuse, at the door, a
+    row a person entered without them.
+
+    No field named `observed_at`, `status` or `computed_at`: each is a mark one of
+    the registry audits classifies on, and this table is none of the things they
+    mark.
+    """
+
+    #: What the inventory files the package under. Becomes the shell's
+    #: `associator_key`: the stable value a later ingestion matches on and nothing
+    #: corrects. One row per key -- see `INVENTORY_KEY_CONSTRAINT`.
+    source_package_key = models.CharField(_("source package key"), max_length=_KEY_LENGTH)
+
+    #: What the package is called. Becomes the shell's `canonical_name`, the one
+    #: correctable name. Sized as `identity.Package.canonical_name` is.
+    package_name = models.CharField(_("package name"), max_length=_ENTRY_NAME_LENGTH)
+
+    #: The six usage signals, in the order the watchlist's columns spell them.
+    internal_component_count = models.PositiveIntegerField(
+        _("internal component count"),
+        null=True,
+        blank=True,
+        default=None,
+    )
+    internal_lob_count = models.PositiveIntegerField(_("internal LOB count"), null=True, blank=True, default=None)
+    apps = models.PositiveIntegerField(_("apps"), null=True, blank=True, default=None)
+    platforms = models.PositiveIntegerField(_("platforms"), null=True, blank=True, default=None)
+    downloads = models.PositiveIntegerField(_("downloads"), null=True, blank=True, default=None)
+    versions = models.PositiveIntegerField(_("versions"), null=True, blank=True, default=None)
+
+    #: When the row was retired, or NULL while it is active. The one column the
+    #: adapter filters on.
+    retired_at = models.DateTimeField(_("retired at"), null=True, blank=True, default=None)
+
+    #: When the row was last changed, from the writer's injected clock
+    #: (`CPM-AD-26`). Not `observed_at`: nothing observed this row, somebody wrote
+    #: it.
+    changed_at = models.DateTimeField(_("changed at"))
+
+    #: Why it was last changed. Non-blank -- see `INVENTORY_REASON_CONSTRAINT` --
+    #: and the same words the newest `InventoryChange` row carries.
+    reason = models.TextField(_("reason"))
+
+    class Meta:
+        """The table PRD Appendix A.2 names, not the `collectors_inventoryentry` Django derives."""
+
+        db_table = "inventory"
+        verbose_name = _("inventory entry")
+        verbose_name_plural = _("inventory entries")
+        ordering = ("source_package_key",)
+        indexes = [
+            models.Index(fields=["retired_at"], name=INVENTORY_RETIRED_INDEX),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["source_package_key"], name=INVENTORY_KEY_CONSTRAINT),
+            models.UniqueConstraint(
+                fields=["package_name"],
+                condition=models.Q(retired_at__isnull=True),
+                name=INVENTORY_ACTIVE_NAME_CONSTRAINT,
+            ),
+            models.CheckConstraint(condition=~models.Q(reason=""), name=INVENTORY_REASON_CONSTRAINT),
+        ]
+
+    def __str__(self) -> str:
+        """Return the key, the name and whether the row is active.
+
+        Returns:
+            A one-line summary.
+
+        """
+        state = "active" if self.retired_at is None else f"retired at {self.retired_at.isoformat()}"
+        return f"{self.source_package_key} ({self.package_name}), {state}"
+
+    @property
+    def is_active(self) -> bool:
+        """Report whether the inventory still names this package.
+
+        Returns:
+            True while `retired_at` is NULL.
+
+        """
+        return self.retired_at is None
+
+
+class InventoryChange(AppendOnlyModel):
+    """One audited change to one inventory entry. Table `inventory_changes`.
+
+    The second governed human write in the product, and it carries the three
+    obligations `CPM-AD-14` puts on the first: a permission, a reason, and this row
+    written **in the same transaction** as the change (`CPM-OPERATE-S03`,
+    `CPM-FR-3` as amended). See `collectors/inventory.py` for the one writer.
+
+    `observed_at` and `objects` come from `AppendOnlyModel`, on the terms
+    `identity.IdentityOverride` states them: the instant is the moment this row's
+    fact was recorded, and the manager is the one that offers no `update()` and no
+    `delete()` (`CPM-AD-2`).
+
+    **Prior and new values are stored in pairs, for every changeable field,
+    including `retired`.** A row recording only what differed could not say whether
+    a field was left alone or never considered. An `add` records blank priors --
+    empty name, NULL counts, not retired -- because there was no row; a `retire`
+    records `prior_retired=False, new_retired=True` and the same counts on both
+    sides.
+
+    **The actor is nullable, and the nullability is a statement.** An import runs
+    unattended from the command line -- `manage.py import_watchlist`, the
+    deployment's `import-watchlist` admin process -- and has no person to name;
+    then `actor` is NULL and `origin` names the file. A human write names its
+    actor and leaves `origin` blank -- an import a person runs is the person's
+    write, and its reason names the file. `INVENTORY_CHANGE_AUTHOR_CONSTRAINT`
+    makes the database refuse a row naming neither or both, and
+    `INVENTORY_CHANGE_REASON_CONSTRAINT` one with no reason.
+
+    No unique constraint of any kind (`CPM-AD-2`): two changes to one entry are
+    two facts. Check constraints are permitted on an evidence model; only a
+    unique one is not.
+    """
+
+    #: The entry this change is about. `PROTECT`, as `EVIDENCE.02-AUDIT-001`
+    #: requires of every relation on an evidence model: the record of a change
+    #: outlives nothing, because the entry is never deleted -- retirement is a
+    #: column -- and a deletion collector reaching this table would go straight
+    #: past every append-only refusal.
+    entry = models.ForeignKey(
+        InventoryEntry,
+        on_delete=models.PROTECT,
+        related_name="changes",
+        verbose_name=_("entry"),
+    )
+
+    #: Who decided, or NULL for an unattended import. `PROTECT` on the same terms
+    #: `identity.IdentityOverride.actor` states: deleting a user must not delete
+    #: the record of what they decided.
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="inventory_changes",
+        verbose_name=_("actor"),
+        null=True,
+        blank=True,
+        default=None,
+    )
+
+    #: What an unattended write came from -- the watchlist file an import read.
+    #: Blank on a human write, which names its actor instead.
+    origin = models.CharField(_("origin"), max_length=_KEY_LENGTH, blank=True, default="")
+
+    #: The name before and after. Blank before an `add`.
+    prior_package_name = models.CharField(
+        _("prior package name"),
+        max_length=_ENTRY_NAME_LENGTH,
+        blank=True,
+        default="",
+    )
+    new_package_name = models.CharField(_("new package name"), max_length=_ENTRY_NAME_LENGTH)
+
+    #: The six signals before and after, NULL where the row did not state one --
+    #: and NULL on every prior column of an `add`.
+    prior_internal_component_count = models.PositiveIntegerField(
+        _("prior internal component count"),
+        null=True,
+        blank=True,
+        default=None,
+    )
+    new_internal_component_count = models.PositiveIntegerField(
+        _("new internal component count"),
+        null=True,
+        blank=True,
+        default=None,
+    )
+    prior_internal_lob_count = models.PositiveIntegerField(
+        _("prior internal LOB count"),
+        null=True,
+        blank=True,
+        default=None,
+    )
+    new_internal_lob_count = models.PositiveIntegerField(
+        _("new internal LOB count"),
+        null=True,
+        blank=True,
+        default=None,
+    )
+    prior_apps = models.PositiveIntegerField(_("prior apps"), null=True, blank=True, default=None)
+    new_apps = models.PositiveIntegerField(_("new apps"), null=True, blank=True, default=None)
+    prior_platforms = models.PositiveIntegerField(_("prior platforms"), null=True, blank=True, default=None)
+    new_platforms = models.PositiveIntegerField(_("new platforms"), null=True, blank=True, default=None)
+    prior_downloads = models.PositiveIntegerField(_("prior downloads"), null=True, blank=True, default=None)
+    new_downloads = models.PositiveIntegerField(_("new downloads"), null=True, blank=True, default=None)
+    prior_versions = models.PositiveIntegerField(_("prior versions"), null=True, blank=True, default=None)
+    new_versions = models.PositiveIntegerField(_("new versions"), null=True, blank=True, default=None)
+
+    #: Whether the entry was retired before and after. A boolean rather than a
+    #: status: it is a transcription of `retired_at IS NOT NULL`, not a verdict,
+    #: and `CPM-AD-5`'s rule is about derived statuses.
+    prior_retired = models.BooleanField(_("prior retired"), default=False)
+    new_retired = models.BooleanField(_("new retired"), default=False)
+
+    #: Why. Non-blank: the service refuses a blank reason before it writes.
+    reason = models.TextField(_("reason"))
+
+    #: The `trace_id` of the request or command the change was made in, formatted
+    #: `032x` (`CPM-AD-15`); empty when no span was active, which never blocks
+    #: the write.
+    trace_id = models.CharField(_("trace id"), max_length=_TRACE_ID_LENGTH, blank=True, default="")
+
+    class Meta:
+        """The table PRD Appendix A.2 names, newest first, and the permission the write requires."""
+
+        db_table = "inventory_changes"
+        verbose_name = _("inventory change")
+        verbose_name_plural = _("inventory changes")
+        ordering = ("-observed_at", "-id")
+        indexes = [
+            models.Index(fields=["entry", "-observed_at"], name=INVENTORY_CHANGE_READ_INDEX),
+        ]
+        constraints = [
+            models.CheckConstraint(condition=~models.Q(reason=""), name=INVENTORY_CHANGE_REASON_CONSTRAINT),
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(actor__isnull=False) & models.Q(origin=""))
+                    | (models.Q(actor__isnull=True) & ~models.Q(origin=""))
+                ),
+                name=INVENTORY_CHANGE_AUTHOR_CONSTRAINT,
+            ),
+        ]
+        #: The permission `CPM-AD-14` requires of the actor, declared on the model
+        #: the write records itself in. The codename is `core/roles.py`'s,
+        #: imported rather than restated, on `identity.IdentityOverride`'s terms.
+        permissions = [(INVENTORY_CHANGE_CODENAME, "Can change the inventory")]
+
+    def __str__(self) -> str:
+        """Return what changed, on which entry, by whom and when.
+
+        Returns:
+            A one-line summary, read off the id columns rather than the related
+            objects for the reason `IdentityOverride.__str__` gives.
+
+        """
+        scope = "no entry" if self.entry_id is None else f"entry {self.entry_id}"
+        who = f"user {self.actor_id}" if self.actor_id is not None else (self.origin or "nobody")
+        when = "never" if self.observed_at is None else self.observed_at.isoformat()
+        return f"{self.prior_package_name or '(no row)'} -> {self.new_package_name} on {scope} by {who} at {when}"

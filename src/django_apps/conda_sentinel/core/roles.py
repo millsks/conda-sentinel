@@ -43,6 +43,9 @@ __all__ = [
     "IDENTITY_APP_LABEL",
     "IDENTITY_OVERRIDE_CODENAME",
     "IDENTITY_OVERRIDE_PERMISSION",
+    "INVENTORY_APP_LABEL",
+    "INVENTORY_CHANGE_CODENAME",
+    "INVENTORY_CHANGE_PERMISSION",
     "LEADERSHIP",
     "PACKAGING_ENGINEER",
     "ROLE_ENVIRONMENT_VARIABLES",
@@ -96,6 +99,18 @@ IDENTITY_APP_LABEL: Final = "identity"
 IDENTITY_OVERRIDE_CODENAME: Final = "override_package_identity"
 IDENTITY_OVERRIDE_PERMISSION: Final = f"{IDENTITY_APP_LABEL}.{IDENTITY_OVERRIDE_CODENAME}"
 
+#: The second governed write and the codename that gates it (`CPM-OPERATE-S03`,
+#: `CPM-FR-3` as amended). The inventory is governed reference data in a table
+#: the `collectors` application declares -- `collectors.InventoryChange` attaches
+#: this codename on its `Meta.permissions`, exactly as `identity.IdentityOverride`
+#: attaches the first -- and `collectors/inventory.py`'s service is the one door
+#: that checks it. Declared here for the reason the first pair is: one spelling,
+#: importable at settings time, reconciled against the model's `_meta` by
+#: `tests/unit/django_apps/test_inventory_service.py`.
+INVENTORY_APP_LABEL: Final = "collectors"
+INVENTORY_CHANGE_CODENAME: Final = "change_inventory"
+INVENTORY_CHANGE_PERMISSION: Final = f"{INVENTORY_APP_LABEL}.{INVENTORY_CHANGE_CODENAME}"
+
 #: What each role group may do, keyed by **role slot** and never by group name.
 #:
 #: **One grant, and it is the first.** Every tuple here was empty until
@@ -112,6 +127,12 @@ IDENTITY_OVERRIDE_PERMISSION: Final = f"{IDENTITY_APP_LABEL}.{IDENTITY_OVERRIDE_
 #: product that mutates governed reference data, and `CPM-AD-14` puts the whole
 #: weight of the rule on it -- so its codename is the first thing there has ever
 #: been to grant, and it arrives with the write rather than with a surface.
+#:
+#: **Two grants since `CPM-OPERATE-S03`, both to leadership.** The inventory table
+#: is the second governed write `CPM-FR-3` names, and its permission arrives with
+#: the write on the terms the first did -- granted by `core/0011_grant_inventory_change`
+#: on every database, new and existing, because a data migration that already ran
+#: is not re-run by editing it.
 #:
 #: **Leadership alone, and the other two stay empty on purpose.** The security
 #: and compliance reviewer and the packaging engineer read the review queue and
@@ -139,7 +160,7 @@ IDENTITY_OVERRIDE_PERMISSION: Final = f"{IDENTITY_APP_LABEL}.{IDENTITY_OVERRIDE_
 ROLE_GROUP_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     SECURITY_REVIEWER: (),
     PACKAGING_ENGINEER: (),
-    LEADERSHIP: (IDENTITY_OVERRIDE_PERMISSION,),
+    LEADERSHIP: (IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION),
 }
 
 

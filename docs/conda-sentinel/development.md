@@ -27,7 +27,9 @@ authorization:
 pixi run -e dev seed-demo
 ```
 
-A hundred packages with evidence behind them, and one real policy run over both.
+The development watchlist imported into the governed inventory table, ingested by
+the product's own collector, a hundred of its 148 packages with evidence behind
+them, and one real policy run over all of it.
 Without it the screens render `unknown` everywhere — correct, and useless for judging
 a design, because every cell then has the value it would also have if the projection
 were broken.
@@ -47,22 +49,25 @@ KEV listing and a licence, and a unit test pins that shape.
 
 **It writes evidence, never a verdict, and asserts nothing it never observed.**
 Every status the seeded screens show was concluded by the pass that owns it, from
-the parameter file that ships. Identity goes through `resolve_package_shell` only
-(`CPM-AD-14`, `CPM-AD-25`), never `Package.objects.create` and never
-`record_resolution`: every package is seeded as a shell at `unmapped`, and the real
-`resolve_identity` collector is then run inline over all hundred, live against
-conda-forge's index and PyPI, so the repositories, purls and feedstocks on the
-screens are what the sources said. The two `internal-*` packages are unmapped
+the parameter file that ships. The seeder files no shell of its own (`CPM-AD-14`,
+`CPM-AD-25`): it imports the watchlist into the `inventory` table through the one
+service that writes it and runs the real `InventoryIngestionCollector` over the
+table, so every shell is the ingestion's, at `unmapped` and keyed the way a
+deployment's would be -- which is what lets `ingest_inventory` run onto a seeded
+stack without colliding. The real `resolve_identity` collector is then run inline
+over all 148, live against conda-forge's index and PyPI, so the repositories, purls
+and feedstocks on the screens are what the sources said. The two `internal-*` packages are unmapped
 because conda-forge has no entry for them, and the confidence gate blanking their
 rows is the gate working, not a fixture imitating it. Feedstock presence,
 upstream-release currency and Python readiness read `unknown` on a fresh seed until
 the stack's sweeps observe them — the seed no longer paints them.
 
-**It needs the network, and copes without it.** Online it takes about half a minute
-and makes roughly two hundred back-to-back requests to `raw.githubusercontent.com`
+**It needs the network, and copes without it.** Online it takes about a minute and
+makes roughly three hundred back-to-back requests to `raw.githubusercontent.com`
 and `pypi.org`, because the resolver runs *unmetered* at seed time — the daily sweep
-keeps the real allowance. A healthy seed prints `resolved=98 not_on_conda_forge=2
-unreachable=0 verified_kept=0`: the two `not_on_conda_forge` are the `internal-*`
+keeps the real allowance. A healthy seed prints `imported=148
+ingestion_state=succeeded resolved=146 not_on_conda_forge=2 unreachable=0
+verified_kept=0`: the two `not_on_conda_forge` are the `internal-*`
 names conda-forge has no entry for, and that is the healthy number. A `429` from
 either host lands a package `unreachable` and `unmapped`; the recovery is a second
 seed, which appends a second observation of everything else. Offline, after three

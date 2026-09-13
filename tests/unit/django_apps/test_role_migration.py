@@ -63,6 +63,21 @@ EXPECTED_GRANT_DEPENDENCIES = [
     ("identity", "0003_identity_override"),
 ]
 
+# `CPM-OPERATE-S03`'s grant: the second governed write's permission, on the
+# first's terms exactly -- a further migration rather than an edit to `0005`.
+INVENTORY_GRANT_MIGRATION_MODULE = "conda_sentinel.core.migrations.0011_grant_inventory_change"
+
+# Five entries again: `collectors.0013_inventory` is the model the codename hangs
+# off, `core.0005` the first grant this one converges with, `core.0010` this
+# application's own latest.
+EXPECTED_INVENTORY_GRANT_DEPENDENCIES = [
+    ("auth", "0012_alter_user_first_name_max_length"),
+    ("collectors", "0013_inventory"),
+    ("contenttypes", "0002_remove_content_type_name"),
+    ("core", "0005_grant_identity_override"),
+    ("core", "0010_background_jobs"),
+]
+
 # The module the role declaration lives in, read by the revocation case below.
 # Off `__file__` for the reason `migration_source` is: a hand-built path is a
 # second copy of a layout `tests/unit/test_import_roots.py` owns.
@@ -308,3 +323,82 @@ def test_the_role_declaration_cannot_revoke_by_omission(grant_migration_source: 
     """
     assert REVOCATION_NOTE in _prose(grant_migration_source)
     assert REVOCATION_NOTE in _prose(ROLES_MODULE)
+
+
+# ---------------------------------------------------------------------------
+# `core/0011_grant_inventory_change`: the second grant, on the first's terms.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def inventory_grant_migration() -> ModuleType:
+    """The second grant migration, imported per case for the reason its siblings are."""
+    return import_module(INVENTORY_GRANT_MIGRATION_MODULE)
+
+
+@pytest.fixture
+def inventory_grant_migration_source(inventory_grant_migration: ModuleType) -> Path:
+    """The second grant migration's own file, resolved from the imported module."""
+    assert inventory_grant_migration.__file__ is not None
+    return Path(inventory_grant_migration.__file__)
+
+
+def test_the_inventory_grant_is_a_single_non_elidable_run_python_operation(
+    inventory_grant_migration: ModuleType,
+) -> None:
+    """One data operation, forward and reverse, never squashed away."""
+    operations = inventory_grant_migration.Migration.operations
+
+    assert [type(operation).__name__ for operation in operations] == ["RunPython"]
+    operation = operations[0]
+    assert isinstance(operation, migrations.RunPython)
+    assert operation.code is inventory_grant_migration.forward
+    assert operation.reverse_code is inventory_grant_migration.reverse
+    assert operation.elidable is False
+
+
+def test_the_inventory_grant_runs_after_the_model_and_after_the_first_grant(
+    inventory_grant_migration: ModuleType,
+) -> None:
+    """`collectors.0013` makes the codename resolvable; `core.0005` is what this converges with."""
+    assert sorted(inventory_grant_migration.Migration.dependencies) == sorted(EXPECTED_INVENTORY_GRANT_DEPENDENCIES)
+
+
+def test_the_inventory_grant_creates_and_names_no_group(inventory_grant_migration_source: Path) -> None:
+    """AD-27 and the no-names rule, for the fifth file that could break either."""
+    source = inventory_grant_migration_source.read_text(encoding="utf-8")
+    contract = settings.ROLE_CONTRACT
+
+    assert group_creation_verbs(inventory_grant_migration_source) == set()
+    for name in (contract.security_reviewer, contract.packaging_engineer, contract.leadership):
+        assert name, "the suite must run against a configured role contract for this to mean anything"
+        assert name not in source, f"the inventory grant migration hardcodes the configured group name {name!r}"
+
+
+def test_the_inventory_grant_provisions_without_revoking_and_says_so(inventory_grant_migration_source: Path) -> None:
+    """`preserve_existing=True`, and the trade it buys stated where somebody would look."""
+    source = inventory_grant_migration_source.read_text(encoding="utf-8")
+
+    assert "preserve_existing=True" in source
+    assert "preserve_existing=False" not in source
+    assert REVOCATION_NOTE in _prose(inventory_grant_migration_source)
+
+
+def test_each_grant_provisions_only_its_own_codename(
+    grant_migration_source: Path, inventory_grant_migration_source: Path
+) -> None:
+    """The narrowing `CPM-OPERATE-S03` made to both grants, asserted over the source.
+
+    A grant that provisioned the whole contract logged the other grant's codename
+    as unresolved on every fresh `migrate` -- `0005` runs before
+    `collectors/0013_inventory` exists. Each `forward` now filters the contract to
+    the one permission it is about, and this is what keeps a third grant doing the
+    same rather than reintroducing the warning.
+    """
+    first = grant_migration_source.read_text(encoding="utf-8")
+    second = inventory_grant_migration_source.read_text(encoding="utf-8")
+
+    assert "code == IDENTITY_OVERRIDE_PERMISSION" in first
+    assert "INVENTORY_CHANGE_PERMISSION" not in first
+    assert "code == INVENTORY_CHANGE_PERMISSION" in second
+    assert "IDENTITY_OVERRIDE_PERMISSION" not in second

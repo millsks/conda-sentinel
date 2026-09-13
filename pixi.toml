@@ -442,6 +442,12 @@ COVERAGE_CORE = "ctrace"
 # than disarmed.
 [feature.dev.activation.env]
 COMPONENT_RUNTIME = "local"
+# The inventory source the local stack and the suite read (CPM-OPERATE-S03):
+# the governed table `stack-seed` imports the development watchlist into and
+# ingests from, rather than the file inside the wheel. `default` declares
+# nothing and so reads the reviewed file, which is the direction that fails
+# closed for a deployment that has never run `import-watchlist`.
+CPM_INVENTORY_SOURCE = "database"
 # Turns on django-debug-toolbar and django-extensions in
 # config/settings/local.py. They ship only in this feature, so the runtime
 # environment leaves the flag off and Django starts without them.
@@ -501,6 +507,14 @@ prune = { cmd = "python manage.py prune_expired_state", default-environment = "d
 ingest = { cmd = "python manage.py ingest_inventory", default-environment = "default", description = "Admin process: enqueue one inventory ingestion (cpm.collect.inventory)" }
 sweep = { cmd = "python manage.py dispatch_sweep --all", default-environment = "default", description = "Admin process: enqueue a dispatch of every swept collector (cpm.collect.sweep)" }
 policy-run = { cmd = "python manage.py run_policy", default-environment = "default", description = "Admin process: enqueue a policy run at the newest recorded version (cpm.policy.run)" }
+# The fourth admin process (`CPM-OPERATE-S03`), on the same terms, and the one
+# that writes rather than enqueues: it brings the governed inventory table into
+# line with the watchlist file locality selects, one audited transaction per
+# row. `--replace`, because the reviewed file is the whole inventory: a package
+# review removed from it is retired (never deleted), and a row a person retired
+# on the page is left retired whatever the file says.
+# Locally: `pixi run stack-run import_watchlist [<path>] [--replace]`.
+import-watchlist = { cmd = "python manage.py import_watchlist --replace", default-environment = "default", description = "Admin process: bring the inventory table into line with the reviewed watchlist file (audited, one transaction per row; retires what the file no longer names)" }
 # The cross-platform *local* ASGI server, and not a process type. uvicorn runs
 # on all three platforms, unlike the gunicorn+uvicorn-worker pairing the `web`
 # process uses, which is POSIX-only -- which is the only reason this task exists
@@ -703,7 +717,7 @@ flower = { cmd = "celery -A config.celery_app flower --address=127.0.0.1 --port=
 # copies of one database URL is exactly the shape that produced the defect, and a
 # fifth task added later that seeds the wrong database would reproduce it.
 stack-migrate = { cmd = "python manage.py migrate", default-environment = "dev", env = { REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["docker-up"], description = "Apply migrations to the local stack's PostgreSQL" }
-stack-seed = { cmd = "python -m config.local_dev.seed_demo", default-environment = "dev", env = { CELERY_TASK_ALWAYS_EAGER = "1", REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-personas"], description = "Seed personas and the demo inventory into the local stack; resolves identity live against conda-forge and PyPI" }
+stack-seed = { cmd = "python -m config.local_dev.seed_demo", default-environment = "dev", env = { CELERY_TASK_ALWAYS_EAGER = "1", REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-personas"], description = "Seed personas and the demo inventory into the local stack: imports the development watchlist into the inventory table, ingests it, resolves identity live against conda-forge and PyPI" }
 stack-personas = { cmd = "python -m config.local_dev.seed", default-environment = "dev", env = { REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-migrate"], description = "Seed the local development personas into the local stack" }
 
 # The operator's way in (`CPM-OPERATE-S01`). Every hand-run action against the stack

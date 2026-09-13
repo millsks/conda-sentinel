@@ -48,6 +48,7 @@ from conda_sentinel.core.registry import registered_collectors
 from conda_sentinel.policies.management.commands.run_policy import recorded_versions
 from conda_sentinel.policies.management.commands.run_policy import version_key
 from conda_sentinel.policies.parameters import VERSIONS_TABLE
+from conda_sentinel.policies.parameters import newest_recorded_version
 from conda_sentinel.policies.parameters import parameters_file
 from config.component import load_component_declaration
 from tests.passes import THE_NEWEST_RECORDED_POLICY_VERSION
@@ -56,13 +57,15 @@ from tests.pixi_manifest import task_command
 from tests.pixi_manifest import task_env
 from tests.pixi_manifest import tasks_named
 
-#: The three admin processes this story declares, and the management command
-#: each root task must invoke. The task name is the `[[admin_processes]]` `task`
-#: and the `[tasks]` key; the command is what `python manage.py` is given.
+#: The admin processes `CPM-OPERATE-S02` declared and the one `CPM-OPERATE-S03`
+#: added, and the management command each root task must invoke. The task name
+#: is the `[[admin_processes]]` `task` and the `[tasks]` key; the command is what
+#: `python manage.py` is given.
 ADMIN_PROCESSES: Final[dict[str, str]] = {
     "ingest": "ingest_inventory",
     "sweep": "dispatch_sweep --all",
     "policy-run": "run_policy",
+    "import-watchlist": "import_watchlist --replace",
 }
 
 #: The one admin process that predates this story, so a case about "exactly
@@ -216,6 +219,9 @@ def test_the_newest_recorded_version_is_the_pinned_oracle() -> None:
 
     assert newest == THE_NEWEST_RECORDED_POLICY_VERSION
     assert recorded_versions()[-1] == THE_NEWEST_RECORDED_POLICY_VERSION
+    # The one rule both the command and the demo seeder derive "newest" through
+    # since `CPM-OPERATE-S03`, measured against the same oracle.
+    assert newest_recorded_version() == THE_NEWEST_RECORDED_POLICY_VERSION
 
 
 # ---------------------------------------------------------------------------

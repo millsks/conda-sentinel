@@ -44,7 +44,7 @@ A bare `FR-17` in this repository is the platform's authentication-surface allow
 
 - **CPM-FR-1** — Resolve package identity. The system resolves each inventory package to a canonical name, a source repository, its release ecosystem identity (PyPI for the Python packages v1 targets), and zero or more conda-forge feedstocks.
 - **CPM-FR-2** — Persist identity provenance and confidence. Every resolution records where it came from and how confident it is.
-- **CPM-FR-3** — Manual package-identity override. A platform lead can correct a package identity from the application, on the record. This is the only human write that mutates **governed reference data**. Queue actions (CPM-FR-25) write **workflow state**, which is a separate class: it records what a human decided about a finding, and never alters the package identity or the evidence beneath it.
+- **CPM-FR-3** — Manual package-identity override, and the inventory change. A platform lead can correct a package identity from the application, on the record, and can add, change or retire an inventory row from the application, on the record. These are the **two** human writes that mutate **governed reference data** — package identity and the inventory — and each carries a permission, a required reason and an audit row in the same transaction (amended by `sprint-change-proposal-2026-09-13.md` §7, CPM-OPERATE-S03). Queue actions (CPM-FR-25) write **workflow state**, which is a separate class: it records what a human decided about a finding, and never alters the package identity, the inventory or the evidence beneath them.
 - **CPM-FR-4** — Package-identity review queue. Unmapped and low-confidence packages surface as a worked queue, not a report.
 - **CPM-FR-5** — Confidence gates what automation may claim. Confidence constrains what the system asserts about a package.
 - **CPM-FR-6** — Not-applicable is a distinct outcome. A check that does not apply to a package is never folded into clean or unknown.
@@ -391,7 +391,8 @@ options: a shell and a runner that carry the stack's environment, ingestion and 
 policy runs as management commands and admin processes, the inventory as a governed table
 shared by every pod and by the demo, a first sweep on day one, an authenticated GitHub allowance, a local
 channel default, ninety days of evidence purged nightly, a per-package re-run from the
-page, an operator digest, and the evidence tables measured at ten thousand packages.
+page, an operator digest, the evidence tables measured at ten thousand packages, and
+an absent package leaving the queues.
 
 **User outcome:** an operator can add, resolve, observe, re-run and retire packages on the
 running product with named commands, on day one, without a Python shell.
@@ -3675,6 +3676,59 @@ with this blast radius is amended in the spine, not made in a migration.
 
 **Constrained:** a spike with a measured verdict first; indexes on evidence.
 Partitioning only after the amendment.
+
+### CPM-OPERATE-S11: An absent package leaves the queues
+
+> **Added on 2026-09-13** while `CPM-OPERATE-S03` was being built. That story's survey
+> found that its acceptance line "keeps every row, leaves the queues" described behaviour
+> that did not exist: nothing downstream reads inventory absence. The identity queue sorts
+> an absent package last for want of breadth and workflow opening still opens items for
+> it. The product owner chose to decide it inside this epic rather than defer.
+
+As a platform lead,
+I want a package the inventory no longer lists to stop asking for my attention,
+So that the queues carry the packages the organization runs, and the evidence about a
+retired one stays exactly where it was.
+
+**Acceptance Criteria:**
+
+**Given** a package whose newest inventory snapshot is `not_found`
+**When** the identity review selection runs
+**Then** the package is not offered, and the selection says how many packages were left
+out for absence
+
+**Given** the same package with open workflow items
+**When** the next policy run's workflow opening runs
+**Then** it opens no new item for the package, and its open items are closed with a
+recorded reason naming the absence -- a workflow-state write, never an identity or
+evidence write
+
+**Given** the same package
+**When** the rollup is refreshed
+**Then** it keeps its one row (`CPM-AD-11`), its statuses are computed as for any other
+package, and the surface labels it absent from the inventory with the date it was last
+listed, on the package page and wherever it appears in a list
+
+**Given** the package is listed again by a later ingestion
+**When** the next selection and opening run
+**Then** it is offered and opened as any other package, with no manual step
+
+**Given** the feedstock-gap report, the only surface permitted to exclude packages
+**When** it is rendered
+**Then** absent packages are excluded and the exclusion is stated with its count and
+reason, as that surface already states its other exclusion
+
+**Satisfies:** `CPM-FR-4` (the review set is the packages the organization has),
+`CPM-FR-42`, `CPM-FR-38` (absence is visible, never silent).
+**Governed by:** `CPM-AD-25` -- absence is an observation, the newest snapshot at the
+run's cut-off decides, and no row is ever deleted; `CPM-AD-22` -- every queue item is
+the workflow app's, and closing one is a workflow-state write with an actor of
+`system` and a reason; `CPM-AD-11`; `CPM-AD-4` -- an absent package is still gated by
+its confidence, never by its absence.
+
+**Constrained:** absence is read from the inventory snapshot at the policy run's
+cut-off (`CPM-AD-25`'s "every reader is cut-off bound"), so a replay reproduces the
+same queue.
 
 ## Test design integration
 

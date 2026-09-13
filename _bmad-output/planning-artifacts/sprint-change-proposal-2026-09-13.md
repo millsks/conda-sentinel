@@ -57,7 +57,7 @@ implementing agent from measured behaviour.
 
 ### Story impact
 
-Ten stories, `CPM-OPERATE-S01`–`S10`, ordered by dependency: the stack shell first (every
+Eleven stories, `CPM-OPERATE-S01`–`S11`, ordered by dependency: the stack shell first (every
 later story is used through it), then the commands, then one inventory, then day-one
 observation, then the three declarations (GitHub token, local channel default, retention),
 then the per-package re-run from the page, which lands after `S02` so both enqueue the
@@ -102,7 +102,7 @@ the build-order graph gains `ID --> OP`, `CUR --> OP`, `APP --> OP`. Stories: a 
 
 ### 4b. sprint-status.yaml
 
-A `# CPM-EP-OPERATE` block after `CPM-EP-NL`: `epic-operate: backlog`, ten story keys at
+A `# CPM-EP-OPERATE` block after `CPM-EP-NL`: `epic-operate: backlog`, eleven story keys at
 `backlog`, `epic-operate-retrospective: optional`.
 
 ### 4c. Not changed
@@ -112,6 +112,14 @@ propose an amendment to `CPM-FR-3` ("the only human write that mutates governed 
 data") to name the inventory write beside the identity override; that amendment travels
 with the story's pull request. No architecture decision is amended. Should `S07` need an amendment to `CPM-AD-2`'s wording ("one audited
 door"), that is the story's to propose when it is built.
+
+### 4d. Added during implementation
+
+`CPM-OPERATE-S11` (an absent package leaves the queues) was added on 2026-09-13 while
+`S03` was being built, after its survey found that nothing downstream reads inventory
+absence and the epic's line "leaves the queues" described behaviour that did not exist.
+The product owner chose to decide it in this epic. `S03` documents absence as it is and
+points at `S11`.
 
 ## 5. Implementation Handoff
 
@@ -126,3 +134,38 @@ later story's verification runs through it.
   not to operating the inventory.
 - **The override correcting a mapping** (`numba`'s repository by hand). A `CPM-IDENTITY-S09`
   candidate; it widens `CPM-IDENTITY-S05`'s `Correction` and is that epic's to sequence.
+
+## 7. CPM-FR-3 amendment
+
+Proposed by `CPM-OPERATE-S03` and applied with its pull request, as §4c said it would be.
+
+**What changes.** `CPM-FR-3` said the identity override "is the only human write that
+mutates governed reference data". `S03` moves the watchlist from a CSV inside the wheel to
+a governed table, and a row in that table is changed by a person on the inventory page.
+That is a second human write, and the requirement is amended to say so rather than
+left to be contradicted by the code:
+
+- **PRD `CPM-FR-3`** is retitled "Manual package-identity override, and the inventory
+  change", names **two** governed human writes — package identity and the inventory —
+  and puts the same three obligations on each: a permission, a required reason, and an
+  audit row (actor, timestamp, prior value, new value, reason) in the same transaction.
+  Its consequences gain the retire-is-a-column-write rule and the unattended import's
+  audit rows naming the file. A wrong identity is corrected through the override, never
+  through the inventory.
+- **PRD glossary, "Governed reference data"** now includes the inventory and says "two
+  human paths".
+- **PRD Appendix A.2** gains `inventory_changes` as an evidence table and names the
+  mutable `inventory` table beneath it as governed reference data that ingestion reads.
+- **`epics.md`'s `CPM-FR-3` line** carries the same sentence.
+
+**What does not change.** `CPM-AD-14`'s wording — "one governed write path, three
+obligations" — is read as one *shape* of write path, which both writes now share; the
+architecture spine is not amended. `CPM-FR-27`'s two API writes are unchanged: the
+inventory change is an HTML form, not an endpoint, and
+`tests/unit/django_apps/test_api_contract_audit.py` keeps pinning two. `CPM-FR-42`'s
+"a package present in an earlier run and absent from a later one is recorded as absent"
+is what a retirement produces, unchanged.
+
+**Why now.** The epic context gated the surface write on this amendment being accepted;
+until it is, `import-watchlist` is the only way rows change. The story ships both, so
+the amendment ships in the same commit.

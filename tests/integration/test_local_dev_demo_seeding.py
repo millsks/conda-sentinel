@@ -16,11 +16,20 @@ index answered `404` for them rather than because a field said so.
 
 **The network is a script.** `seed_demo_inventory(transport=...)` is the seam
 `CPM-AD-27` opens, and every case here passes a `ScriptedTransport` that answers
-conda-forge's index and PyPI's project document per roster name. A locator nothing
-scripted raises, so a seed that reached for anything else fails here rather than
-opening a socket. One case scripts a failure for every locator, which is what a
-laptop on an aeroplane looks like to the resolver, and asserts the seed completes
-with every package honestly `unmapped`.
+conda-forge's index and PyPI's project document per *watchlist* name -- every
+package the development watchlist carries, of which the roster's hundred are a
+subset since `CPM-OPERATE-S03`. A locator nothing scripted raises, so a seed that
+reached for anything else fails here rather than opening a socket.
+
+**The inventory is the product's own.** The seed imports the development
+watchlist into the governed table and runs the real ingestion collector over it,
+so the cases here assert what that produces: every package keyed
+`("inventory", "conda-forge/<name>")`, an `InventorySnapshot` per package, an
+`inventory` run beside the resolver's, and 148 audit rows naming the file.
+
+**One case scripts a failure for every locator**, which is what a laptop on an
+aeroplane looks like to the resolver, and asserts the seed completes with every
+package honestly `unmapped`.
 
 **The variety cases are re-derived from what the seeded evidence factually
 yields.** With a PyPI snapshot only where the resolver found the project, an
@@ -48,6 +57,9 @@ from conda_sentinel.collectors import resolve_identity as resolve_identity_modul
 from conda_sentinel.collectors.models import CondaPackageSnapshot
 from conda_sentinel.collectors.models import FeedstockSnapshot
 from conda_sentinel.collectors.models import IdentityResolutionSnapshot
+from conda_sentinel.collectors.models import InventoryChange
+from conda_sentinel.collectors.models import InventoryEntry
+from conda_sentinel.collectors.models import InventorySnapshot
 from conda_sentinel.collectors.models import KevFinding
 from conda_sentinel.collectors.models import LicenseFinding
 from conda_sentinel.collectors.models import PyPIReleaseSnapshot
@@ -58,6 +70,10 @@ from conda_sentinel.collectors.models import VulnerabilityFinding
 from conda_sentinel.collectors.resolve_identity import COLLECTOR_NAME
 from conda_sentinel.collectors.resolve_identity import index_locator
 from conda_sentinel.collectors.resolve_identity import project_locator
+from conda_sentinel.collectors.tasks import COLLECTOR_NAME as INVENTORY_COLLECTOR_NAME
+from conda_sentinel.collectors.watchlist import WATCHLIST_ENCODING
+from conda_sentinel.collectors.watchlist import records_from
+from conda_sentinel.collectors.watchlist import watchlist_path
 from conda_sentinel.core.models import CollectionRun
 from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.core.models import PolicyRun
@@ -77,17 +93,42 @@ from config.local_dev import demo_data
 from config.local_dev.demo_data import DEMO_COLLECTOR
 from config.local_dev.demo_data import DEMO_PACKAGES
 from config.local_dev.demo_data import RESOLUTION_ABANDONED_EVENT
+from config.local_dev.demo_data import SEED_REASON
 from config.local_dev.demo_data import UNREACHABLE_STREAK_LIMIT
 from config.local_dev.demo_data import UNRESOLVED_EVENT
 from config.local_dev.demo_data import seed_demo_inventory
 from config.locality import RUNTIME_ENV_VAR
 from tests.collectors import ScriptedTransport
 from tests.collectors import recorded_payload
+from tests.passes import THE_NEWEST_RECORDED_POLICY_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from django_service.users.models import User
+
 pytestmark = pytest.mark.integration
+
+#: The development watchlist, parsed once: the inventory the seed imports and
+#: ingests, and therefore the set of packages the resolver is offered.
+THE_WATCHLIST: Final = watchlist_path(local=True)
+WATCHLIST_RECORDS: Final[tuple[dict[str, str | int], ...]] = tuple(
+    records_from(THE_WATCHLIST.read_text(encoding=WATCHLIST_ENCODING), watchlist=THE_WATCHLIST),
+)
+WATCHLIST_NAMES: Final[tuple[str, ...]] = tuple(str(record["package_name"]) for record in WATCHLIST_RECORDS)
+WATCHLIST_KEYS: Final[dict[str, str]] = {
+    str(record["package_name"]): str(record["source_package_key"]) for record in WATCHLIST_RECORDS
+}
+
+#: How many packages the seed produces: every row the watchlist carries.
+SEEDED_PACKAGES: Final[int] = len(WATCHLIST_NAMES)
+
+#: How many `inventory` runs a seed followed by one hand ingestion leaves.
+A_SEED_AND_AN_INGESTION: Final[int] = 2
+
+#: A version the scripted PyPI document states for a package the roster has no
+#: pair for. Any string would do; the seed writes no PyPI row for those.
+A_VERSION: Final[str] = "1.0.0"
 
 #: The names the scripted index answers `404` for -- the two that are not packages.
 #:
@@ -114,8 +155,11 @@ WITH_ADVISORY: Final[int] = sum(1 for demo in DEMO_PACKAGES if demo.advisory)
 #: How many roster rows state a licence, which is how many licence findings the seed writes.
 WITH_LICENCE: Final[int] = sum(1 for demo in DEMO_PACKAGES if demo.licence)
 
-#: How many packages the script lets the resolver resolve -- and so how many PyPI rows the seed writes.
-RESOLVABLE: Final[int] = len(DEMO_PACKAGES) - len(NOT_ON_CONDA_FORGE)
+#: How many packages the script lets the resolver resolve.
+RESOLVABLE: Final[int] = SEEDED_PACKAGES - len(NOT_ON_CONDA_FORGE)
+
+#: How many PyPI rows the seed writes: one per roster package the resolver found on PyPI.
+WITH_PYPI_ROW: Final[int] = len(DEMO_PACKAGES) - len(NOT_ON_CONDA_FORGE)
 
 #: The healthy summary against the script, which is also the healthy one against the network.
 A_HEALTHY_SUMMARY: Final[dict[str, int]] = {
@@ -171,19 +215,20 @@ def _scripted(*, absent: Iterable[str] = NOT_ON_CONDA_FORGE) -> ScriptedTranspor
 
     """
     missing = frozenset(absent)
+    versions = {demo.name: demo.upstream_version for demo in DEMO_PACKAGES}
     answers = {}
-    for demo in DEMO_PACKAGES:
-        index = index_locator(demo.name)
-        if demo.name in missing:
+    for name in WATCHLIST_NAMES:
+        index = index_locator(name)
+        if name in missing:
             answers[index] = recorded_payload(source=index, found=False, body="")
             continue
-        answers[index] = recorded_payload(source=index, body=json.dumps({"feedstocks": [demo.name]}))
-        project = project_locator(demo.name)
+        answers[index] = recorded_payload(source=index, body=json.dumps({"feedstocks": [name]}))
+        project = project_locator(name)
         document = {
             "info": {
-                "name": demo.name,
-                "version": demo.upstream_version,
-                "project_urls": {"Source": _repository_for(demo.name)},
+                "name": name,
+                "version": versions.get(name, A_VERSION),
+                "project_urls": {"Source": _repository_for(name)},
             },
         }
         answers[project] = recorded_payload(source=project, body=json.dumps(document))
@@ -198,8 +243,8 @@ def _unreachable() -> ScriptedTransport:
 
     """
     failures = {}
-    for demo in DEMO_PACKAGES:
-        for locator in (index_locator(demo.name), project_locator(demo.name)):
+    for name in WATCHLIST_NAMES:
+        for locator in (index_locator(name), project_locator(name)):
             failures[locator] = TransportError("connection refused", source=locator)
     return ScriptedTransport(failures=failures)
 
@@ -268,9 +313,9 @@ def test_every_declared_package_reaches_the_rollup(seeded: dict[str, object]) ->
         seeded: What the seeder reported.
 
     """
-    assert Package.objects.count() == len(DEMO_PACKAGES)
-    assert PackageHealth.objects.count() == len(DEMO_PACKAGES)
-    assert seeded["rollup_rows"] == len(DEMO_PACKAGES)
+    assert Package.objects.count() == SEEDED_PACKAGES
+    assert PackageHealth.objects.count() == SEEDED_PACKAGES
+    assert seeded["rollup_rows"] == SEEDED_PACKAGES
 
 
 @pytest.mark.django_db
@@ -290,6 +335,9 @@ def test_every_rollup_row_belongs_to_the_run_the_seeder_executed(seeded: dict[st
 
     assert run.finished_at is not None
     assert set(PackageHealth.objects.values_list("policy_run_id", flat=True)) == {run.pk}
+    # At the newest recorded version, through the one rule `run_policy` uses too
+    # (`policies.parameters.newest_recorded_version`), pinned against the oracle.
+    assert seeded["policy_version"] == THE_NEWEST_RECORDED_POLICY_VERSION
 
 
 @pytest.mark.django_db
@@ -306,7 +354,7 @@ def test_every_status_has_a_pass_row_behind_it(seeded: dict[str, object]) -> Non
     """
     run = PolicyRun.objects.get(policy_version=seeded["policy_version"])
 
-    assert PackageVulnerability.objects.filter(policy_run=run).count() == len(DEMO_PACKAGES)
+    assert PackageVulnerability.objects.filter(policy_run=run).count() == SEEDED_PACKAGES
 
 
 @pytest.mark.django_db
@@ -328,7 +376,7 @@ def test_the_seeder_writes_exactly_the_four_real_sourced_kinds_of_evidence(seede
         seeded: What the seeder reported.
 
     """
-    assert PyPIReleaseSnapshot.objects.count() == RESOLVABLE
+    assert PyPIReleaseSnapshot.objects.count() == WITH_PYPI_ROW
     assert PyPIReleaseSnapshot.objects.filter(package__canonical_name__in=NOT_ON_CONDA_FORGE).count() == 0
     assert VulnerabilityFinding.objects.count() == len(DEMO_PACKAGES)
     assert KevFinding.objects.count() == WITH_ADVISORY
@@ -359,9 +407,12 @@ def test_a_pypi_snapshot_is_written_only_where_the_resolver_found_the_project(se
     """The PyPI row follows the `release_ecosystem` mapping, not the roster.
 
     Every package with a PyPI row has an `established` release-ecosystem mapping
-    written by the resolver minutes earlier, and every package with that mapping
-    has a PyPI row. The seed is ordered shells, resolver, evidence for exactly
-    this: the evidence is chosen after the resolver has said what PyPI has.
+    written by the resolver minutes earlier, and every *roster* package with that
+    mapping has a PyPI row -- the roster is where the version pair comes from, so
+    a watchlist-only package the resolver found on PyPI gets no row: nobody
+    harvested a version for it. The seed is ordered import, ingestion, resolver,
+    evidence for exactly this: the evidence is chosen after the resolver has said
+    what PyPI has.
 
     Args:
         seeded: What the seeder reported.
@@ -373,9 +424,136 @@ def test_a_pypi_snapshot_is_written_only_where_the_resolver_found_the_project(se
         ),
     )
     with_row = set(PyPIReleaseSnapshot.objects.values_list("package_id", flat=True))
+    roster_on_pypi = set(
+        Package.objects.filter(pk__in=on_pypi, canonical_name__in=[demo.name for demo in DEMO_PACKAGES]).values_list(
+            "pk", flat=True
+        ),
+    )
 
-    assert with_row == on_pypi
-    assert len(with_row) == RESOLVABLE
+    assert with_row == roster_on_pypi
+    assert with_row < on_pypi
+    assert len(with_row) == WITH_PYPI_ROW
+
+
+# ---------------------------------------------------------------------------
+# The inventory: imported into the governed table, ingested by the product's
+# own collector, and never a second inventory (CPM-OPERATE-S03).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_the_seed_imports_the_watchlist_into_the_table_with_an_audit_row_per_entry(seeded: dict[str, object]) -> None:
+    """One entry per watchlist row, every one active, and one audit row each naming the file.
+
+    Unattended, so `actor` is NULL and `origin` is the file; the reason is the
+    seed's own words. Every audit row is an `add` -- blank prior name -- because
+    the table was empty.
+
+    Args:
+        seeded: What the seeder reported.
+
+    """
+    assert seeded["watchlist"] == str(THE_WATCHLIST)
+    assert seeded["imported"] == SEEDED_PACKAGES
+    assert InventoryEntry.objects.count() == SEEDED_PACKAGES
+    assert InventoryEntry.objects.filter(retired_at__isnull=False).count() == 0
+    assert set(InventoryEntry.objects.values_list("source_package_key", flat=True)) == set(WATCHLIST_KEYS.values())
+    changes = InventoryChange.objects.all()
+    assert changes.count() == SEEDED_PACKAGES
+    assert set(changes.values_list("actor", flat=True)) == {None}
+    assert set(changes.values_list("origin", flat=True)) == {str(THE_WATCHLIST)}
+    assert set(changes.values_list("reason", flat=True)) == {SEED_REASON}
+    assert set(changes.values_list("prior_package_name", flat=True)) == {""}
+
+
+@pytest.mark.django_db
+def test_every_package_is_keyed_by_the_ingestion_and_carries_an_inventory_snapshot(seeded: dict[str, object]) -> None:
+    """The acceptance criterion's shape: one key scheme, one shell writer, real snapshots.
+
+    Every package is filed under `("inventory", <the watchlist's key>)` -- which
+    is what the product's own ingestion writes -- and none under the `pypi:`
+    scheme the first seeder invented, which is what collided with the watchlist
+    on every shared name. Every package has exactly one `ok` inventory snapshot
+    from the one inline run, and the snapshot's counts are the watchlist's.
+
+    Args:
+        seeded: What the seeder reported.
+
+    """
+    assert seeded["ingested_rows"] == SEEDED_PACKAGES
+    assert set(Package.objects.values_list("identity_source", flat=True)) == {INVENTORY_COLLECTOR_NAME}
+    assert set(Package.objects.values_list("associator_key", flat=True)) == set(WATCHLIST_KEYS.values())
+    assert not Package.objects.filter(associator_key__startswith="pypi:").exists()
+    assert InventorySnapshot.objects.count() == SEEDED_PACKAGES
+    assert set(InventorySnapshot.objects.values_list("state", flat=True)) == {OutcomeState.OK.value}
+    assert set(InventorySnapshot.objects.values_list("package_id", flat=True)) == set(
+        Package.objects.values_list("pk", flat=True),
+    )
+    numpy = next(record for record in WATCHLIST_RECORDS if record["package_name"] == "numpy")
+    snapshot = InventorySnapshot.objects.get(package__canonical_name="numpy")
+    assert snapshot.source_package_key == numpy["source_package_key"]
+    assert snapshot.internal_component_count == numpy["internal_component_count"]
+    assert snapshot.internal_lob_count == numpy["internal_lob_count"]
+
+
+@pytest.mark.django_db
+def test_ingesting_onto_a_seeded_database_raises_nothing_and_creates_nothing(seeded: dict[str, object]) -> None:
+    """The collision that motivated the story, kept closed: `stack-seed` then `ingest`.
+
+    The ingestion task, through the database adapter the stack declares, over a
+    database the seed just filled: no `IntegrityError` on `canonical_name`, no
+    second shell for any package, one more snapshot per package, and nothing
+    recorded absent because the table names everything the last run saw.
+
+    Args:
+        seeded: What the seeder reported.
+
+    """
+    from conda_sentinel.collectors.inventory_source import DatabaseInventoryAdapter  # noqa: PLC0415 - see below
+    from conda_sentinel.collectors.tasks import declare_inventory_adapter  # noqa: PLC0415 - read beside the claim
+    from conda_sentinel.collectors.tasks import ingest_inventory  # noqa: PLC0415 - as above
+    from conda_sentinel.collectors.tasks import withdraw_inventory_adapter  # noqa: PLC0415 - as above
+
+    declare_inventory_adapter(DatabaseInventoryAdapter())
+    try:
+        state = ingest_inventory(force=True)
+    finally:
+        withdraw_inventory_adapter()
+
+    assert state == RunState.SUCCEEDED.value
+    assert Package.objects.count() == SEEDED_PACKAGES
+    assert InventorySnapshot.objects.count() == 2 * SEEDED_PACKAGES
+    assert InventorySnapshot.objects.filter(state=OutcomeState.NOT_FOUND.value).count() == 0
+    assert CollectionRun.objects.filter(collector=INVENTORY_COLLECTOR_NAME).count() == A_SEED_AND_AN_INGESTION
+
+
+@pytest.mark.django_db
+def test_a_roster_name_the_watchlist_does_not_carry_is_refused_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The roster is an overlay, and a name only it carries is a defect in the roster, not a shell to invent.
+
+    Refused naming the package, and refused before the import: the table, the
+    package table and the ledger are all still empty afterwards.
+
+    Args:
+        monkeypatch: pytest's patcher, which restores the roster.
+
+    """
+    from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415 - local to this case
+
+    from config.local_dev.demo_data import DemoPackage  # noqa: PLC0415 - as above
+
+    stray = DemoPackage("not-in-the-watchlist", "1.0.0", "1.0.0")
+    monkeypatch.setattr(demo_data, "DEMO_PACKAGES", (*DEMO_PACKAGES, stray))
+
+    with pytest.raises(ImproperlyConfigured, match=r"not-in-the-watchlist"):
+        seed_demo_inventory(transport=_scripted())
+
+    assert InventoryEntry.objects.count() == 0
+    assert InventoryChange.objects.count() == 0
+    assert Package.objects.count() == 0
+    assert CollectionRun.objects.count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -387,19 +565,27 @@ def test_a_pypi_snapshot_is_written_only_where_the_resolver_found_the_project(se
 def test_the_resolver_ran_once_per_package_under_its_own_name(seeded: dict[str, object]) -> None:
     """The resolver's runs are real runs, and the Coverage screen showing them is telling the truth.
 
-    Two collectors in the ledger and no more: the seeder's own run under a name that
-    is not registered, and a hundred `resolve_identity` runs -- one per package,
-    every one finished rather than left `running`.
+    Three collectors in the ledger and no more: the seeder's own run under a name
+    that is not registered, one `inventory` run -- the real ingestion, inline --
+    and one `resolve_identity` run per package the watchlist names, every one
+    finished rather than left `running`.
 
     Args:
         seeded: What the seeder reported.
 
     """
-    assert set(CollectionRun.objects.values_list("collector", flat=True)) == {DEMO_COLLECTOR, COLLECTOR_NAME}
+    assert set(CollectionRun.objects.values_list("collector", flat=True)) == {
+        DEMO_COLLECTOR,
+        COLLECTOR_NAME,
+        INVENTORY_COLLECTOR_NAME,
+    }
     resolutions = CollectionRun.objects.filter(collector=COLLECTOR_NAME)
-    assert resolutions.count() == len(DEMO_PACKAGES)
+    assert resolutions.count() == SEEDED_PACKAGES
     assert set(resolutions.values_list("status", flat=True)) == {RunState.SUCCEEDED.value}
     assert CollectionRun.objects.filter(collector=DEMO_COLLECTOR).count() == 1
+    ingestion = CollectionRun.objects.get(collector=INVENTORY_COLLECTOR_NAME)
+    assert ingestion.status == RunState.SUCCEEDED.value
+    assert seeded["ingestion_state"] == RunState.SUCCEEDED.value
 
 
 @pytest.mark.django_db
@@ -431,8 +617,8 @@ def test_the_seed_asks_the_script_and_nothing_else(seeded: dict[str, object], tr
         transport: The script, which recorded every call.
 
     """
-    assert seeded["rollup_rows"] == len(DEMO_PACKAGES)
-    expected = 2 * (len(DEMO_PACKAGES) - len(NOT_ON_CONDA_FORGE)) + len(NOT_ON_CONDA_FORGE)
+    assert seeded["rollup_rows"] == SEEDED_PACKAGES
+    expected = 2 * (SEEDED_PACKAGES - len(NOT_ON_CONDA_FORGE)) + len(NOT_ON_CONDA_FORGE)
     assert len(transport.calls) == expected
     assert set(transport.calls) <= set(transport.answers)
 
@@ -482,7 +668,7 @@ def test_every_package_the_index_answered_for_was_resolved_from_what_it_said(see
     resolved = Package.objects.exclude(canonical_name__in=THE_UNMAPPED_PACKAGES)
 
     assert THE_UNMAPPED_PACKAGES, "the script answers for everything, so the gate case above proves nothing"
-    assert resolved.count() == len(DEMO_PACKAGES) - len(THE_UNMAPPED_PACKAGES)
+    assert resolved.count() == SEEDED_PACKAGES - len(THE_UNMAPPED_PACKAGES)
     assert set(resolved.values_list("confidence", flat=True)) == {IdentityConfidence.INVENTORY_DERIVED}
     for package in resolved:
         assert package.source_repository_url == _repository_for(package.canonical_name), package.canonical_name
@@ -573,10 +759,10 @@ def test_no_network_leaves_every_package_unmapped_and_the_seed_complete(caplog: 
     assert _counts(seeded) == {
         "resolved": 0,
         "not_on_conda_forge": 0,
-        "unreachable": len(DEMO_PACKAGES),
+        "unreachable": SEEDED_PACKAGES,
         "verified_kept": 0,
     }
-    assert seeded["rollup_rows"] == len(DEMO_PACKAGES)
+    assert seeded["rollup_rows"] == SEEDED_PACKAGES
     assert len(transport.calls) == UNREACHABLE_STREAK_LIMIT, (
         "the resolver kept asking a network that had already failed"
     )
@@ -591,11 +777,13 @@ def test_no_network_leaves_every_package_unmapped_and_the_seed_complete(caplog: 
     assert set(PackageHealth.objects.values_list("currency_status", flat=True)) == {OutcomeState.UNKNOWN.value}
     warned = [record.getMessage() for record in caplog.records if UNRESOLVED_EVENT in record.getMessage()]
     assert len(warned) == UNREACHABLE_STREAK_LIMIT
-    for demo in DEMO_PACKAGES[:UNREACHABLE_STREAK_LIMIT]:
-        assert any(demo.name in message for message in warned), demo.name
+    # The resolver is offered packages in the watchlist's own order, so the three
+    # it asked about before giving up are the file's first three rows.
+    for name in WATCHLIST_NAMES[:UNREACHABLE_STREAK_LIMIT]:
+        assert any(name in message for message in warned), name
     abandoned = [record.getMessage() for record in caplog.records if RESOLUTION_ABANDONED_EVENT in record.getMessage()]
     assert len(abandoned) == 1
-    assert f"'skipped': {len(DEMO_PACKAGES) - UNREACHABLE_STREAK_LIMIT}" in abandoned[0]
+    assert f"'skipped': {SEEDED_PACKAGES - UNREACHABLE_STREAK_LIMIT}" in abandoned[0]
 
 
 @pytest.mark.django_db
@@ -621,7 +809,7 @@ def test_an_index_that_cannot_be_read_is_one_package_s_failure_and_resets_nothin
         seeded = seed_demo_inventory(transport=transport)
 
     assert _counts(seeded) == {**A_HEALTHY_SUMMARY, "resolved": RESOLVABLE - 1, "unreachable": 1}
-    assert seeded["rollup_rows"] == len(DEMO_PACKAGES)
+    assert seeded["rollup_rows"] == SEEDED_PACKAGES
     package = Package.objects.get(canonical_name=THE_NAMED_PACKAGE)
     assert package.confidence == IdentityConfidence.UNMAPPED
     assert IdentityResolutionSnapshot.objects.get(package=package).state == OutcomeState.ERROR.value
@@ -650,7 +838,7 @@ def test_a_resolution_the_recorder_refuses_is_one_package_s_failure(
     real = resolve_identity_module.record_resolution
 
     def refusing(*, resolution: object, clock: object) -> object:
-        if getattr(resolution, "associator_key", "") == f"pypi:{THE_NAMED_PACKAGE}":
+        if getattr(resolution, "associator_key", "") == WATCHLIST_KEYS[THE_NAMED_PACKAGE]:
             message = "refused by the case, to see what the seed does with a refusal"
             raise ResolutionError(message)
         return real(resolution=resolution, clock=clock)  # type: ignore[arg-type]
@@ -661,7 +849,7 @@ def test_a_resolution_the_recorder_refuses_is_one_package_s_failure(
         seeded = seed_demo_inventory(transport=_scripted())
 
     assert _counts(seeded) == {**A_HEALTHY_SUMMARY, "resolved": RESOLVABLE - 1, "unreachable": 1}
-    assert seeded["rollup_rows"] == len(DEMO_PACKAGES)
+    assert seeded["rollup_rows"] == SEEDED_PACKAGES
     package = Package.objects.get(canonical_name=THE_NAMED_PACKAGE)
     assert package.confidence == IdentityConfidence.UNMAPPED
     assert PackageMapping.objects.filter(package=package).count() == 0
@@ -720,8 +908,13 @@ def test_currency_is_current_against_pypi_and_unknown_overall_until_the_sweeps_r
     """
     run = PolicyRun.objects.get(policy_version=seeded["policy_version"])
     resolved = PackageCurrency.objects.filter(policy_run=run).exclude(package__canonical_name__in=THE_UNMAPPED_PACKAGES)
+    # The roster is where a PyPI version pair comes from; a watchlist-only
+    # package has no PyPI row, so its PyPI surface honestly reads `unknown`.
+    with_pypi_row = resolved.filter(package__canonical_name__in=[demo.name for demo in DEMO_PACKAGES])
+    watchlist_only = resolved.exclude(package__canonical_name__in=[demo.name for demo in DEMO_PACKAGES])
 
-    assert set(resolved.values_list("pypi_status", flat=True)) == {"current"}
+    assert set(with_pypi_row.values_list("pypi_status", flat=True)) == {"current"}
+    assert set(watchlist_only.values_list("pypi_status", flat=True)) == {OutcomeState.UNKNOWN.value}
     assert set(resolved.values_list("source_status", flat=True)) == {OutcomeState.UNKNOWN.value}
     assert set(resolved.values_list("feedstock_status", flat=True)) == {OutcomeState.UNKNOWN.value}
     assert set(resolved.values_list("overall_status", flat=True)) == {OutcomeState.UNKNOWN.value}
@@ -746,10 +939,16 @@ def test_the_inventory_separates_an_advisory_matched_from_nothing_matched(seeded
     """
     run = PolicyRun.objects.get(policy_version=seeded["policy_version"])
     rows = PackageVulnerability.objects.filter(policy_run=run)
-    verdicts = set(rows.values_list("vulnerability_status", flat=True))
+    roster = rows.filter(package__canonical_name__in=[demo.name for demo in DEMO_PACKAGES])
+    verdicts = set(roster.values_list("vulnerability_status", flat=True))
 
     assert verdicts == {"advisories_matched", "no_advisory_matched"}
-    assert rows.filter(vulnerability_status="advisories_matched").count() == WITH_ADVISORY
+    assert roster.filter(vulnerability_status="advisories_matched").count() == WITH_ADVISORY
+    # A watchlist-only package has no advisory row at all -- nobody harvested
+    # one -- and reads `unknown`, which is the honest state until the sweep runs.
+    watchlist_only = rows.exclude(package__canonical_name__in=[demo.name for demo in DEMO_PACKAGES])
+    assert set(watchlist_only.values_list("vulnerability_status", flat=True)) == {OutcomeState.UNKNOWN.value}
+    assert watchlist_only.count() == SEEDED_PACKAGES - len(DEMO_PACKAGES)
 
 
 @pytest.mark.django_db
@@ -894,11 +1093,19 @@ def test_seeding_twice_appends_evidence_and_re_resolves_without_recording_anythi
     seeded = seed_demo_inventory(transport=_scripted())
 
     assert _counts(seeded) == A_HEALTHY_SUMMARY
-    assert Package.objects.count() == len(DEMO_PACKAGES), "a second run created packages rather than reusing them"
+    assert Package.objects.count() == SEEDED_PACKAGES, "a second run created packages rather than reusing them"
     assert VulnerabilityFinding.objects.count() > first_findings, "a second run replaced evidence rather than appending"
     assert PackageVulnerability.objects.count() > first_derived, "the second policy run wrote no derived rows"
-    assert CollectionRun.objects.filter(collector=COLLECTOR_NAME).count() == 2 * len(DEMO_PACKAGES)
-    assert IdentityResolutionSnapshot.objects.count() == 2 * len(DEMO_PACKAGES)
+    assert CollectionRun.objects.filter(collector=COLLECTOR_NAME).count() == 2 * SEEDED_PACKAGES
+    assert IdentityResolutionSnapshot.objects.count() == 2 * SEEDED_PACKAGES
+    # The second import names every row exactly as the table holds it, so it
+    # writes no audit row; the second ingestion re-observes every package.
+    assert seeded["imported"] == 0
+    assert seeded["import_unchanged"] == SEEDED_PACKAGES
+    assert seeded["import_retired_kept"] == 0
+    assert seeded["policy_version"] == THE_NEWEST_RECORDED_POLICY_VERSION
+    assert InventoryChange.objects.count() == SEEDED_PACKAGES
+    assert InventorySnapshot.objects.count() == 2 * SEEDED_PACKAGES
     assert Feedstock.objects.count() == first_feedstocks, "re-reading the same index grew the feedstock rows"
     assert dict(Package.objects.values_list("canonical_name", "resolved_at")) == first_resolved_at
 
@@ -930,9 +1137,9 @@ def test_the_entry_point_seeds_and_reports(monkeypatch: pytest.MonkeyPatch) -> N
 
     reported = seed_demo.main()
 
-    assert reported["rollup_rows"] == len(DEMO_PACKAGES)
+    assert reported["rollup_rows"] == SEEDED_PACKAGES
     assert _counts(reported) == A_HEALTHY_SUMMARY
-    assert PackageHealth.objects.count() == len(DEMO_PACKAGES)
+    assert PackageHealth.objects.count() == SEEDED_PACKAGES
 
 
 @pytest.mark.django_db
@@ -951,3 +1158,164 @@ def test_the_entry_point_adds_no_escape_hatch_around_the_refusal(monkeypatch: py
 
     with pytest.raises(ImproperlyConfigured, match=r"append-only"):
         seed_demo.main()
+
+
+# ---------------------------------------------------------------------------
+# Review patches: the seed beside a person's decisions, and its own refusals.
+# ---------------------------------------------------------------------------
+
+
+def _a_leader() -> User:
+    """Return a user in the leadership group, re-read so the permission cache is fresh.
+
+    Returns:
+        The user.
+
+    """
+    from django.conf import settings  # noqa: PLC0415 - local to these cases
+    from django.contrib.auth import get_user_model  # noqa: PLC0415 - as above
+    from django.contrib.auth.models import Group  # noqa: PLC0415 - as above
+
+    from tests.factories import UserFactory  # noqa: PLC0415 - as above
+
+    user = UserFactory.create(username="a-leader")
+    user.groups.add(Group.objects.get(name=settings.ROLE_CONTRACT.leadership))
+    refreshed: User = get_user_model().objects.get(pk=user.pk)
+    return refreshed
+
+
+@pytest.mark.django_db
+def test_a_row_retired_on_the_page_stays_retired_across_a_second_seed() -> None:
+    """Seed, retire on the page, seed again: the import never reactivates, and the summary says so."""
+    from conda_sentinel.collectors.inventory import retire_entry  # noqa: PLC0415 - read beside the claim
+    from conda_sentinel.core.clock import SystemClock  # noqa: PLC0415 - as above
+
+    seed_demo_inventory(transport=_scripted())
+    key = WATCHLIST_KEYS[THE_NAMED_PACKAGE]
+    retire_entry(source_package_key=key, actor=_a_leader(), reason="dropped by a person", clock=SystemClock())
+
+    seeded = seed_demo_inventory(transport=_scripted())
+
+    entry = InventoryEntry.objects.get(source_package_key=key)
+    assert entry.retired_at is not None
+    assert entry.reason == "dropped by a person"
+    assert seeded["import_retired_kept"] == 1
+    assert seeded["import_unchanged"] == SEEDED_PACKAGES - 1
+    # The second ingestion reads the table without that row, and records it absent.
+    assert InventorySnapshot.objects.filter(source_package_key=key, state=OutcomeState.NOT_FOUND.value).count() == 1
+
+
+@pytest.mark.django_db
+def test_a_row_added_on_the_page_survives_a_second_seed() -> None:
+    """The seed imports without `--replace`: a person's addition stays active, once audited, never absent."""
+    from conda_sentinel.collectors.inventory import InventoryRow  # noqa: PLC0415 - read beside the claim
+    from conda_sentinel.collectors.inventory import add_entry  # noqa: PLC0415 - as above
+    from conda_sentinel.core.clock import SystemClock  # noqa: PLC0415 - as above
+
+    seed_demo_inventory(transport=_scripted())
+    add_entry(
+        source_package_key="conda-forge/httpcore",
+        row=InventoryRow(package_name="httpcore", internal_component_count=9, internal_lob_count=2),
+        actor=_a_leader(),
+        reason="adopted",
+        clock=SystemClock(),
+    )
+    transport = _scripted()
+    index = index_locator("httpcore")
+    transport.answers[index] = recorded_payload(source=index, found=False, body="")
+
+    seeded = seed_demo_inventory(transport=transport)
+
+    entry = InventoryEntry.objects.get(source_package_key="conda-forge/httpcore")
+    assert entry.retired_at is None
+    assert InventoryChange.objects.filter(entry=entry).count() == 1
+    assert seeded["imported"] == 0
+    assert not InventorySnapshot.objects.filter(
+        source_package_key="conda-forge/httpcore", state=OutcomeState.NOT_FOUND.value
+    ).exists()
+    assert Package.objects.filter(associator_key="conda-forge/httpcore").exists()
+
+
+@pytest.mark.django_db
+def test_a_stack_seeded_before_the_table_is_refused_and_told_to_reset() -> None:
+    """Shells under the pre-S03 `pypi:` scheme collide with the ingestion's; the only way through is a fresh volume."""
+    from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415 - local to this case
+
+    from conda_sentinel.core.clock import SystemClock  # noqa: PLC0415 - as above
+    from conda_sentinel.identity.services import resolve_package_shell  # noqa: PLC0415 - as above
+
+    resolve_package_shell(
+        source_package_key="pypi:django", package_name="django", identity_source="pypi", clock=SystemClock()
+    )
+
+    with pytest.raises(ImproperlyConfigured, match=r"docker-down-v"):
+        seed_demo_inventory(transport=_scripted())
+
+    assert InventoryEntry.objects.count() == 0
+    assert CollectionRun.objects.count() == 0
+    assert Package.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_an_ingestion_that_left_a_roster_package_without_a_shell_is_refused_naming_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adapter answers a document missing one roster row; the overlay refuses rather than inventing the shell."""
+    from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415 - local to this case
+
+    from conda_sentinel.collectors import inventory_source  # noqa: PLC0415 - as above
+
+    real = inventory_source.active_records
+
+    def missing_one() -> list[dict[str, str | int]]:
+        return [record for record in real() if record["package_name"] != THE_NAMED_PACKAGE]
+
+    monkeypatch.setattr(inventory_source, "active_records", missing_one)
+
+    with pytest.raises(ImproperlyConfigured, match=rf"\['{THE_NAMED_PACKAGE}'\]") as refused:
+        seed_demo_inventory(transport=_scripted())
+
+    assert "succeeded" in str(refused.value)
+    assert Package.objects.count() == SEEDED_PACKAGES - 1
+    assert not Package.objects.filter(canonical_name=THE_NAMED_PACKAGE).exists()
+
+
+@pytest.mark.django_db
+def test_an_unreadable_watchlist_is_refused_as_a_watchlist_error_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """The read's own `OSError` becomes the `WatchlistError` the seeder promises, naming the file."""
+    from pathlib import Path  # noqa: PLC0415 - local to this case
+
+    from conda_sentinel.collectors import watchlist as watchlist_module  # noqa: PLC0415 - as above
+    from conda_sentinel.collectors.watchlist import WatchlistError  # noqa: PLC0415 - as above
+
+    nowhere = Path(str(tmp_path)) / "nowhere.csv"
+    monkeypatch.setattr(watchlist_module, "watchlist_path", lambda *, local: nowhere)
+
+    with pytest.raises(WatchlistError, match=r"could not be read"):
+        seed_demo_inventory(transport=_scripted())
+
+    assert InventoryEntry.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_a_watchlist_naming_one_package_under_two_keys_is_refused_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overlay is keyed by name; a repeated name would be resolved to whichever row came last."""
+    from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415 - local to this case
+
+    real = demo_data._development_watchlist  # noqa: SLF001 - the seam under test
+
+    def doubled() -> object:
+        path, records = real()
+        twin = {**records[0], "source_package_key": "pypi:" + str(records[0]["package_name"])}
+        return path, [*records, twin]
+
+    monkeypatch.setattr(demo_data, "_development_watchlist", doubled)
+
+    with pytest.raises(ImproperlyConfigured, match=r"more than one key"):
+        seed_demo_inventory(transport=_scripted())
+
+    assert InventoryEntry.objects.count() == 0

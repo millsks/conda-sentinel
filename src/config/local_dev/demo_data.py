@@ -32,17 +32,31 @@ a package nothing declares a licence for carries no licence row rather than a
 `not_found` claiming conda-forge was asked. No source release, no feedstock, no
 conda build, no readiness, no verification, and no invented `error`.
 
-**Identity is observed, not written.** `CPM-AD-14` gives governed reference data
-exactly one write path and `CPM-AD-25` says a collector "never writes the package
-table" -- it calls the resolution service, which creates the shell at `unmapped`.
-So does this, and then it stops: every demo package is a shell, exactly as the
-inventory collector leaves one, with no mapping rows and no confidence claimed.
-What resolves them is the real `resolve_identity` collector, run inline for every
-package before the evidence is written, so a fresh seed shows real repositories,
-real feedstocks and honest `not_found`s on first paint -- and the two `internal-*`
-packages are `unmapped` because conda-forge has no such package, not because a
-field said so. The resolver's runs are real runs under its own name; the Coverage
-screen showing them is the screen telling the truth. Everything else --
+**The inventory is the product's own, and so are the shells.** `CPM-OPERATE-S03`
+moves the watchlist into a governed table, and this seeder is the table's first
+writer on a local stack: it imports the development watchlist -- 148 rows, every
+roster name among them -- through the same `import_watchlist` service the
+`import-watchlist` admin process calls, with the file as each audit row's origin
+and "local development seed" as its reason; then it runs the real
+`InventoryIngestionCollector` inline through the database adapter, so every
+package shell and every `InventorySnapshot` row is written by the product's own
+collector under the product's own key scheme (`("inventory", "conda-forge/<name>")`).
+There is no second inventory here and no second shell writer: `CPM-AD-14` gives
+governed reference data one write path and `CPM-AD-25` says a collector "never
+writes the package table" -- it calls the resolution service -- and this module
+does neither. The roster is an *overlay*: what the real sources state about the
+packages the watchlist already names, and it refuses, before any write, a roster
+name the watchlist does not carry.
+
+**Identity is observed, not written.** Every package is a shell at `unmapped`
+exactly as the ingestion collector leaves one, with no mapping rows and no
+confidence claimed. What resolves them is the real `resolve_identity` collector,
+run inline for every package the watchlist names before the evidence is written,
+so a fresh seed shows real repositories, real feedstocks and honest `not_found`s
+on first paint -- and the two `internal-*` packages are `unmapped` because
+conda-forge has no such package, not because a field said so. The resolver's runs
+are real runs under its own name; the Coverage screen showing them, and the
+ingestion's run beside them, is the screen telling the truth. Everything else --
 feedstock presence, upstream-release currency, Python readiness -- reads `unknown`
 until the stack's own sweeps observe it, which is the product's real shape stated
 on the screen rather than painted over.
@@ -64,7 +78,8 @@ fails whole for any of it.
 
 **It refuses outside a local run**, on the terms `seeding.py` sets: this writes
 inventory and evidence, and a deployed component that ran it would have permanent,
-replayable observations in a log nothing may update or delete.
+replayable observations in a log nothing may update or delete. A deployment fills
+its table with `import-watchlist` and nothing else.
 
 **What it cannot show you, it says rather than leaves you to infer.** A parameter
 the shipped file records as empty makes the column it drives inert whatever evidence
@@ -92,9 +107,13 @@ from django.db import transaction
 from config.locality import is_local
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from collections.abc import Sequence
+    from pathlib import Path
 
+    from conda_sentinel.collectors.inventory import ImportOutcome
     from conda_sentinel.core.clock import Clock
+    from conda_sentinel.core.collection import CollectionResult
     from conda_sentinel.core.rate_limit import RateLimit
     from conda_sentinel.core.transport import Transport
     from conda_sentinel.identity.models import Package
@@ -104,6 +123,7 @@ __all__ = [
     "DEMO_PACKAGES",
     "RESOLUTION_ABANDONED_EVENT",
     "SEEDED_EVENT",
+    "SEED_REASON",
     "UNREACHABLE_STREAK_LIMIT",
     "UNRESOLVED_EVENT",
     "DemoPackage",
@@ -152,6 +172,46 @@ _NORMALIZED: Final[str] = "normalized"
 
 #: The event the seeder logs when it has finished.
 SEEDED_EVENT: Final[str] = "local_dev.demo_inventory_seeded"
+
+#: What every audit row the seed's import writes says, and what a reader of
+#: `inventory_changes` on a local stack sees beside `actor=NULL` and the file.
+SEED_REASON: Final[str] = "local development seed"
+
+#: What a roster that names a package the watchlist does not is told, before
+#: any write. The roster is an overlay on the watchlist, not a second inventory:
+#: a name only the roster carried would need a shell the ingestion never wrote,
+#: and writing one here would be the second shell writer this story removed.
+_ROSTER_NOT_IN_WATCHLIST: Final[str] = (
+    "the demo roster names {names}, which the development watchlist does not carry. The roster overlays what "
+    "the real sources state onto packages the watchlist already names (CPM-OPERATE-S03); add the row to "
+    "{watchlist} rather than the name to the roster."
+)
+
+#: What a stack seeded before `CPM-OPERATE-S03` is told. The first seeder filed
+#: every shell under `("pypi", "pypi:<name>")`; those rows collide on
+#: `canonical_name` with the shells the ingestion now creates, and nothing may
+#: delete a package row (`CPM-AD-25`). The only way through is a fresh volume.
+_LEGACY_SHELLS: Final[str] = (
+    "the database holds {count} package shell(s) keyed under the pre-CPM-OPERATE-S03 scheme "
+    "(identity_source='pypi', associator_key 'pypi:<name>'), which collide with the shells the inventory "
+    "ingestion creates. No package row is ever deleted (CPM-AD-25), so a stack seeded before this story has to "
+    "be reset once: `pixi run docker-down-v`, then `pixi run -e dev stack-seed`."
+)
+
+#: What a watchlist naming one package under two keys is told, before any write.
+_DUPLICATE_NAMES: Final[str] = (
+    "the development watchlist at {watchlist} names {names} under more than one key. The seeder overlays the "
+    "roster by name, and a name that maps to two keys is two packages one roster row cannot describe; the "
+    "table refuses two active rows with one name for the same reason."
+)
+
+#: What an ingestion that left a roster package without a shell is told. The
+#: overlay cannot be written onto a package that does not exist, and inventing
+#: the shell here would be the second writer this story removed.
+_ROSTER_NOT_INGESTED: Final[str] = (
+    "the inline inventory ingestion finished {state} ({detail}) and left {names} without a package shell, so "
+    "the roster cannot be overlaid. Nothing was invented; see the inventory run on the Coverage screen."
+)
 
 #: The event logged, once per package, for a resolution that did not conclude.
 #:
@@ -478,7 +538,15 @@ class _Unmetered:
 
 
 def seed_demo_inventory(*, transport: Transport | None = None) -> dict[str, object]:
-    """Seed a demo inventory, its evidence, a live identity resolution, and one real policy run.
+    """Seed the inventory table, ingest it, resolve identity live, overlay the roster, run the policy once.
+
+    In that order, and the order is the story: the watchlist is imported into the
+    governed table through the one service that writes it; the product's own
+    ingestion collector reads the table and writes every shell and snapshot;
+    the resolver observes what each shell maps to; the roster's real-sourced
+    evidence is written onto the packages the ingestion created; and the policy
+    engine concludes. Nothing here files a shell, and nothing here asserts what
+    it never observed.
 
     Args:
         transport: The transport the inline resolver reads conda-forge's index and
@@ -487,16 +555,24 @@ def seed_demo_inventory(*, transport: Transport | None = None) -> dict[str, obje
             scripted one so that it never opens a socket (`CPM-AD-27`).
 
     Returns:
-        What was seeded; how many packages the resolver concluded on (`resolved`),
-        how many conda-forge has no entry for (`not_on_conda_forge`), how many could
-        not be asked about (`unreachable`) and how many were left alone because a
-        person had verified them (`verified_kept`); and what the shipped parameter
-        file leaves unconfigured, so the caller can say all of it.
+        What was seeded: how many watchlist rows the import added, changed and
+        left unchanged; how the ingestion run ended and how many rows it wrote;
+        how many packages the resolver concluded on (`resolved`), how many
+        conda-forge has no entry for (`not_on_conda_forge`), how many could not
+        be asked about (`unreachable`) and how many were left alone because a
+        person had verified them (`verified_kept`); the policy version and
+        rollup row count; and what the shipped parameter file leaves
+        unconfigured, so the caller can say all of it.
 
     Raises:
-        ImproperlyConfigured: The run is not local. Raised before any row is written,
-            for the reason `_DEPLOYED_REFUSAL` states: append-only evidence cannot be
-            taken back.
+        ImproperlyConfigured: The run is not local (raised before any row is
+            written, for the reason `_DEPLOYED_REFUSAL` states); the database
+            holds shells from the pre-`CPM-OPERATE-S03` key scheme (before any
+            write, saying to reset the stack); the watchlist cannot be read or
+            names one package under two keys; the roster names a package the
+            development watchlist does not carry (before any write, naming it);
+            or the ingestion left a roster package with no shell (after the
+            import and the ingestion, naming it and the run's state).
 
     """
     if not is_local():
@@ -508,25 +584,45 @@ def seed_demo_inventory(*, transport: Transport | None = None) -> dict[str, obje
     from conda_sentinel.core.clock import SystemClock  # noqa: PLC0415 - see above
 
     clock = SystemClock()
+    _require_no_legacy_shells()
+    watchlist, records = _development_watchlist()
+    _require_distinct_names(records, watchlist=watchlist)
+    _require_roster_in_watchlist(records, watchlist=watchlist)
 
-    # Shells first, the resolver second, evidence third: the PyPI snapshot is
-    # written only for a package the resolver has just confirmed PyPI has a
-    # project for, so the resolution has to be on the package before the
-    # evidence is chosen.
-    packages = [_seeded_package(demo, clock=clock) for demo in DEMO_PACKAGES]
-    counts = _resolve_identities(packages, clock=clock, transport=transport)
+    imported = _import_watchlist(records, watchlist=watchlist, clock=clock)
+    ingestion = _ingest(clock=clock)
+    packages = _ingested_packages(records, ingestion=ingestion)
+
+    # The resolver runs over every package the watchlist names, roster or not:
+    # a package left `unmapped` gates every verdict about it to `unknown`, and a
+    # demo where a third of the inventory reads that way is a demo of the gate.
+    counts = _resolve_identities(list(packages.values()), clock=clock, transport=transport)
     observed_at = clock.now()
-    for demo, package in zip(DEMO_PACKAGES, packages, strict=True):
-        _seed_evidence(demo, package, observed_at=observed_at)
+    for demo in DEMO_PACKAGES:
+        _seed_evidence(demo, packages[demo.name], observed_at=observed_at)
 
     summary = _run_policy(clock=clock)
+    summary["watchlist"] = str(watchlist)
+    summary["imported"] = imported.added
+    summary["import_changed"] = imported.changed
+    summary["import_unchanged"] = imported.unchanged
+    summary["import_retired_kept"] = imported.retired_kept
+    summary["ingestion_state"] = ingestion.state.value
+    summary["ingested_rows"] = ingestion.evidence_rows
     summary["resolved"] = counts.resolved
     summary["not_on_conda_forge"] = counts.not_on_conda_forge
     summary["unreachable"] = counts.unreachable
     summary["verified_kept"] = counts.verified_kept
     logger.info(
         SEEDED_EVENT,
-        packages=[demo.name for demo in DEMO_PACKAGES],
+        watchlist=str(watchlist),
+        packages=sorted(packages),
+        imported=imported.added,
+        import_changed=imported.changed,
+        import_unchanged=imported.unchanged,
+        import_retired_kept=imported.retired_kept,
+        ingestion_state=ingestion.state.value,
+        ingested_rows=ingestion.evidence_rows,
         resolved=counts.resolved,
         not_on_conda_forge=counts.not_on_conda_forge,
         unreachable=counts.unreachable,
@@ -541,31 +637,184 @@ def seed_demo_inventory(*, transport: Transport | None = None) -> dict[str, obje
     return summary
 
 
-def _seeded_package(demo: DemoPackage, *, clock: Clock) -> Package:
-    """Return one demo package as ingestion would leave it: a shell, and nothing claimed.
+def _development_watchlist() -> tuple[Path, list[dict[str, str | int]]]:
+    """Read the development watchlist through the file adapter's own parser.
+
+    The file locality selects -- which, inside `is_local()`, is the development
+    subset -- parsed by `records_from`, so every refusal about the file applies
+    here exactly as it applies to `import-watchlist` and to a file-sourced
+    ingestion, naming the file and the line.
+
+    Returns:
+        The path and the records, in the file's own order.
+
+    Raises:
+        WatchlistError: When the file is missing, unreadable, not text or
+            malformed. An `ImproperlyConfigured`, raised before any write; the
+            read's own `OSError` and `UnicodeDecodeError` are turned into it on
+            the file adapter's terms, naming the file.
+
+    """
+    from conda_sentinel.collectors.watchlist import WATCHLIST_ENCODING  # noqa: PLC0415 - after django.setup()
+    from conda_sentinel.collectors.watchlist import WatchlistError  # noqa: PLC0415 - as above
+    from conda_sentinel.collectors.watchlist import records_from  # noqa: PLC0415 - as above
+    from conda_sentinel.collectors.watchlist import watchlist_path  # noqa: PLC0415 - as above
+
+    path = watchlist_path(local=True)
+    try:
+        text = path.read_text(encoding=WATCHLIST_ENCODING)
+    except (OSError, UnicodeDecodeError) as unreadable:
+        message = (
+            f"the development watchlist at {path} could not be read: {type(unreadable).__name__}: {unreadable}. "
+            f"The seeder imports the reviewed file the wheel ships (CPM-OPERATE-S03) and writes nothing without it."
+        )
+        raise WatchlistError(message) from unreadable
+    return path, records_from(text, watchlist=path)
+
+
+def _require_no_legacy_shells() -> None:
+    """Refuse a database still holding shells from the pre-`CPM-OPERATE-S03` key scheme.
+
+    Raises:
+        ImproperlyConfigured: When any package is filed under
+            `("pypi", "pypi:<name>")`. Raised before any write: the shells the
+            ingestion would create collide with those on `canonical_name`, and
+            no package row is ever deleted, so the stack has to be reset.
+
+    """
+    from conda_sentinel.identity.models import Package  # noqa: PLC0415 - after django.setup()
+
+    legacy = Package.objects.filter(identity_source="pypi", associator_key__startswith="pypi:").count()
+    if legacy:
+        raise ImproperlyConfigured(_LEGACY_SHELLS.format(count=legacy))
+
+
+def _require_distinct_names(records: Sequence[Mapping[str, object]], *, watchlist: Path) -> None:
+    """Refuse a watchlist naming one package under two keys, before anything is written.
 
     Args:
-        demo: The package to seed.
+        records: The parsed watchlist.
+        watchlist: The file, for the message.
+
+    Raises:
+        ImproperlyConfigured: When any `package_name` appears on two rows. The
+            overlay is keyed by name, so a repeated name would be silently
+            resolved to whichever row came last.
+
+    """
+    from conda_sentinel.collectors.models import INVENTORY_NAME_FIELD  # noqa: PLC0415 - after django.setup()
+
+    names = [str(record[INVENTORY_NAME_FIELD]) for record in records]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ImproperlyConfigured(_DUPLICATE_NAMES.format(watchlist=watchlist, names=repeated))
+
+
+def _require_roster_in_watchlist(records: Sequence[Mapping[str, object]], *, watchlist: Path) -> None:
+    """Refuse a roster name the watchlist does not carry, before anything is written.
+
+    Args:
+        records: The parsed watchlist.
+        watchlist: The file, for the message.
+
+    Raises:
+        ImproperlyConfigured: When any roster name is not a watchlist row's
+            `package_name`. Every missing name is listed, so one correction fixes
+            the file rather than one name at a time.
+
+    """
+    from conda_sentinel.collectors.models import INVENTORY_NAME_FIELD  # noqa: PLC0415 - after django.setup()
+
+    named = {str(record[INVENTORY_NAME_FIELD]) for record in records}
+    missing = sorted(demo.name for demo in DEMO_PACKAGES if demo.name not in named)
+    if missing:
+        raise ImproperlyConfigured(_ROSTER_NOT_IN_WATCHLIST.format(names=missing, watchlist=watchlist))
+
+
+def _import_watchlist(records: Sequence[Mapping[str, object]], *, watchlist: Path, clock: Clock) -> ImportOutcome:
+    """Bring the inventory table into line with the development watchlist, audited row by row.
+
+    Through the one service that writes the table, unattended: `actor=None`, the
+    file as every audit row's `origin`, `SEED_REASON` as its reason. Not
+    `replace`: a row a developer added through the surface stays, which is what
+    a second seed on a stack somebody has been working on should do.
+
+    Args:
+        records: The parsed watchlist.
+        watchlist: The file, recorded as the origin.
         clock: The injected clock (`CPM-AD-26`).
 
     Returns:
-        The saved package at `unmapped` confidence with no mapping rows. What it
-        maps to is the resolver's to observe -- see `_resolve_identities`.
+        What the import did, counted.
 
     """
-    from conda_sentinel.identity.services import resolve_package_shell  # noqa: PLC0415 - after django.setup()
+    from conda_sentinel.collectors.inventory import import_watchlist  # noqa: PLC0415 - after django.setup()
 
-    # The shell is filed under the pair the resolver will find it by, because
-    # `record_resolution` *updates* the row filed under `(identity_source,
-    # associator_key)` and never creates one -- `CPM-AD-25` gives creation to
-    # `resolve_package_shell` alone.
-    with transaction.atomic():
-        return resolve_package_shell(
-            source_package_key=f"pypi:{demo.name}",
-            package_name=demo.name,
-            identity_source="pypi",
-            clock=clock,
+    return import_watchlist(records, replace=False, actor=None, origin=str(watchlist), clock=clock, reason=SEED_REASON)
+
+
+def _ingest(*, clock: Clock) -> CollectionResult:
+    """Run the product's own inventory ingestion inline, reading the table just imported.
+
+    Through `InventoryIngestionCollector` with `DatabaseInventoryAdapter` bound at
+    the transport seam -- the adapter the stack's `CPM_INVENTORY_SOURCE=database`
+    declares at boot, constructed here directly so the seed reads the table it
+    just filled whatever the process's declaration is. `force=True`, for the
+    reason the resolver is forced: a second seed re-observes. The run is a real
+    run under `inventory`, and every shell it creates is created by
+    `resolve_package_shell` at `unmapped` (`CPM-AD-25`).
+
+    Args:
+        clock: The injected clock (`CPM-AD-26`).
+
+    Returns:
+        What the run did, mirroring the ledger row it wrote.
+
+    """
+    from conda_sentinel.collectors.inventory_source import DatabaseInventoryAdapter  # noqa: PLC0415 - see below
+    from conda_sentinel.collectors.tasks import InventoryIngestionCollector  # noqa: PLC0415 - after django.setup()
+
+    with InventoryIngestionCollector(clock=clock, transport=DatabaseInventoryAdapter()) as collector:
+        return collector.sweep(force=True)
+
+
+def _ingested_packages(records: Sequence[Mapping[str, object]], *, ingestion: CollectionResult) -> dict[str, Package]:
+    """Return every package the ingestion created or reused, by the name the watchlist gives it.
+
+    Found by the pair the ingestion filed each shell under -- `identity_source`
+    `inventory` and the watchlist's `source_package_key` as `associator_key` --
+    rather than by name, because the resolver may correct a name and the key is
+    what nothing corrects.
+
+    Args:
+        records: The parsed watchlist.
+        ingestion: How the ingestion ended, for the refusal.
+
+    Returns:
+        The packages, keyed by the watchlist's `package_name`.
+
+    Raises:
+        ImproperlyConfigured: When a roster package has no shell after the
+            ingestion, naming it and the run's state.
+
+    """
+    from conda_sentinel.collectors.models import INVENTORY_KEY_FIELD  # noqa: PLC0415 - after django.setup()
+    from conda_sentinel.collectors.models import INVENTORY_NAME_FIELD  # noqa: PLC0415 - as above
+    from conda_sentinel.collectors.tasks import COLLECTOR_NAME  # noqa: PLC0415 - as above
+    from conda_sentinel.identity.models import Package  # noqa: PLC0415 - as above
+
+    key_by_name = {str(record[INVENTORY_NAME_FIELD]): str(record[INVENTORY_KEY_FIELD]) for record in records}
+    by_key = {
+        package.associator_key: package
+        for package in Package.objects.filter(identity_source=COLLECTOR_NAME, associator_key__in=key_by_name.values())
+    }
+    packages = {name: by_key[key] for name, key in key_by_name.items() if key in by_key}
+    missing = sorted(demo.name for demo in DEMO_PACKAGES if demo.name not in packages)
+    if missing:
+        raise ImproperlyConfigured(
+            _ROSTER_NOT_INGESTED.format(state=ingestion.state.value, detail=ingestion.detail, names=missing),
         )
+    return packages
 
 
 def _seed_evidence(demo: DemoPackage, package: Package, *, observed_at: datetime) -> None:
@@ -991,24 +1240,15 @@ def _unconfigured_at(version: str) -> str:
 def _shipped_policy_version() -> str:
     """Return the newest policy version the shipped parameter file records.
 
-    Read rather than written down: an unrecorded version fails every package
-    (`CPM-CURRENCY-S07`), so a constant here would break the seeder on the day
-    somebody added a version and not before.
+    Through `policies/parameters.py`'s `newest_recorded_version`, which is the
+    rule `run_policy` applies too -- lifted there by `CPM-OPERATE-S03` so the
+    seeder's own lexicographic sort, which would have put `2026.09.10` before
+    `2026.09.4`, could not disagree with the command's numeric one.
 
     Returns:
         The newest recorded version.
 
-    Raises:
-        ImproperlyConfigured: The shipped file records none, which would make every
-            seeded package fail for a reason that has nothing to do with the demo.
-
     """
-    from conda_sentinel.policies.parameters import parameters_file  # noqa: PLC0415 - after django.setup()
-    from conda_sentinel.policies.parameters import parameters_from  # noqa: PLC0415 - as above
+    from conda_sentinel.policies.parameters import newest_recorded_version  # noqa: PLC0415 - after django.setup()
 
-    source = parameters_file()
-    versions = sorted(parameters_from(source.read_text(encoding="utf-8"), source=source))
-    if not versions:
-        message = "the shipped policy parameter file records no version, so no policy run can complete."
-        raise ImproperlyConfigured(message)
-    return versions[-1]
+    return newest_recorded_version()

@@ -101,7 +101,7 @@ your directory's business, read at call time from configuration:
 |---|---|---|
 | `security_reviewer` | `CPM_SECURITY_REVIEWER_GROUP` | Compliance review queue; risk acceptance |
 | `packaging_engineer` | `CPM_PACKAGING_ENGINEER_GROUP` | Remediation queue |
-| `leadership` | `CPM_LEADERSHIP_GROUP` | Identity review queue; the identity override |
+| `leadership` | `CPM_LEADERSHIP_GROUP` | Identity review queue; the identity override; the inventory page |
 
 All three reach the read surfaces — Home, Packages, Reports, Coverage. The queues are
 where they diverge.
@@ -126,7 +126,7 @@ one for each kind of surface, and all three resolve through `granted_roles()`:
 
 | Surface | Declares with | Example |
 |---|---|---|
-| HTML view | `RoleRequiredMixin` + `required_roles` | the queue views |
+| HTML view | `RoleRequiredMixin` + `required_roles` | the queue views; the inventory page |
 | DRF endpoint | `permission_classes` with `requires_roles(...)` | the identity override |
 | Any surface open to all three | `AnyProductRole` | the packages API |
 
@@ -171,7 +171,7 @@ anybody by.
 |---|---|---|
 | `reviewer-persona` | security review | compliance review |
 | `engineer-persona` | packaging engineering | remediation |
-| `leader-persona` | leadership | identity review, the identity override |
+| `leader-persona` | leadership | identity review, the identity override, the inventory page |
 | `reader-persona` | nothing | nothing — the zero-groups case |
 | `staff-persona` | Django staff only | the admin |
 | `operations-persona` | all three roles **and** staff | everything |
@@ -189,18 +189,45 @@ or not the surface checked anything.
 
 ---
 
-## The two write paths
+## The write paths
 
 Almost everything in this product is read-only to the application. There are exactly
-two endpoints that change governed state, and both are role-scoped:
+two API endpoints that change governed state, and one HTML page; all three are
+role-scoped:
 
-| Endpoint | Role | What it does |
+| Surface | Role | What it does |
 |---|---|---|
 | `POST /conda-sentinel/api/v1/packages/<id>/identity-override/` | `leadership` | Corrects a package's identity, with a required reason, recording who did it |
 | `POST /conda-sentinel/api/v1/workflow-items/<id>/transition/` | the **current queue's** owning role | Moves a queue item |
+| `POST /conda-sentinel/inventory/` | `leadership` | Adds, changes or retires an inventory row, with a required reason, recording who did it |
 
 The transition endpoint resolves its permission from the queue the item is *in*, not
 from a fixed role — so an item that has been routed to another queue is that queue's
 to move. [The queues](the-queues.md).
 
-Neither endpoint writes a derived status. Nothing in the application layer can.
+None of the three writes a derived status. Nothing in the application layer can.
+
+### The two governed writes carry a Django permission as well as a role
+
+The identity override and the inventory change are the two human writes `CPM-FR-3`
+names as mutating governed reference data, and each is gated **twice**: the surface on
+the role, and the service on a Django permission the role group holds. The role is
+what a person arrives with; the permission is what stops a second caller -- a shell, a
+future command -- reaching the table ungated:
+
+| Permission | Declared on | Granted to | Checked by |
+|---|---|---|---|
+| `identity.override_package_identity` | `identity.IdentityOverride` | `leadership`, by `core/0005_grant_identity_override` | `identity/services.py` |
+| `collectors.change_inventory` | `collectors.InventoryChange` | `leadership`, by `core/0011_grant_inventory_change` | `collectors/inventory.py` |
+
+Both grants are data migrations rather than edits to the role-group migration, so they
+reach every database, new and existing; both provision with `preserve_existing=True`,
+so a role group that shares a name with a designated group keeps what the claims
+contract asked for. The cost is stated in both files: the role contract cannot revoke
+by omission -- deleting a codename from `ROLE_GROUP_PERMISSIONS` leaves every
+provisioned deployment holding it, and taking it away is a migration shaped like each
+grant's own `reverse`.
+
+An unattended `import-watchlist` is **not** permission-gated: it runs from the command
+line, which is the gate for every admin process, and every audit row it writes names
+the file in place of an actor.

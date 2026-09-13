@@ -22,6 +22,7 @@ from conda_sentinel.surface.views import CoverageView
 from conda_sentinel.surface.views import ExportJobDownloadView
 from conda_sentinel.surface.views import ExportJobView
 from conda_sentinel.surface.views import HomeView
+from conda_sentinel.surface.views import InventoryView
 from conda_sentinel.surface.views import PackageDetailView
 from conda_sentinel.surface.views import PackageHealthView
 from conda_sentinel.surface.views import QueueView
@@ -73,6 +74,11 @@ urlpatterns = [
     # the same report and each is asking about their own request.
     path("exports/<int:pk>/", ExportJobView.as_view(), name="export-job"),
     path("exports/<int:pk>/download/", ExportJobDownloadView.as_view(), name="export-job-download"),
+    # The governed inventory table and its three forms (`CPM-OPERATE-S03`): one
+    # route, `GET` lists and `POST` writes through the service, leadership only.
+    # Not in the navigation, which lists what every role can read; the page is
+    # reached from the operator documentation.
+    path("inventory/", InventoryView.as_view(), name="inventory"),
     # `CPM-APP-S11`. Not under any of the surfaces above, because the control is on
     # every one of them -- including the sign-in page, which belongs to the platform.
     path("theme/", ThemeView.as_view(), name="theme"),

@@ -27,9 +27,11 @@ enqueued, listing the ones it does: an unrecorded version fails every package
 **"Newest" is numeric, segment by segment.** Versions are dotted strings and a
 lexicographic sort puts `2026.09.10` before `2026.09.4`, so a scheduled
 `policy-run` would silently apply stale rules the day a tenth revision was
-recorded. `version_key` splits on `.` and compares each all-digit segment as a
-number; `tests/passes.py` pins the newest shipped version independently so the
-ordering is measured against the file rather than against itself.
+recorded. `policies/parameters.py`'s `version_key` splits on `.` and compares
+each all-digit segment as a number -- lifted there by `CPM-OPERATE-S03` so the
+demo seeder derives "newest" through the same rule -- and `tests/passes.py` pins
+the newest shipped version independently so the ordering is measured against
+the file rather than against itself.
 
 **The row it reports is the one this call wrote.** The ledger's highest
 `PolicyRun` id is read before `.delay()` and only a row above it is reported --
@@ -60,8 +62,10 @@ from conda_sentinel.core.operator_commands import WHERE_TO_WATCH_A_POLICY_RUN
 from conda_sentinel.core.operator_commands import runs_eagerly
 from conda_sentinel.core.tasks import POLICY_RUN_TASK_NAME
 from conda_sentinel.core.tasks import run_policy
-from conda_sentinel.policies.parameters import parameters_file
-from conda_sentinel.policies.parameters import parameters_from
+from conda_sentinel.policies.parameters import VERSION_SEPARATOR
+from conda_sentinel.policies.parameters import newest_recorded_version
+from conda_sentinel.policies.parameters import recorded_versions
+from conda_sentinel.policies.parameters import version_key
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser
@@ -93,41 +97,10 @@ UNRECORDED: Final[str] = "unrecorded"
 #: resolves the collision in this command's favour.
 VERSION_OPTION: Final[str] = "--version"
 
-#: What separates a version's segments.
-VERSION_SEPARATOR: Final[str] = "."
-
-
-def version_key(version: str) -> tuple[tuple[int, int | str], ...]:
-    """Return a sort key that orders dotted versions numerically, segment by segment.
-
-    Args:
-        version: A recorded version, such as `2026.09.4`.
-
-    Returns:
-        One pair per segment: an all-digit segment as `(0, int)`, any other as
-        `(1, str)`, so `2026.09.10` sorts after `2026.09.4`, a shorter version
-        sorts before its own extensions, and a segment that is not a number
-        compares against one that is without raising.
-
-    """
-    segments = version.split(VERSION_SEPARATOR)
-    return tuple((0, int(segment)) if segment.isdigit() else (1, segment) for segment in segments)
-
-
-def recorded_versions() -> list[str]:
-    """Return every policy version the shipped parameter file records, oldest first.
-
-    Returns:
-        The versions under `version_key`'s ordering, so the last is the newest.
-
-    Raises:
-        PolicyParameterError: When the file cannot be read as a parameter set.
-            Not caught: a malformed reviewed file is a misconfigured deployment
-            (`CPM-AD-14`) and the refusal names the file to edit.
-
-    """
-    source = parameters_file()
-    return sorted(parameters_from(source.read_text(encoding="utf-8"), source=source), key=version_key)
+#: `VERSION_SEPARATOR`, `version_key` and `recorded_versions` are declared in
+#: `policies/parameters.py` since `CPM-OPERATE-S03` and imported back here; they
+#: stay in `__all__` because this command is where an operator reading the
+#: `--version` refusal goes looking for the ordering rule.
 
 
 def _highest_policy_run_id() -> int:
@@ -239,9 +212,9 @@ class Command(BaseCommand):
             CommandError: When the stated version is not recorded.
 
         """
-        recorded = recorded_versions()
         if stated is None:
-            return recorded[-1]
+            return newest_recorded_version()
+        recorded = recorded_versions()
         if stated not in recorded:
             message = (
                 f"policy version {stated!r} is not one the parameter file records, so a run at it would fail "

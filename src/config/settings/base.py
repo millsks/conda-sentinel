@@ -10,6 +10,7 @@ from typing import Any
 import environ
 from django.urls import reverse_lazy
 
+from conda_sentinel.collectors.inventory_source import DEFAULT_INVENTORY_SOURCE
 from conda_sentinel.collectors.watchlist import watchlist_path
 from conda_sentinel.core import queues
 from conda_sentinel.core.roles import load_role_contract
@@ -388,6 +389,19 @@ CPM_SYNC_EXPORT_MAX_ROWS = env.int("CPM_SYNC_EXPORT_MAX_ROWS", default=5_000)
 # component that has to read a different one restarts.
 # See src/django_apps/conda_sentinel/collectors/watchlist.py.
 INVENTORY_WATCHLIST_PATH = watchlist_path(local=is_local())
+# Which inventory source the ingestion collector reads (CPM-OPERATE-S03,
+# CPM-AD-29): "watchlist" -- the reviewed file above, selected by locality -- or
+# "database", the governed inventory table `import-watchlist` fills and the
+# surface's leadership form changes. Absent means the file: a component that has
+# never imported its watchlist keeps reading the reviewed file it ships, and
+# switching is an operator's declaration made after the import. Anything else is
+# refused at boot, naming this setting, by CollectorsConfig.ready() -- a
+# component that silently read the wrong source would record every package the
+# other one names as absent. The `dev` pixi feature's activation env declares
+# `database`, so the local stack and the suite read the table the demo seeder
+# fills. Stripped, so a trailing space in a ConfigMap does not become a third
+# value. See src/django_apps/conda_sentinel/collectors/inventory_source.py.
+CPM_INVENTORY_SOURCE = env.str("CPM_INVENTORY_SOURCE", default=DEFAULT_INVENTORY_SOURCE).strip()
 # The conda channels and platforms the published-package collector observes
 # (CPM-FR-10, CPM-CURRENCY-S04). Both ship EMPTY, and that is the decision rather
 # than an omission.

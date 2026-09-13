@@ -1,3 +1,4 @@
+from typing import Any
 from typing import Final
 
 from django.apps import AppConfig
@@ -112,11 +113,19 @@ class CollectorsConfig(AppConfig):
         deployed component comes to ingest a development subset and record every
         package outside it as absent -- so a `ready()` that ran twice would abort
         boot. The guard is as narrow as the registration's beside it: it passes
-        only for a `WatchlistAdapter` **already reading the very file settings
-        selected**. An adapter of another kind, and a watchlist adapter bound to
-        another path, both reach `declare_inventory_adapter` and are both
-        refused, because "which file is this component's inventory" is exactly
-        the question `CPM-AD-29` will not have answered by import order.
+        only for an adapter **of the kind `CPM_INVENTORY_SOURCE` selects** and,
+        for the file, one **already reading the very file settings selected**. An
+        adapter of another kind, and a watchlist adapter bound to another path,
+        both reach `declare_inventory_adapter` and are both refused, because
+        "which source is this component's inventory" is exactly the question
+        `CPM-AD-29` will not have answered by import order.
+
+        **Two adapters, one setting, and the branch is here rather than in the
+        collector** (`CPM-OPERATE-S03`, `CPM-AD-27`). `CPM_INVENTORY_SOURCE`
+        selects the reviewed file (`watchlist`, the default) or the governed
+        table (`database`); an unrecognised value is refused here, naming the
+        setting, before anything is declared. The collector stays branch-free:
+        whichever adapter is bound answers the same document at the same seam.
 
         **Neither security source is declared here, and the absence is the
         declaration.** There are two of them rather than three:
@@ -190,7 +199,8 @@ class CollectorsConfig(AppConfig):
 
         Raises:
             ImproperlyConfigured: When the settings module declares no
-                `INVENTORY_WATCHLIST_PATH`, or neither of the two settings the
+                `INVENTORY_WATCHLIST_PATH`, declares a `CPM_INVENTORY_SOURCE`
+                that names neither source, or neither of the two settings the
                 published-conda-package collector reads. Refused rather than left
                 to an `AttributeError`: a settings module that dropped an
                 assignment is a misconfiguration like every other one here, and a
@@ -222,10 +232,7 @@ class CollectorsConfig(AppConfig):
         from conda_sentinel.collectors.source_release import SourceReleaseCollector  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.sweep import cadence_reconciliation_fault  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.tasks import InventoryIngestionCollector  # noqa: PLC0415 - see above
-        from conda_sentinel.collectors.tasks import declare_inventory_adapter  # noqa: PLC0415 - see above
-        from conda_sentinel.collectors.tasks import declared_inventory_adapter  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.vulnerability import VulnerabilityCollector  # noqa: PLC0415 - see above
-        from conda_sentinel.collectors.watchlist import WatchlistAdapter  # noqa: PLC0415 - see above
         from conda_sentinel.core.collection import freshness_target_fault  # noqa: PLC0415 - see above
         from conda_sentinel.core.registry import register  # noqa: PLC0415 - see above
         from conda_sentinel.core.registry import registered_collectors  # noqa: PLC0415
@@ -280,16 +287,63 @@ class CollectorsConfig(AppConfig):
             if unusable:
                 raise ImproperlyConfigured(unusable)
 
-        selected = getattr(settings, WATCHLIST_PATH_SETTING, None)
-        if selected is None:
-            message = (
-                f"{WATCHLIST_PATH_SETTING} is not configured, so this component has no inventory source "
-                f"file to declare an adapter for. config/settings/base.py assigns it as "
-                f"watchlist_path(local=is_local()) -- locality selects the file and fails closed toward "
-                f"production (CPM-AD-29)."
-            )
-            raise ImproperlyConfigured(message)
+        _declare_inventory_source(settings)
 
-        declared = declared_inventory_adapter()
-        if not (isinstance(declared, WatchlistAdapter) and declared.path == selected):
-            declare_inventory_adapter(WatchlistAdapter(path=selected))
+
+def _declare_inventory_source(settings: Any) -> None:
+    """Bind the one inventory source adapter `CPM_INVENTORY_SOURCE` selects, idempotently.
+
+    Lifted out of `ready()` so the two guards read as what they are -- one per
+    adapter kind -- rather than as branches inside a hook that already adopts
+    eleven collectors. Called from `ready()` and from nowhere else; the imports
+    are deferred for the reason the hook's own are.
+
+    Args:
+        settings: The settings the hook read, passed rather than re-imported so
+            the case that deletes an attribute through `override_settings` and
+            the hook see one object.
+
+    Raises:
+        ImproperlyConfigured: When `INVENTORY_WATCHLIST_PATH` is not declared, or
+            when `CPM_INVENTORY_SOURCE` names neither source.
+
+    """
+    from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415 - after django.setup()
+
+    from conda_sentinel.collectors.inventory_source import DATABASE_SOURCE  # noqa: PLC0415 - see above
+    from conda_sentinel.collectors.inventory_source import INVENTORY_SOURCE_SETTING  # noqa: PLC0415 - see above
+    from conda_sentinel.collectors.inventory_source import DatabaseInventoryAdapter  # noqa: PLC0415 - see above
+    from conda_sentinel.collectors.inventory_source import inventory_source_fault  # noqa: PLC0415 - see above
+    from conda_sentinel.collectors.tasks import declare_inventory_adapter  # noqa: PLC0415 - see above
+    from conda_sentinel.collectors.tasks import declared_inventory_adapter  # noqa: PLC0415 - see above
+    from conda_sentinel.collectors.watchlist import WatchlistAdapter  # noqa: PLC0415 - see above
+
+    selected = getattr(settings, WATCHLIST_PATH_SETTING, None)
+    if selected is None:
+        message = (
+            f"{WATCHLIST_PATH_SETTING} is not configured, so this component has no inventory source "
+            f"file to declare an adapter for. config/settings/base.py assigns it as "
+            f"watchlist_path(local=is_local()) -- locality selects the file and fails closed toward "
+            f"production (CPM-AD-29)."
+        )
+        raise ImproperlyConfigured(message)
+
+    # The source setting is read *after* the path is required, so that a
+    # settings module missing the file's path is refused by name whichever
+    # source it selects -- the file stays the fallback a deployment reads.
+    source = getattr(settings, INVENTORY_SOURCE_SETTING, None)
+    unusable_source = inventory_source_fault(source, setting=INVENTORY_SOURCE_SETTING)
+    if unusable_source:
+        raise ImproperlyConfigured(unusable_source)
+
+    declared = declared_inventory_adapter()
+    if source == DATABASE_SOURCE:
+        # The one idempotency guard of its own: a `DatabaseInventoryAdapter`
+        # holds nothing, so one already declared is *the* declaration and a
+        # second `ready()` passes over it. Anything else in the slot -- the file
+        # adapter included -- reaches `declare_inventory_adapter` and is refused,
+        # for the reason the file guard refuses a foreign adapter.
+        if not isinstance(declared, DatabaseInventoryAdapter):
+            declare_inventory_adapter(DatabaseInventoryAdapter())
+    elif not (isinstance(declared, WatchlistAdapter) and declared.path == selected):
+        declare_inventory_adapter(WatchlistAdapter(path=selected))

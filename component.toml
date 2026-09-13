@@ -220,3 +220,18 @@ schedule = "deployment-repository"
 name = "policy-run"
 task = "policy-run"
 schedule = "deployment-repository"
+
+# The fourth (`CPM-OPERATE-S03`): bring the governed inventory table into line
+# with the reviewed watchlist file, one audited transaction per row, with
+# `--replace` so a package review removed from the file is retired (never
+# deleted; a row a person retired on the page stays retired). The one admin
+# process that writes rather than enqueues, because an import is governed
+# reference data changing and the audit row has to land in the row's own
+# transaction (CPM-AD-14). Run once after a first deploy, then whenever the
+# reviewed file changes; `CPM_INVENTORY_SOURCE=database` is what makes
+# ingestion read the table it fills.
+
+[[admin_processes]]
+name = "import-watchlist"
+task = "import-watchlist"
+schedule = "deployment-repository"

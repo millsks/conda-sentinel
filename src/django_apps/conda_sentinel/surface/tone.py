@@ -53,11 +53,19 @@ from conda_sentinel.policies.outcomes import PriorityBucket
 from conda_sentinel.policies.outcomes import WorkType
 
 __all__ = [
+    "INVENTORY_ACTIVE",
+    "INVENTORY_RETIRED",
     "PLAIN",
     "TONED_VOCABULARIES",
     "TONES",
     "tone_of",
 ]
+
+#: The two states the inventory page draws a chip for. Spelled here, beside
+#: their tones, and read by the template through `tone` and `label` -- the same
+#: two filters every status goes through.
+INVENTORY_ACTIVE: Final[str] = "active"
+INVENTORY_RETIRED: Final[str] = "retired"
 
 #: The tone a value with no entry gets. Deliberately not `ok`.
 #:
@@ -147,6 +155,13 @@ TONES: Final[dict[str, str]] = {
     IdentityConfidence.VERIFIED.value: "tone-ok",
     IdentityConfidence.INVENTORY_DERIVED.value: "tone-warn",
     IdentityConfidence.UNMAPPED.value: "tone-unknown",
+    # The inventory table's two states (`CPM-OPERATE-S03`). Not a vocabulary --
+    # `retired_at IS NULL` is a column, not a status -- so neither is in
+    # `TONED_VOCABULARIES`; they are here so the chip the inventory page draws
+    # is decided in the one place every other chip is. `retired` is `notfound`
+    # because that is what the next ingestion records about it.
+    INVENTORY_ACTIVE: "tone-ok",
+    INVENTORY_RETIRED: "tone-notfound",
 }
 
 #: Every vocabulary a surface renders, for the audit that checks this table covers
