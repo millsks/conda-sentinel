@@ -162,10 +162,14 @@ all eleven collectors, and that is the screen working: the only runs in the ledg
 seeder's, filed under `local-dev-demo-seed`, which is deliberately not a registered
 collector name so that seeding cannot make a real collector look healthy.
 
-To confirm the worker actually works without waiting a day, enqueue something by hand:
+To confirm the worker actually works without waiting a day, enqueue something by hand,
+from a shell that carries the stack's environment — `pixi run stack-shell`, see
+[Running it](running-it.md#a-shell-against-the-stack). A bare `manage.py shell` talks to SQLite
+and runs the task inline — `src/config/settings/local.py:121` defaults
+`CELERY_TASK_ALWAYS_EAGER` to true — so nothing would reach the worker:
 
 ```python
-# pixi run -e dev python manage.py shell
+# pixi run stack-shell
 from config.celery_app import app
 from conda_sentinel.policies.parameters import parameters_file, parameters_from
 
@@ -183,7 +187,7 @@ anyway. Watch it in flower, then look at the home page's "rollup computed" stamp
 Waiting a day is one option. The other is to enqueue a dispatch yourself:
 
 ```python
-# pixi run -e dev python manage.py shell
+# pixi run stack-shell
 from config.celery_app import app
 
 app.send_task("cpm.collect.sweep", kwargs={"collector": "pypi_release"})

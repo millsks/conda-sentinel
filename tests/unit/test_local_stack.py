@@ -55,6 +55,8 @@ OUTSIDE_THE_PROCESS_GROUP: Final[tuple[str, ...]] = (
     "stack-migrate",
     "stack-personas",
     "stack-seed",
+    "stack-shell",
+    "stack-run",
     "flower",
     "docker-up",
     "docker-down",
@@ -80,12 +82,62 @@ THE_MEMBERSHIP_MARKER: Final[str] = "COMPONENT_PROCESS"
 #: The fix was three tasks carrying the stack's own environment, and the risk the fix
 #: creates is four copies of one database URL. That is the shape the defect had, so
 #: `test_every_stack_task_names_the_same_database` reconciles them.
+#:
+#: `stack-shell` and `stack-run` are the fifth and sixth copies (`CPM-OPERATE-S01`):
+#: the operator's shell and management command. Before them, every hand-run action
+#: was a `manage.py shell -c` that had to carry the three variables by hand, or it
+#: silently talked to SQLite and ran the task inline in the shell.
 AGAINST_THE_STACK: Final[tuple[str, ...]] = (
     "local-stack",
     "stack-migrate",
     "stack-personas",
     "stack-seed",
+    "stack-shell",
+    "stack-run",
 )
+
+#: The flag that decides whether a task enqueued from a stack task runs inline.
+THE_EAGER_FLAG: Final[str] = "CELERY_TASK_ALWAYS_EAGER"
+
+#: The one stack task that runs tasks inline on purpose.
+#:
+#: The seeder resolves identity live and executes a policy run as part of seeding; it
+#: is a batch job that must finish before it returns, not a client of the worker.
+THE_DELIBERATELY_EAGER_TASK: Final[str] = "stack-seed"
+
+#: The operator's way in: a shell and an arbitrary management command against the stack.
+THE_OPERATORS_TASKS: Final[tuple[str, ...]] = ("stack-shell", "stack-run")
+
+#: The pages that tell somebody how to run something against the stack.
+#:
+#: This product's pages and the README; not `docs/accelerator/`, which is inherited
+#: and documents a different database. At the time of writing the sweep found
+#: snippets on three pages -- `running-it.md`, `asynchronous-work.md`,
+#: `onboarding.md` -- plus `operations.md`, whose `manage shell` spelling the first
+#: draft of the sweep missed; hence the tuple of needles below.
+INSTRUCTIONAL_PAGES: Final[tuple[Path, ...]] = (
+    *sorted((REPO_ROOT / "docs" / "conda-sentinel").rglob("*.md")),
+    REPO_ROOT / "docs" / "index.md",
+    REPO_ROOT / "README.md",
+)
+
+#: The recipes the operator's tasks replace: an environment assembled by hand.
+#:
+#: Both the `export` form and the prefix form -- the recipe this story removed from
+#: `running-it.md` was `DATABASE_URL="..." REDIS_URL="..." pixi run ...`, with no
+#: `export` in it.
+HAND_ASSEMBLED_ENVIRONMENTS: Final[tuple[str, ...]] = (
+    "export DATABASE_URL",
+    "export REDIS_URL",
+    "DATABASE_URL=",
+    "REDIS_URL=",
+)
+
+#: A shell that does not carry the stack's environment, in each spelling a page uses.
+BARE_SHELLS: Final[tuple[str, ...]] = ("manage.py shell", "manage shell", "django-admin shell")
+
+#: The word a bare shell's paragraph must carry to say it is aimed at SQLite on purpose.
+THE_ANNOTATION: Final[str] = "sqlite"
 
 #: Host ports the compose services must **not** publish on.
 #:
@@ -294,6 +346,155 @@ def test_every_stack_task_names_the_same_database(task: str) -> None:
     assert "6380" in env.get("REDIS_URL", ""), f"{task} does not point at the stack's Redis: {env}"
 
 
+def stack_tasks_that_say_whether_tasks_run_inline() -> list[str]:
+    """Return the `AGAINST_THE_STACK` tasks whose `env` carries the eager flag.
+
+    A task without it leaves the decision to the settings, which is `stack-migrate`'s
+    and `stack-personas`' position: neither enqueues anything. Runs at collection
+    time, so a roster name the manifest does not declare, or declares as a bare
+    string, is left out here rather than raised -- `test_every_stack_task_names_the_
+    same_database` is the case that names it.
+
+    Returns:
+        The task names, in roster order.
+
+    """
+    declared = tasks()
+    return [
+        task
+        for task in AGAINST_THE_STACK
+        if isinstance(declared.get(task), dict) and THE_EAGER_FLAG in declared[task].get("env", {})
+    ]
+
+
+def test_the_deliberate_exception_is_still_a_task_that_says() -> None:
+    """`stack-seed` must stay in the eager sweep, or its `"1"` is asserted nowhere.
+
+    The case below names the seeder as the one task allowed to run inline. If its
+    flag were dropped the case would simply not be generated for it, and the
+    contract that the seeder finishes before it returns would be silently gone.
+    """
+    assert THE_DELIBERATELY_EAGER_TASK in stack_tasks_that_say_whether_tasks_run_inline()
+
+
+@pytest.mark.parametrize("task", stack_tasks_that_say_whether_tasks_run_inline())
+def test_every_stack_task_that_says_whether_tasks_run_inline_agrees_with_the_stack(task: str) -> None:
+    """A shell that runs tasks inline is the other half of the wrong-database defect.
+
+    A shell carrying no environment writes to SQLite and runs every task it enqueues
+    inline rather than on the stack's worker (the `pixi.toml` comment above
+    `stack-shell` records the afternoon that happened). `local-stack` sets the flag
+    to `"0"`; a stack task that set it any other way would enqueue to nowhere and
+    quietly do the worker's work itself.
+
+    `stack-seed` is the one deliberate exception and is named here rather than
+    special-cased silently: it is a batch job that must finish before it returns.
+
+    Args:
+        task: The task under test.
+
+    """
+    declared = tasks()
+    env = declared[task]["env"]
+    stack_env = declared["local-stack"].get("env", {})
+    assert THE_EAGER_FLAG in stack_env, f"`local-stack` no longer says whether tasks run inline: {stack_env}"
+
+    if task == THE_DELIBERATELY_EAGER_TASK:
+        assert env[THE_EAGER_FLAG] == "1", f"{task} runs its seeding inline on purpose; {env}"
+        return
+
+    assert env[THE_EAGER_FLAG] == stack_env[THE_EAGER_FLAG], (
+        f"{task} disagrees with `local-stack` on {THE_EAGER_FLAG}: a task enqueued from it would run inline rather "
+        f"than on the stack's worker. {env}"
+    )
+
+
+@pytest.mark.parametrize("task", AGAINST_THE_STACK)
+def test_every_stack_task_carries_the_stacks_environment_byte_for_byte(task: str) -> None:
+    """Equal to `local-stack`'s values, not merely naming the same ports.
+
+    `test_every_stack_task_names_the_same_database` reads the port out of the URL; a
+    value that drifted in some other part -- a different database name, a different
+    Redis database index -- would still pass it and still put the task against a
+    database the stack does not serve. The eager flag is compared wherever a task
+    declares it -- `stack-migrate` and `stack-personas` enqueue nothing and leave it
+    to the settings -- except on the seeder, whose `"1"` has its own case.
+
+    Args:
+        task: The task under test.
+
+    """
+    declared = tasks()
+    stack_env = declared["local-stack"].get("env", {})
+    for key in ("DATABASE_URL", "REDIS_URL", THE_EAGER_FLAG):
+        assert key in stack_env, f"`local-stack` no longer declares {key}: {stack_env}"
+    env = declared[task].get("env", {})
+
+    compared = ["DATABASE_URL", "REDIS_URL"]
+    if THE_EAGER_FLAG in env and task != THE_DELIBERATELY_EAGER_TASK:
+        compared.append(THE_EAGER_FLAG)
+    for key in compared:
+        assert env.get(key) == stack_env[key], f"{task} differs from `local-stack` on {key}: {env.get(key)!r}"
+
+
+@pytest.mark.parametrize("task", THE_OPERATORS_TASKS)
+def test_the_operators_tasks_are_declared_as_the_spec_says(task: str) -> None:
+    """`manage.py shell` and a bare `manage.py`, in the dev environment.
+
+    `manage` runs in `default`, which cannot see the domain apps; a shell there fails
+    with a model that "doesn't declare an explicit app_label". `stack-run` is `manage`'s
+    own command -- read from it, so the two cannot drift -- so that whatever follows is
+    appended by pixi the way it is for `manage`.
+
+    Args:
+        task: The operator's task.
+
+    """
+    declared = tasks()
+    assert isinstance(declared.get(task), dict), f"{task!r} is not a task table in `pixi.toml`: {declared.get(task)!r}"
+    assert isinstance(declared.get("manage"), dict), "`manage` is the pattern `stack-run` follows and is gone"
+    expected = {"stack-shell": f"{declared['manage']['cmd']} shell", "stack-run": declared["manage"]["cmd"]}[task]
+
+    assert declared[task]["cmd"] == expected, declared[task]
+    assert declared[task].get("default-environment") == "dev", declared[task]
+
+
+@pytest.mark.parametrize("task", THE_OPERATORS_TASKS)
+def test_the_operators_tasks_carry_exactly_the_stacks_three_variables(task: str) -> None:
+    """The three `local-stack` declares, and no fourth.
+
+    The values are reconciled for every stack task above; this is the count. A
+    fourth variable would be a setting the stack itself does not run under, so the
+    shell would be against a stack that differs from the one serving the screens.
+
+    Args:
+        task: The operator's task.
+
+    """
+    env = tasks()[task].get("env", {})
+
+    assert set(env) == {"DATABASE_URL", "REDIS_URL", THE_EAGER_FLAG}, (
+        f"{task} carries more than the stack's three: {env}"
+    )
+
+
+@pytest.mark.parametrize("task", THE_OPERATORS_TASKS)
+def test_the_operators_tasks_start_nothing(task: str) -> None:
+    """No `depends-on`: a stopped stack must not come up as a side effect of a shell.
+
+    `stack-migrate` depends on `docker-up` because a migration with no database is
+    meaningless. A shell is different: Django connects lazily, so against a stopped
+    stack the shell opens and PostgreSQL's refusal arrives at the first query, and a
+    `.delay()` retries the broker before giving up. Both are the honest answer,
+    rather than starting containers the operator did not ask for.
+
+    Args:
+        task: The operator's task.
+
+    """
+    assert "depends-on" not in tasks()[task], tasks()[task]
+
+
 def test_the_stack_migrates_before_it_serves() -> None:
     """So a fresh clone's first `local-stack` finds a schema rather than no tables.
 
@@ -312,6 +513,81 @@ def test_seeding_is_not_something_the_stack_does_on_every_start() -> None:
     behaviour for a start-up task.
     """
     assert "stack-seed" not in tasks()["local-stack"].get("depends-on", [])
+
+
+# ---------------------------------------------------------------------------
+# The documentation: every hand-run action is one of the operator's tasks.
+# ---------------------------------------------------------------------------
+
+
+def paragraphs(page: Path) -> list[tuple[int, str]]:
+    """Return the page's blank-line-delimited blocks with the line each starts on.
+
+    Args:
+        page: The Markdown page.
+
+    Returns:
+        `(first line number, block text)` pairs, in page order.
+
+    """
+    found: list[tuple[int, str]] = []
+    block: list[str] = []
+    start = 0
+    for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), start=1):
+        if line.strip():
+            if not block:
+                start = number
+            block.append(line)
+        elif block:
+            found.append((start, "\n".join(block)))
+            block = []
+    if block:
+        found.append((start, "\n".join(block)))
+    return found
+
+
+def test_no_page_asks_the_reader_to_assemble_the_stacks_environment_by_hand() -> None:
+    """`export DATABASE_URL=...`, or the prefix form, is the recipe that got the wrong database once.
+
+    A first-run instruction that asks somebody to hand-assemble an environment
+    variable is one they will get wrong; the `stack-*` tasks carry it, which is what
+    tasks are for. Lists every offending line rather than the first.
+    """
+    offending = [
+        f"{page.relative_to(REPO_ROOT)}:{number}: {line.strip()}"
+        for page in INSTRUCTIONAL_PAGES
+        for number, line in enumerate(page.read_text(encoding="utf-8").splitlines(), start=1)
+        if any(needle in line for needle in HAND_ASSEMBLED_ENVIRONMENTS)
+    ]
+
+    assert not offending, "\n".join(offending)
+
+
+def test_every_bare_shell_the_documentation_names_says_it_is_aimed_at_sqlite() -> None:
+    """A `manage.py shell` aimed at the stack is `stack-shell`; any other says why not.
+
+    One exercise on the onboarding page opens a shell against SQLite deliberately --
+    it reads the collector registry, which is code rather than rows -- and says so.
+    Every other mention must be the annotation of that trap, not an instance of it.
+    The annotation is looked for in the paragraph rather than on the physical line,
+    so a reflow cannot break it. Lists every offending paragraph rather than the
+    first.
+    """
+    offending = [
+        f"{page.relative_to(REPO_ROOT)}:{number}: {block.splitlines()[0].strip()}"
+        for page in INSTRUCTIONAL_PAGES
+        for number, block in paragraphs(page)
+        if any(needle in block for needle in BARE_SHELLS) and THE_ANNOTATION not in block.lower()
+    ]
+
+    assert not offending, "\n".join(offending)
+
+
+def test_the_sweep_read_the_pages_it_is_about() -> None:
+    """So the two cases above cannot pass by sweeping nothing."""
+    assert any(page.name == "running-it.md" for page in INSTRUCTIONAL_PAGES), INSTRUCTIONAL_PAGES
+    assert any(page.name == "onboarding.md" for page in INSTRUCTIONAL_PAGES), INSTRUCTIONAL_PAGES
+    assert all(page.is_file() for page in INSTRUCTIONAL_PAGES), INSTRUCTIONAL_PAGES
 
 
 # ---------------------------------------------------------------------------

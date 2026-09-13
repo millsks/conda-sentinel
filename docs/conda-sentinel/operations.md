@@ -1668,10 +1668,11 @@ own default, and it is deliberately not a clean value.
 ### Running it, and where the result lands
 
 There is no beat entry (see above). A run is enqueued as the `cpm.policy.run`
-task on the `policy` queue, or executed in-process:
+task on the `policy` queue, or executed in-process. Locally, from a shell that
+carries [the stack's environment](running-it.md#a-shell-against-the-stack):
 
 ```sh
-pixi run -e dev manage shell -c '
+pixi run stack-shell -c '
 from conda_sentinel.core.tasks import run_policy
 run_policy.delay("<your policy version>")
 '
@@ -1681,20 +1682,26 @@ run_policy.delay("<your policy version>")
 
     **Outer single quotes, inner double quotes.** `pixi run` re-parses the task's
     arguments through its own task shell, which strips inner *single* quotes: the
-    otherwise-natural `pixi run manage shell -c "print('hi')"` reaches Python as
+    otherwise-natural `pixi run stack-shell -c "print('hi')"` reaches Python as
     `print(hi)` and raises `NameError: name 'hi' is not defined`. Inverting the
     quotes survives the round trip; escaping the inner ones does not (they arrive
     as backslashes and raise `SyntaxError`). This is a `pixi run` quoting defect
-    rather than anything about the command, and it applies to every
-    `manage shell -c` invocation.
+    rather than anything about the command, and it applies to every `-c`
+    one-liner, whether through `manage`, `stack-shell` or `stack-run`. A body that
+    needs both kinds of quote goes in a file: `pixi run stack-shell < script.py`.
 
-    **`-e dev`, locally.** In the `default` environment this block fails with
-    `RuntimeError: Model class conda_sentinel.core.models.CollectionRun doesn't
-    declare an explicit app_label and isn't in an application in INSTALLED_APPS`
-    — which is the empty-settings state described under "One step per database"
-    above, not a problem with the task. A deployed component needs neither
-    adjustment: it supplies its own settings module, and `pixi run manage` is the
-    right form there.
+    **`stack-shell`, locally.** A bare `pixi run -e dev manage shell` opens against
+    the SQLite file, and `src/config/settings/local.py` defaults
+    `CELERY_TASK_ALWAYS_EAGER` to true, so `run_policy.delay(...)` there runs the
+    pass inline against a database the stack never reads. `stack-shell` and
+    `stack-run` carry the stack's `DATABASE_URL`, `REDIS_URL` and
+    `CELERY_TASK_ALWAYS_EAGER=0`. In the `default` environment any of these fails
+    with `RuntimeError: Model class conda_sentinel.core.models.CollectionRun
+    doesn't declare an explicit app_label and isn't in an application in
+    INSTALLED_APPS` — which is the empty-settings state described under "One step
+    per database" above, not a problem with the task. A deployed component needs
+    neither adjustment: it supplies its own settings module, and `pixi run manage`
+    is the right form there.
 
 The `policy_version` is yours: `CPM-AD-8` makes it the version of the *rule data*
 a run applies, not a version this component ships. It lands on the run's ledger
@@ -2895,8 +2902,12 @@ reviewer asking "what did this system conclude on 12 June, and can you show me
 again?" runs:
 
 ```sh
-pixi run -e dev manage replay_policy_run --of-run 417
+pixi run stack-run replay_policy_run --of-run 417
 ```
+
+`stack-run` rather than `manage`, locally, because run 417 is in the stack's
+PostgreSQL and a bare `manage` reads the SQLite file (a deployed component runs
+`pixi run manage replay_policy_run ...` against its own settings).
 
 That reads the policy version and the evidence cut-off off run 417, executes a new
 run at both, compares every column of every derived row against what run 417
@@ -2906,7 +2917,7 @@ the printed differences are why.
 You can also state both directly, for a version and instant taken from a report:
 
 ```sh
-pixi run -e dev manage replay_policy_run \
+pixi run stack-run replay_policy_run \
   --policy-version 2026.09.3 --evidence-cutoff 2026-06-12T02:00:00+00:00
 ```
 
