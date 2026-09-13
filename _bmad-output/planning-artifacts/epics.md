@@ -388,16 +388,17 @@ drafted by the implementing agent.
 
 Turns the shell snippets that operate the product into named commands and declared
 options: a shell and a runner that carry the stack's environment, ingestion and sweeps and
-policy runs as management commands and admin processes, one inventory shared by the demo
-and the watchlist, a first sweep on day one, an authenticated GitHub allowance, a local
-channel default, governed evidence retention, and a per-package re-run from the page.
+policy runs as management commands and admin processes, the inventory as a governed table
+shared by every pod and by the demo, a first sweep on day one, an authenticated GitHub allowance, a local
+channel default, ninety days of evidence purged nightly, a per-package re-run from the
+page, an operator digest, and the evidence tables measured at ten thousand packages.
 
 **User outcome:** an operator can add, resolve, observe, re-run and retire packages on the
 running product with named commands, on day one, without a Python shell.
 
 **FRs covered:** none new. Operates `CPM-FR-42`, `CPM-FR-15`, `CPM-FR-22`, `CPM-FR-10`.
 **NFRs covered:** `CPM-NFR-1`, `CPM-NFR-2`.
-**Depends on:** `CPM-EP-IDENTITY` (the resolver), `CPM-EP-CURRENCY`, `CPM-EP-APP` (S08).
+**Depends on:** `CPM-EP-IDENTITY` (the resolver, the override's audit shape), `CPM-EP-CURRENCY`, `CPM-EP-APP` (S03's surface, S08).
 **Governed by:** `CPM-AD-2`, `CPM-AD-9`, `CPM-AD-14`, `CPM-AD-20`, `CPM-AD-25`, `CPM-AD-29`;
 inherited `AD-13`.
 **Raised by:** the product owner, 2026-09-13 (`sprint-change-proposal-2026-09-13.md`).
@@ -3352,48 +3353,78 @@ unless the settings already make every task eager; `CPM-AD-20` — the commands 
 through the same `cpm.collect.sweep` beat fires, so nothing about a sweep changes by
 being started by hand.
 
-### CPM-OPERATE-S03: One inventory, and how a package joins it
+### CPM-OPERATE-S03: The inventory is a governed table
 
-As an operator of the local stack,
-I want the demo and the watchlist to be one inventory, and a written path for adding a
-package to it,
-So that ingesting the watchlist onto a seeded database does not collide on forty-five
-names, and "how do I add a package" has one answer.
+As an operator,
+I want the watchlist to live in the database and be changed on the record,
+So that adding a package is an audited write and not a release, every pod reads the same
+inventory, and the demo and the watchlist stop being two inventories that collide on
+forty-five names.
 
 **Acceptance Criteria:**
 
+**Given** a new `inventory` table of watchlist rows — the source key, the package name and
+the usage signals, with who last changed each row, when and why
+**When** ingestion runs
+**Then** it reads that table through an adapter behind the same `Transport` contract the
+CSV adapter implements, with no branch in the collector on which adapter is bound
+
+**Given** the wheel's watchlist file
+**When** the table is empty at first run
+**Then** a `manage.py import_watchlist [<path>] [--replace]` command seeds it from the
+file (the development file locally, the production file deployed, by locality), records
+the import as a change with a reason, and the docs make the file the *seed*, not the source
+
+**Given** a user holding the inventory permission
+**When** they add, edit or retire a row from the surface with a reason
+**Then** the row and an audit record (actor, timestamp, prior value, new value, reason)
+are written in one transaction; without the permission or without a reason the write is
+refused and the refusal is logged with the acting user identity; the audit records are
+retrievable as a set
+
 **Given** the demo seeder
 **When** it creates package shells
-**Then** it takes its names from the development watchlist and files each shell under the
-inventory's own `(identity_source, associator_key)` — the pair ingestion looks up — so a
-later `ingest_inventory` finds every one rather than creating a second
+**Then** it seeds the same table and files each shell under the inventory's own
+`(identity_source, associator_key)`, so a later ingestion finds every one; the roster's
+advisories, KEV listings and licences stay an overlay keyed by name; a seeded stack ingested
+afterwards raises no `IntegrityError` on `canonical_name`
 
-**Given** the roster
-**When** a name in it is not in the development watchlist
-**Then** the seeder refuses before any write, naming it; advisories, KEV listings and
-licences stay a roster overlay keyed by name
-
-**Given** a seeded stack
-**When** the watchlist is ingested
-**Then** no `IntegrityError` on `canonical_name`, every package has an inventory snapshot,
-and `test_local_dev_demo_seeding.py` pins the sequence seed → ingest
+**Given** a row retired from the table
+**When** the next ingestion runs
+**Then** the package is recorded absent with a timestamp, keeps every row, leaves the
+queues, and the docs say how an operator finds it and that a wrong identity is corrected
+through the override (`CPM-IDENTITY-S05`), never by editing the inventory to match
 
 **Given** `running-it.md`
 **When** it explains adding a package
-**Then** it gives the end-to-end path: a watchlist row, `ingest`, `sweep resolve_identity`,
-then the sweeps that read the mappings — and says that the deployed watchlist is changed
-by review and shipped by release (`CPM-IDENTITY-S07`'s deferred item), which this story
-does not alter
+**Then** it gives the end-to-end path: a row (from the surface or the import), `ingest`,
+`sweep resolve_identity`, then the sweeps that read the mappings
 
-**Given** a package removed from the watchlist
-**When** the next ingestion runs
-**Then** it is recorded absent with a timestamp, keeps every row, leaves the queues, and
-the page says how an operator finds it and that a wrong identity is corrected through
-the override (`CPM-IDENTITY-S05`) and never by editing the file to match
+**Satisfies:** `CPM-FR-42`; `CPM-FR-32` (a privileged write is audited).
+**Governed by:** `CPM-AD-29` — one declared adapter, and this is the "second adapter
+behind the same contract" it anticipated; `CPM-AD-14` — the package *set* is governed
+reference data, and this write carries the same three obligations as the identity
+override: a permission, a reason, an audit row in the same transaction (`CPM-AD-23`);
+`CPM-AD-25` — the collector still never writes the package table.
 
-**Satisfies:** `CPM-FR-42`.
-**Governed by:** `CPM-AD-25` — the collector never writes the package table and absence
-is an observation; `CPM-AD-29` — the watchlist stays the one declared source; `CPM-AD-14`.
+**Constrained: why a table and not the file.** The file inside the wheel cannot drift
+between pods — every pod of a release carries the same bytes, ingestion runs one dispatch
+at a time on the collect queue, and beat is one replica — but it makes every package
+addition a review and a release. That was the right cost while the package set was
+`CPM-IDENTITY-S07`'s reviewed fixture; it is the wrong cost for an operator's routine
+action. A table shared by every pod, changed only through an audited write, keeps the
+governance and drops the release.
+
+**Constrained: this is a second governed human write, and the PRD says there is one.**
+`CPM-FR-3` calls the identity override "the only human write that mutates governed
+reference data". The inventory rows are governed reference data, so building this story
+amends `CPM-FR-3` to name two writes — identity and inventory — each with the same three
+obligations. The amendment is proposed with the story's pull request and accepted before
+the write ships; until then the import command is the only way rows change.
+
+**Constrained: the file adapter stays.** The CSV adapter is not deleted; it is what the
+import command reads through and what a deployment with no database inventory still
+selects by locality. Nothing about `CPM-IDENTITY-S07`'s fail-closed selection changes.
 
 ### CPM-OPERATE-S04: Day one is observed
 
@@ -3493,46 +3524,58 @@ the default is reconciled against `MAX_MONITORED_CHANNELS`
 **Satisfies:** `CPM-FR-10` on the local stack.
 **Governed by:** `CPM-AD-29`'s fail-closed locality; `CPM-AD-20`.
 
-### CPM-OPERATE-S07: Evidence retention is a governed decision
+### CPM-OPERATE-S07: Ninety days of evidence, purged nightly
 
 As an operator,
-I want a declared retention per evidence table and a command that applies it,
-So that a log that grows one row per package per day does not grow forever, and what is
-kept is a decision on the record rather than an accident of disk.
+I want evidence older than ninety days purged every night,
+So that a log that grows one row per package per day holds a quarter, not forever, and
+what is kept is a declared number rather than an accident of disk.
 
 **Acceptance Criteria:**
 
 **Given** the versioned policy parameters
-**When** a retention is declared for an evidence table
-**Then** it is a duration per table, absent by default, and absent means keep everything
+**When** a retention is read
+**Then** it is one duration for evidence and run ledgers, defaulting to 90 days, and a
+deployment that declares a longer one keeps more; there is no way to declare "forever"
+except by a number
 
-**Given** `manage.py prune_evidence [--dry-run]`
+**Given** `manage.py prune_evidence [--dry-run] [--batch <n>]`
 **When** it runs
-**Then** it deletes, per table with a retention, only rows older than the retention **and**
-superseded by a newer observation for the same package — never a package's newest row of
-any table, never a row a policy run inside retention read — and writes a run record
-naming the table, the cut-off and the count
+**Then** for every evidence table, collection-run and policy-run table it deletes rows
+whose `observed_at` (or `finished_at`) is older than the retention, in batches with a
+bounded transaction each, never holding a lock across the whole range — and never a
+package's newest row in any evidence table, so a package unobserved for a hundred days
+still says when it was last seen rather than reading `unknown`
 
 **Given** `CPM-AD-2`'s append-only base
 **When** the command deletes
-**Then** it goes through a single, audited door the base exposes for this command alone;
-`save()` still refuses an update and nothing else in the product can delete evidence
+**Then** it goes through one audited door the base exposes for this command alone, each
+table's purge writes a run record naming the cut-off and the count, `save()` still refuses
+an update, and nothing else in the product can delete evidence
 
-**Given** a policy run recorded inside the retention window
-**When** it is replayed after a prune
-**Then** it reproduces byte-identical results (`CPM-FR-22`)
+**Given** a policy run inside the retention window
+**When** it is replayed after a purge
+**Then** it reproduces byte-identical results (`CPM-FR-22`); a replay of a run outside the
+window is refused with a message that says why, rather than reproducing something else
 
 **Given** `component.toml`
 **When** the command exists
-**Then** it is an `[[admin_processes]]` entry with `schedule = "deployment-repository"`
+**Then** it is an `[[admin_processes]]` entry with `schedule = "deployment-repository"`,
+the deployment repository's nightly job, and the docs say so; the local stack gains a
+`stack-run -- prune_evidence` recipe and no beat entry
 
-**Satisfies:** `CPM-FR-22` (replay survives retention), `CPM-NFR-1`.
+**Given** the evidence tables
+**When** the purge's cut-off scan runs
+**Then** every table carries an index the scan uses (`observed_at`, or the existing
+`(package, -observed_at)` where the planner chooses it) — measured with `EXPLAIN` in the
+story, not assumed
+
+**Satisfies:** `CPM-FR-22` (replay inside retention), `CPM-NFR-1`.
 **Governed by:** `CPM-AD-2` — the base is the one door; `CPM-AD-11` — the rollup keeps
-one row per package regardless; inherited `AD-13`.
+one row per package regardless; `CPM-AD-23` — bounded transactions; inherited `AD-13`.
 
-**Constrained:** the default is to keep everything. A deployment that never declares a
-retention is exactly as it is today, and the command with nothing declared is a no-op
-that says so.
+**Constrained:** rollup and package rows are never purged; identity, overrides and
+workflow state are not evidence and are outside this story.
 
 ### CPM-OPERATE-S08: A collector re-run for one package, from the page
 
@@ -3564,6 +3607,74 @@ request mutates no identity; `CPM-AD-23` — the audit row and the enqueue are o
 
 **Constrained:** this is the surface half of what `dispatch_sweep` gives an operator; it
 lands after `CPM-OPERATE-S02` so both enqueue the same tasks.
+
+### CPM-OPERATE-S09: An operator digest
+
+As an operator,
+I want a daily digest of what the collectors did and did not do,
+So that a sweep failing for three days is something I am told, not something I find on
+the Coverage screen when a reviewer asks.
+
+**Acceptance Criteria:**
+
+**Given** the run ledger
+**When** the digest task runs (`cpm.policy.digest`, daily, cadence as data)
+**Then** it computes, per collector: dispatches and their states, collections by state,
+how many were refused as rate-limited, and how many packages are past their freshness
+target unobserved; and overall: packages ingested, absent, resolved, unresolved, and the
+newest policy run's version and age
+
+**Given** a declared delivery — a webhook URL, an email address, or none
+**When** the digest is produced
+**Then** it is delivered there and stored as a row an operator can read from the surface;
+with none declared it is stored only, and the docs say so
+
+**Given** a day in which nothing changed
+**When** the digest runs
+**Then** it still delivers, saying so in one line, because silence and health look the
+same and must not
+
+**Given** a credential in the delivery configuration
+**When** anything is logged or stored
+**Then** it appears nowhere but the environment
+
+**Satisfies:** `CPM-FR-38` (visible staleness and failure), `CPM-NFR-12`, `CPM-NFR-13`.
+**Governed by:** `CPM-AD-20` — one more entry in the schedule; `CPM-AD-15`; `CPM-AD-9` —
+delivery is a task, never a request.
+
+### CPM-OPERATE-S10: The evidence tables at ten thousand packages
+
+As an operator,
+I want the evidence tables measured at the inventory's declared scale and indexed or
+partitioned by what the measurement says,
+So that the nightly purge and the rollup stay fast when the log holds nine million rows.
+
+**Acceptance Criteria:**
+
+**Given** a database seeded to `CPM-NFR-1`'s ten thousand packages over ninety days
+**When** the rollup's reads, the surface's package pages and `prune_evidence`'s cut-off
+scan are measured with `EXPLAIN (ANALYZE, BUFFERS)`
+**Then** each is recorded with its plan and timing in the story, and any sequential scan
+on an evidence table names the index that removes it
+
+**Given** the measurement
+**When** batched deletion at 90 days meets the nightly window
+**Then** partitioning is recorded as **not adopted**, with the numbers; otherwise the
+story proposes monthly range partitioning by `observed_at` as an architecture amendment
+(`CPM-AD-2` and the migration audit both need to know), with the purge becoming a
+partition drop, and does not implement it until the amendment is accepted
+
+**Given** any index this story adds
+**When** the migration audit runs
+**Then** the index is declared on the model, named per the existing constants, and
+reconciled by `test_migration_completeness`
+
+**Satisfies:** `CPM-NFR-1`.
+**Governed by:** `CPM-AD-2`, `CPM-AD-11`; the architecture's own rule that a decision
+with this blast radius is amended in the spine, not made in a migration.
+
+**Constrained:** a spike with a measured verdict first; indexes on evidence.
+Partitioning only after the amendment.
 
 ## Test design integration
 

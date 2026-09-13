@@ -57,21 +57,26 @@ implementing agent from measured behaviour.
 
 ### Story impact
 
-Eight stories, `CPM-OPERATE-S01`–`S08`, ordered by dependency: the stack shell first (every
+Ten stories, `CPM-OPERATE-S01`–`S10`, ordered by dependency: the stack shell first (every
 later story is used through it), then the commands, then one inventory, then day-one
 observation, then the three declarations (GitHub token, local channel default, retention),
 then the per-package re-run from the page, which lands after `S02` so both enqueue the
-same tasks. `S08` depends on `CPM-EP-APP`.
+same tasks. `S08` depends on `CPM-EP-APP`. `S09` (operator digest) and `S10` (the evidence tables
+measured at scale) were added the same day at the product owner's direction, and `S07` was
+set to ninety days purged nightly rather than keep-everything, on the same instruction.
 
 ### Artifact conflicts
 
 - `docs/conda-sentinel/running-it.md` and the operator runbook carry environment-prefixed
   shell recipes that `S01` and `S02` replace.
 - `CPM-IDENTITY-S07`'s deferred item (the deployed watchlist is changed by review and
-  shipped by release) is referenced by `S03` and deliberately not resolved here.
+  shipped by release) is what `S03` resolves: the inventory becomes a governed table with an
+  audited write, the file becomes its first-run seed, and the CSV adapter stays for the
+  import and for a deployment that declares no database inventory. Decided by the product
+  owner on 2026-09-13 after asking how a file in the wheel is updated.
 - `CPM-AD-2`'s append-only rule is not softened by `S07`: the base gains one audited door
-  for one command, the default retention is "keep everything", and replay inside the
-  window must reproduce.
+  for one command, the retention is ninety days purged nightly, a package's newest row per
+  table is always kept, and replay inside the window must reproduce.
 
 ### Technical impact
 
@@ -97,13 +102,15 @@ the build-order graph gains `ID --> OP`, `CUR --> OP`, `APP --> OP`. Stories: a 
 
 ### 4b. sprint-status.yaml
 
-A `# CPM-EP-OPERATE` block after `CPM-EP-NL`: `epic-operate: backlog`, eight story keys at
+A `# CPM-EP-OPERATE` block after `CPM-EP-NL`: `epic-operate: backlog`, ten story keys at
 `backlog`, `epic-operate-retrospective: optional`.
 
 ### 4c. Not changed
 
-PRD, architecture spine, UX designs, memlogs. No requirement is added or altered; no
-decision is amended. Should `S07` need an amendment to `CPM-AD-2`'s wording ("one audited
+Architecture spine, UX designs, memlogs. The PRD is not changed here, but `S03` will
+propose an amendment to `CPM-FR-3` ("the only human write that mutates governed reference
+data") to name the inventory write beside the identity override; that amendment travels
+with the story's pull request. No architecture decision is amended. Should `S07` need an amendment to `CPM-AD-2`'s wording ("one audited
 door"), that is the story's to propose when it is built.
 
 ## 5. Implementation Handoff

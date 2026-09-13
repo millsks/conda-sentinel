@@ -182,12 +182,14 @@ development_status:
   epic-operate: backlog
   cpm-operate-s01-a-shell-against-the-stack-carries-its-environment: backlog
   cpm-operate-s02-ingest-sweep-and-run-are-commands: backlog
-  cpm-operate-s03-one-inventory-and-how-a-package-joins-it: backlog
+  cpm-operate-s03-the-inventory-is-a-governed-table: backlog
   cpm-operate-s04-day-one-is-observed: backlog
   cpm-operate-s05-an-authenticated-github-allowance: backlog
   cpm-operate-s06-published-conda-currency-on-the-local-stack: backlog
-  cpm-operate-s07-evidence-retention-is-a-governed-decision: backlog
+  cpm-operate-s07-ninety-days-of-evidence-purged-nightly: backlog
   cpm-operate-s08-a-collector-re-run-for-one-package-from-the-page: backlog
+  cpm-operate-s09-an-operator-digest: backlog
+  cpm-operate-s10-the-evidence-tables-at-ten-thousand-packages: backlog
   epic-operate-retrospective: optional
 
 # CPM-EP-NL is blocked behind the CPM-NL-S01 fitness spike and is post-MVP; the status
