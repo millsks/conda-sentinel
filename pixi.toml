@@ -448,6 +448,11 @@ COMPONENT_RUNTIME = "local"
 # nothing and so reads the reviewed file, which is the direction that fails
 # closed for a deployment that has never run `import-watchlist`.
 CPM_INVENTORY_SOURCE = "database"
+# Beat enqueues its first tick the moment it starts (CPM-OPERATE-S04), so a
+# fresh `local-stack` observes on day one instead of a day later. `default`
+# declares nothing and so reads off, for the reason the setting's comment in
+# src/config/settings/base.py gives.
+CPM_SWEEP_ON_BEAT_START = "1"
 # Turns on django-debug-toolbar and django-extensions in
 # config/settings/local.py. They ship only in this feature, so the runtime
 # environment leaves the flag off and Django starts without them.

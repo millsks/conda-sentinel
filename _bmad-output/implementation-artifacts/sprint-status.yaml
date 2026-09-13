@@ -183,7 +183,7 @@ development_status:
   cpm-operate-s01-a-shell-against-the-stack-carries-its-environment: done
   cpm-operate-s02-ingest-sweep-and-run-are-commands: done
   cpm-operate-s03-the-inventory-is-a-governed-table: done
-  cpm-operate-s04-day-one-is-observed: backlog
+  cpm-operate-s04-day-one-is-observed: done
   cpm-operate-s05-an-authenticated-github-allowance: backlog
   cpm-operate-s06-published-conda-currency-on-the-local-stack: backlog
   cpm-operate-s07-ninety-days-of-evidence-purged-nightly: backlog

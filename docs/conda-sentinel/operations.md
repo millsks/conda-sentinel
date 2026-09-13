@@ -1295,7 +1295,37 @@ monitoring everywhere else.
 ### Dispatching by hand, and the four admin processes
 
 Beat's interval entries start their clock when they are created, so a fresh
-component sweeps nothing for a day and its weekly surfaces for a week. The
+component sweeps nothing for a day and its weekly surfaces for a week — unless
+you tell beat to enqueue its first tick the moment it starts. Two settings
+govern what a sweep reads and when the first one fires; the second is
+`CPM-OPERATE-S04`'s:
+
+| Setting | Default | Declared where | Does |
+|---|---|---|---|
+| `CPM_INVENTORY_SOURCE` | `watchlist` | the `dev` pixi environment declares `database` | which inventory an ingestion reads — [above](#the-inventory-is-a-governed-table-and-it-ships-empty) |
+| `CPM_SWEEP_ON_BEAT_START` | off | the `dev` pixi environment declares `1`; nothing production-bound does | beat enqueues its first tick the moment it starts — [what fires at start](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run) |
+
+With `CPM_SWEEP_ON_BEAT_START` on, a receiver on Celery's `beat_init` signal
+enqueues one `cpm.collect.sweep` per `CELERY_BEAT_SCHEDULE` entry, in the
+schedule's order and with each entry's own options — today that is the
+`countdown` the three phased entries carry, so those arrive on their offsets and
+the other six at once. The entries themselves are untouched; their first tick is
+still one interval away. A beat restart re-enqueues the nine, and the
+dispatcher's overlap `skipped` and each collection's observation window are what
+make that harmless (what it costs the ledger is on the
+[asynchronous-work page](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run)).
+Under eager Celery — a bare `pixi run -e dev beat` outside the stack — it is
+refused with one logged event, because the beat process would be the worker.
+Off by default, for the reason the comment on the setting in
+`src/config/settings/base.py` gives. The three phased entries also depend on
+`CELERY_BROKER_TRANSPORT_OPTIONS["visibility_timeout"]`, declared beside the
+schedule strictly above the largest countdown: Redis delivers a countdown message
+at once and redelivers it if it is still unacknowledged past that timeout, and
+the redelivered copy would be a second, `skipped` dispatch on every tick and every
+start.
+
+So day one on the local stack no longer needs a dispatch by hand. For a
+deployment's day one, or to sweep again before the next tick anywhere, the
 `dispatch_sweep` management command enqueues the same `cpm.collect.sweep` beat
 fires, for the collectors you name or for every swept one:
 

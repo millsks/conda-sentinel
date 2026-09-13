@@ -2,6 +2,7 @@ import os
 from typing import Any
 
 from celery import Celery
+from celery.signals import beat_init
 from celery.signals import setup_logging
 from celery.signals import worker_ready
 from django_structlog.celery.steps import DjangoStructLogInitStep
@@ -82,6 +83,54 @@ def install_drain_handler(*args: Any, **kwargs: Any) -> None:
     from config.health.drain import install_sigterm_handler  # noqa: PLC0415
 
     install_sigterm_handler()
+
+
+# `beat_init` fires once, from `Service.start`, after the beat process has
+# imported the task modules and built its scheduler -- so a broker, a schedule
+# and the dispatch task all exist by the time this runs. The `# type:
+# ignore[untyped-decorator]` marker is for the reason given above
+# `config_loggers`.
+@beat_init.connect  # type: ignore[untyped-decorator]
+def dispatch_on_beat_start(*args: Any, **kwargs: Any) -> None:
+    """Enqueue beat's first tick now, when `CPM_SWEEP_ON_BEAT_START` says to (CPM-OPERATE-S04).
+
+    Beat's interval entries start their clock when they are created, so a fresh
+    component fires no daily sweep for a day and no weekly one for a week. With
+    the setting on -- the `dev` pixi feature's activation env, and nothing
+    production-bound -- this enqueues one `cpm.collect.sweep` per scheduled
+    collector, in the schedule's order and with each entry's own options, and
+    changes nothing about the entries. Each dispatch's own overlap `skipped` and
+    each collection's observation window are what make a restart harmless; the
+    receiver opens no transaction and writes no row.
+
+    The schedule is read from settings rather than from the scheduler's tables
+    because `DatabaseScheduler` rewrites those tables from settings on every
+    beat start: the declaration is the one reading that is the same before and
+    after a restart.
+
+    Args:
+        *args: Signal arguments, unused.
+        **kwargs: Signal keyword arguments, unused.
+
+    """
+    # Imported here rather than at module scope for the reason `install_drain_handler`
+    # gives: `config/__init__.py` imports this module, and a top-level import of
+    # a domain application would pull Django models into every import of
+    # anything under `config`, settings included.
+    from django.conf import settings  # noqa: PLC0415
+
+    from conda_sentinel.collectors.sweep import SWEEP_ON_BEAT_START_SETTING  # noqa: PLC0415
+    from conda_sentinel.collectors.sweep import dispatch_scheduled_collectors_on_start  # noqa: PLC0415
+
+    # `is True`, not truthiness: the setting is a boolean `env.bool` reads, and a
+    # leaf module that assigned the string "0" or "off" must read as off rather
+    # than as a non-empty string. Absent reads off as well -- the direction that
+    # fails closed, and a beat that starts whatever a settings module dropped.
+    if getattr(settings, SWEEP_ON_BEAT_START_SETTING, False) is not True:
+        return
+    # Absent reads as no dispatch to enqueue, logged as a summary of nothing,
+    # rather than an `AttributeError` out of a beat that was otherwise starting.
+    dispatch_scheduled_collectors_on_start(getattr(settings, "CELERY_BEAT_SCHEDULE", {}))
 
 
 # Load task modules from all registered Django app configs.

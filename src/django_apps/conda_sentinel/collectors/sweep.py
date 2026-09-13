@@ -95,6 +95,16 @@ process -- while `config/startup/stage_two.py` keeps evaluating it as condition
 `config`, so a rule owned by the startup package could not have been called from
 an application's `ready()` at all.
 
+**Day one is observed when the operator says so (`CPM-OPERATE-S04`).** Beat's
+interval entries start their clock when they are created, so a fresh component
+fires nothing for a day. `dispatch_scheduled_collectors_on_start` is what the
+`beat_init` receiver in `config/celery_app.py` calls when
+`CPM_SWEEP_ON_BEAT_START` is on: one enqueue of the dispatch task per scheduled
+collector, in the schedule's own order and with the schedule's own countdown,
+touching neither the entries nor the ledger. It lives here because it reads the
+schedule through the same walk the reconciliation does, and because it is a
+dispatch of dispatches -- what beat's first tick would be, brought forward.
+
 **On the `AD-` prefix.** A bare `AD-n` in this repository is an *inherited*
 platform decision; a decision from this product's own architecture spine always
 carries the `CPM-` prefix.
@@ -102,6 +112,7 @@ carries the `CPM-` prefix.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -112,11 +123,13 @@ import structlog
 from celery import current_app
 from celery.exceptions import SoftTimeLimitExceeded
 from django.db.models import QuerySet
+from kombu.exceptions import OperationalError
 
 from conda_sentinel.core.collection import CollectorConfigurationError
 from conda_sentinel.core.collection import require_cadence
 from conda_sentinel.core.ledger import collection_run
 from conda_sentinel.core.models import CollectionRun
+from conda_sentinel.core.operator_commands import runs_eagerly
 from conda_sentinel.core.queues import NAME_SEPARATOR
 from conda_sentinel.core.queues import TASK_NAMESPACE_PREFIX
 from conda_sentinel.core.queues import Queue
@@ -140,15 +153,23 @@ __all__ = [
     "PACKAGE_KWARG",
     "SELECTION_CHUNK",
     "SWEEP_DISPATCHED_EVENT",
+    "SWEEP_ON_BEAT_START_SETTING",
     "SWEEP_PACKAGE_REFUSED_EVENT",
     "SWEEP_REFUSED_EVENT",
     "SWEEP_SKIPPED_EVENT",
+    "SWEEP_START_DISPATCHED_EVENT",
+    "SWEEP_START_REFUSED_EVENT",
+    "SWEEP_START_SUMMARY_EVENT",
+    "SWEEP_START_UNENQUEUED_EVENT",
     "SWEEP_TASK_NAME",
     "DispatchOutcome",
+    "ScheduledDispatch",
     "SweepDispatchError",
     "cadence_reconciliation_fault",
     "collection_task_name",
     "dispatch",
+    "dispatch_scheduled_collectors_on_start",
+    "scheduled_dispatches",
 ]
 
 logger = structlog.get_logger(__name__)
@@ -245,6 +266,35 @@ SWEEP_PACKAGE_REFUSED_EVENT: Final[str] = "sweep.package_refused"
 #: different key set rather than by omitting keys from the shared one.
 PACKAGE_EVENT_KEYS: Final[tuple[str, ...]] = ("collector", "task", "package_id", "detail")
 
+#: The setting `config/settings/base.py` assigns and the `beat_init` receiver in
+#: `config/celery_app.py` reads (`CPM-OPERATE-S04`). Spelled once, here, on the
+#: terms `inventory_source.py` spells `INVENTORY_SOURCE_SETTING`: the receiver
+#: and the settings test name the same thing. Off by default; the `dev` pixi
+#: feature's activation env turns it on, and no production-bound table does.
+SWEEP_ON_BEAT_START_SETTING: Final[str] = "CPM_SWEEP_ON_BEAT_START"
+
+#: The event one start-of-beat dispatch is logged under, naming the collector,
+#: the interval the brought-forward tick stands in for, the countdown it was
+#: enqueued with and the task id the broker handed back.
+SWEEP_START_DISPATCHED_EVENT: Final[str] = "sweep.dispatched_on_start"
+
+#: The event the start dispatch is refused under, as a whole, before anything
+#: is enqueued. One reason today: the Celery app runs every task inline, so the
+#: beat process has no worker to hand a sweep to and would run nine collectors
+#: inside the scheduler.
+SWEEP_START_REFUSED_EVENT: Final[str] = "sweep.start_refused"
+
+#: The event one collector's start dispatch is logged under when the broker
+#: would not take it, carrying `not_offered`: how many later entries were left
+#: to the tick because the broker could not be reached at all, or zero when the
+#: refusal was this entry's own and the next was still offered.
+SWEEP_START_UNENQUEUED_EVENT: Final[str] = "sweep.start_dispatch_unenqueued"
+
+#: The one summary event a start dispatch ends with: out of how many the
+#: schedule declares, how many were enqueued, how many the broker refused, and
+#: how many were never offered because the broker could not be reached.
+SWEEP_START_SUMMARY_EVENT: Final[str] = "sweep.start_summary"
+
 
 class SweepDispatchError(ValueError):
     """A dispatch was asked for something it cannot dispatch.
@@ -295,6 +345,36 @@ class DispatchOutcome:
     enqueued: int
     refused: int
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledDispatch:
+    """One `CELERY_BEAT_SCHEDULE` entry that fires the dispatch, as the start dispatch reads it.
+
+    What beat itself does on a tick, read off the declaration rather than off
+    beat: the collector the entry names, the interval it fires at, and the
+    countdown its `options` carry -- which is the phase three entries declare
+    so that they do not fire on the tick, and which a start dispatch honours
+    for the same reasons the tick does. Frozen, because it is a reading of
+    settings rather than a workspace.
+
+    Attributes:
+        collector: The name the entry passes under `COLLECTOR_KWARG`.
+        interval: The entry's declared interval, or `None` for a schedule this
+            module cannot read as one (`_as_interval`).
+        countdown: The entry's `options.countdown` in seconds -- a positive
+            finite number kept as declared, or `0` for an entry that declares
+            none or declares something that is not one (`_as_countdown`).
+        options: The entry's whole `options` mapping with `countdown` normalised
+            to the value above, which is exactly what beat's own tick hands
+            `apply_async` and therefore what the start dispatch hands it.
+
+    """
+
+    collector: str
+    interval: timedelta | None
+    countdown: float
+    options: dict[str, Any]
 
 
 def collection_task_name(collector: str) -> str:
@@ -804,15 +884,44 @@ def _as_interval(declared: object) -> timedelta | None:
     return None
 
 
-def _scheduled_dispatches(schedule: object) -> tuple[dict[str, list[object]], int]:
-    """Return what a beat schedule says each collector's cadence is.
+def _dispatch_entries(schedule: object) -> Iterator[tuple[str | None, dict[str, Any]]]:
+    """Yield every schedule entry that fires the dispatch, in the schedule's own order.
+
+    The one walk over `CELERY_BEAT_SCHEDULE` this module makes, shared by the
+    reconciliation below and by the start dispatch: two walks would be two
+    readings of which entries are dispatches and which keyword names the
+    collector, and they would disagree the first time one of them changed.
 
     Args:
         schedule: Whatever `CELERY_BEAT_SCHEDULE` holds. Read defensively rather
             than trusted: a settings module that assigned a list, or an entry
-            that is not a mapping, is a misconfiguration and must meet this
-            condition's named refusal rather than an `AttributeError` out of a
-            boot hook.
+            that is not a mapping, is a misconfiguration and must meet the
+            reconciliation's named refusal rather than an `AttributeError` out of
+            a boot hook.
+
+    Yields:
+        The collector name each dispatch entry passes -- or `None` for one that
+        names nothing usable -- and the entry itself, in declaration order.
+        Entries firing any other task are not this module's business and are
+        not yielded.
+
+    """
+    if not isinstance(schedule, dict):
+        return
+    for entry in schedule.values():
+        if not isinstance(entry, dict) or entry.get("task") != SWEEP_TASK_NAME:
+            continue
+        keywords = entry.get("kwargs")
+        named = keywords.get(COLLECTOR_KWARG) if isinstance(keywords, dict) else None
+        yield (named if isinstance(named, str) and named.strip() else None), entry
+
+
+def _scheduled_dispatches(schedule: object) -> tuple[dict[str, list[object]], int]:
+    """Return what a beat schedule says each collector's cadence is.
+
+    Args:
+        schedule: Whatever `CELERY_BEAT_SCHEDULE` holds, read through
+            `_dispatch_entries`.
 
     Returns:
         The declared schedule of every entry firing the dispatch, by the collector
@@ -824,18 +933,218 @@ def _scheduled_dispatches(schedule: object) -> tuple[dict[str, list[object]], in
     """
     by_collector: dict[str, list[object]] = {}
     unnamed = 0
-    if not isinstance(schedule, dict):
-        return by_collector, unnamed
-    for entry in schedule.values():
-        if not isinstance(entry, dict) or entry.get("task") != SWEEP_TASK_NAME:
-            continue
-        keywords = entry.get("kwargs")
-        named = keywords.get(COLLECTOR_KWARG) if isinstance(keywords, dict) else None
-        if not isinstance(named, str) or not named.strip():
+    for named, entry in _dispatch_entries(schedule):
+        if named is None:
             unnamed += 1
             continue
         by_collector.setdefault(named, []).append(entry.get("schedule"))
     return by_collector, unnamed
+
+
+def _as_countdown(entry: Mapping[str, Any]) -> float:
+    """Return the countdown an entry's `options` declare, in seconds, or zero.
+
+    Args:
+        entry: One dispatch entry.
+
+    Returns:
+        `options.countdown` when it is a positive finite number, kept as the
+        number it is -- a float is not truncated, because `apply_async` takes a
+        float and beat would pass it through unchanged -- else `0`. `bool` is
+        excluded for the reason `_as_interval` excludes it; `nan`, `inf`, a
+        negative or non-numeric value read as no countdown rather than as an
+        error: beat passes `options` to `apply_async` unread, and the start
+        dispatch does not refuse what beat would accept.
+
+    """
+    options = entry.get("options")
+    declared = options.get("countdown") if isinstance(options, dict) else None
+    if isinstance(declared, bool) or not isinstance(declared, int | float):
+        return 0
+    if not math.isfinite(declared) or declared <= 0:
+        return 0
+    return declared
+
+
+def _as_options(entry: Mapping[str, Any], countdown: float) -> dict[str, Any]:
+    """Return the entry's `options` as `apply_async` keywords, with the countdown normalised.
+
+    Args:
+        entry: One dispatch entry.
+        countdown: What `_as_countdown` read off it.
+
+    Returns:
+        A copy of `options` when it is a mapping, else an empty one, with
+        `countdown` set to the normalised value in either case.
+
+    """
+    options = entry.get("options")
+    forwarded: dict[str, Any] = dict(options) if isinstance(options, dict) else {}
+    forwarded["countdown"] = countdown
+    return forwarded
+
+
+def scheduled_dispatches(schedule: object) -> tuple[ScheduledDispatch, ...]:
+    """Return every dispatch the schedule declares, in its own order, with its phase.
+
+    What a start dispatch enqueues (`CPM-OPERATE-S04`): one per entry firing
+    `SWEEP_TASK_NAME`, each carrying the collector the entry names, the interval
+    it declares and the countdown its `options` carry. Read off the declaration
+    and nothing else -- neither the registry nor the scheduler's tables -- so
+    the answer is the same in the beat process, in the suite and in a shell.
+
+    An entry naming no collector is left out rather than reported: it is one of
+    the faults `cadence_reconciliation_fault` refuses at boot, so a process that
+    reaches a start dispatch has none.
+
+    Args:
+        schedule: Whatever `CELERY_BEAT_SCHEDULE` holds, read through
+            `_dispatch_entries`.
+
+    Returns:
+        The declared dispatches, in the schedule's declaration order. Empty for
+        a schedule that is not a mapping or declares no dispatch.
+
+    """
+    return tuple(
+        ScheduledDispatch(
+            collector=named,
+            interval=_as_interval(entry.get("schedule")),
+            countdown=countdown,
+            options=_as_options(entry, countdown),
+        )
+        for named, entry in _dispatch_entries(schedule)
+        if named is not None
+        for countdown in (_as_countdown(entry),)
+    )
+
+
+def dispatch_scheduled_collectors_on_start(schedule: object) -> int:
+    """Enqueue one dispatch per scheduled collector, as beat's first tick would, now.
+
+    `CPM-OPERATE-S04`'s whole run-time behaviour. `django_celery_beat` starts an
+    interval entry's clock when it creates it, so a fresh component fires no
+    daily sweep for a day and no weekly one for a week; this is what the
+    `beat_init` receiver in `config/celery_app.py` calls, with the setting on,
+    so that day one is observed. It **enqueues and nothing else**: each entry is
+    one `apply_async` of the same task beat fires, with the same keyword and the
+    entry's own `options`, and the schedule's own entries are not touched -- a
+    cadence is data (`CPM-AD-20`) and "once, at start" is not a cadence.
+
+    **Nothing here is a second overlap guard or a second window.** Each dispatch
+    records `skipped` for itself when the collector's previous dispatch is still
+    draining, and each collection skips itself inside its collector's
+    observation window, so a beat restart on the same day re-enqueues nine
+    dispatches that then do nothing -- which is what makes the restart harmless
+    without this function knowing anything about the ledger.
+
+    **Refused under eager Celery.** With `task_always_eager` on, `apply_async`
+    runs the task in the caller, and the caller is the beat process: a bare
+    `pixi run -e dev beat` outside the stack would run nine collectors inline
+    inside the scheduler before it ticked once. Refused with one event, and
+    nothing is enqueued.
+
+    **A broker that cannot be reached ends the start dispatch, once.** Kombu's
+    `OperationalError` is a connection that could not be made after its own
+    retry window, and a broker that refused the first entry that way will refuse
+    the next eight the same way -- offering them would pay nine retry windows
+    before beat's first tick. So the first one is logged, naming the collector
+    and how many were not offered, and the rest are left to the tick. Any other
+    exception is that entry's own and costs only it. Nothing is raised: beat is
+    starting, and a start dispatch that failed beat's start would turn a
+    day-one convenience into an outage.
+
+    Args:
+        schedule: Whatever `CELERY_BEAT_SCHEDULE` holds.
+
+    Returns:
+        How many dispatches reached the broker.
+
+    """
+    declared = scheduled_dispatches(schedule)
+    if runs_eagerly():
+        logger.info(
+            SWEEP_START_REFUSED_EVENT,
+            task=SWEEP_TASK_NAME,
+            declared=len(declared),
+            detail=(
+                "the Celery app runs every task inline (task_always_eager), so the beat process has no worker "
+                "to hand a sweep to and would run every scheduled collector inside the scheduler; nothing was "
+                "enqueued. The start dispatch is for a beat with a broker and a worker behind it."
+            ),
+        )
+        return 0
+
+    task = current_app.tasks.get(SWEEP_TASK_NAME)
+    if task is None:
+        logger.warning(
+            SWEEP_START_REFUSED_EVENT,
+            task=SWEEP_TASK_NAME,
+            declared=len(declared),
+            detail=(
+                f"Celery's registry does not hold {SWEEP_TASK_NAME!r}, so there is nothing to enqueue; the task is "
+                f"declared in collectors/tasks.py, which the beat process imports through autodiscovery."
+            ),
+        )
+        return 0
+
+    enqueued = 0
+    refused = 0
+    not_offered = 0
+    for position, scheduled in enumerate(declared, start=1):
+        try:
+            result = task.apply_async(kwargs={COLLECTOR_KWARG: scheduled.collector}, **scheduled.options)
+        except OperationalError as unreachable:
+            # The broker could not be reached, after kombu's own connection
+            # retries. The next entries would meet the same broker, so they are
+            # left to the tick rather than each paying that window again.
+            refused += 1
+            not_offered = len(declared) - position
+            logger.warning(
+                SWEEP_START_UNENQUEUED_EVENT,
+                collector=scheduled.collector,
+                task=SWEEP_TASK_NAME,
+                countdown=scheduled.countdown,
+                not_offered=not_offered,
+                detail=f"{type(unreachable).__name__}: {unreachable}",
+            )
+            break
+        except Exception as unenqueued:  # noqa: BLE001 - see below
+            # Caught this widely and deliberately, on the terms `_enqueue_each`
+            # catches a broker's refusal of one package: this entry is logged,
+            # the next is still offered, and beat's start is not failed by a
+            # dispatch that exists to make day one convenient. Not a connection
+            # failure -- that is the branch above -- so nothing says the next
+            # entry will meet it too.
+            refused += 1
+            logger.warning(
+                SWEEP_START_UNENQUEUED_EVENT,
+                collector=scheduled.collector,
+                task=SWEEP_TASK_NAME,
+                countdown=scheduled.countdown,
+                not_offered=0,
+                detail=f"{type(unenqueued).__name__}: {unenqueued}",
+            )
+            continue
+        enqueued += 1
+        logger.info(
+            SWEEP_START_DISPATCHED_EVENT,
+            collector=scheduled.collector,
+            task=SWEEP_TASK_NAME,
+            interval=None if scheduled.interval is None else scheduled.interval.total_seconds(),
+            countdown=scheduled.countdown,
+            task_id=result.id,
+        )
+
+    logger.info(
+        SWEEP_START_SUMMARY_EVENT,
+        task=SWEEP_TASK_NAME,
+        declared=len(declared),
+        enqueued=enqueued,
+        refused=refused,
+        not_offered=not_offered,
+    )
+    return enqueued
 
 
 def _collector_faults(  # noqa: PLR0911 - one return per fault a collector can carry; see below

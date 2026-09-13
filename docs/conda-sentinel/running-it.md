@@ -195,11 +195,19 @@ queue holding two items looks like a queue.
     `unknown` follow, and they are worth telling apart:
 
     - **Delayed** — observed by the stack's own sweeps, on their own cadence and
-      under their own allowances. **No sweep fires when the stack starts**: beat's
-      interval entries start their clock when they are created, so a daily sweep first
-      fires a day after the stack first came up and a weekly one a week after. On day
-      one nothing observes anything unless you dispatch it by hand — one
-      `cpm.collect.sweep` per collector, through the `dispatch_sweep` command
+      under their own allowances. Beat's interval entries start their clock when they
+      are created, so a daily sweep's first *tick* is a day after the stack first came
+      up and a weekly one's a week after — **but the stack sweeps once when beat
+      starts**: the `dev` environment sets `CPM_SWEEP_ON_BEAT_START`, and with it on
+      beat enqueues one `cpm.collect.sweep` per scheduled collector the moment it
+      starts, in the schedule's order and with each entry's own offset (`kev` an hour
+      later, `license` two, `python_readiness` three). So within the first minute the
+      ledger holds a dispatch row for six collectors and three more arrive on their
+      offsets. Restart the stack the same day and the nine are enqueued again
+      harmlessly: a dispatch over a previous one still draining records `skipped`,
+      and each collection inside its observation window skips itself. Deployed the
+      switch is off, so day one there is still one `pixi run sweep` by hand. To sweep
+      again without restarting, dispatch by hand through the `dispatch_sweep` command
       [carrying the stack's environment](#a-shell-against-the-stack):
 
       ```bash

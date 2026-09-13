@@ -355,7 +355,7 @@ failure looks like.
 | Question | Where you look |
 |---|---|
 | Is the service up? | `/livez` and `/readyz` |
-| Why does Coverage say every collector has *never run*? | Expected on a fresh stack — [beat's first fire is one interval away](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run) |
+| Why does Coverage say a collector has *never run*? | On the stack every swept collector gets a dispatch row at beat start (the three phased ones one, two and three hours in); `inventory` stays never-run until `ingest` and `py314_verification` always — [beat's first tick is one interval away, and the `dev` environment enqueues it at start](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run) |
 | Is anything not being collected? | The **Coverage** screen |
 | Did last night's sweeps run? | Coverage, and the run ledger |
 | Nothing has swept yet and I do not want to wait a day | `pixi run stack-run dispatch_sweep --all` (deployed: `pixi run sweep`) |
