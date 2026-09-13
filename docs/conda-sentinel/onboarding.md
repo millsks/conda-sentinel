@@ -233,7 +233,9 @@ each one asks for, what it does when rate-limited, what its `User-Agent` says, a
 what each of its refusals means. It is long because it is the reference; do not read
 it end to end now.
 
-**Exercise.** Run `pixi run -e dev python manage.py shell` and:
+**Exercise.** Run `pixi run -e dev python manage.py shell` — against SQLite, on
+purpose: the registry is code, not rows, so which database the shell sees does not
+matter here (against the stack's database it would be `pixi run stack-shell`) — and:
 
 ```python
 from conda_sentinel.core.registry import registered_collectors

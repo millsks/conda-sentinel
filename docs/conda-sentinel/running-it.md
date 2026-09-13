@@ -177,16 +177,15 @@ queue holding two items looks like a queue.
       interval entries start their clock when they are created, so a daily sweep first
       fires a day after the stack first came up and a weekly one a week after. On day
       one nothing observes anything unless you dispatch it by hand — one
-      `cpm.collect.sweep` per collector, from a shell carrying the stack's environment:
+      `cpm.collect.sweep` per collector, from [a shell carrying the stack's
+      environment](#a-shell-against-the-stack):
 
       ```bash
-      DATABASE_URL="postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" \
-      REDIS_URL="redis://localhost:6380/0" CELERY_TASK_ALWAYS_EAGER=0 \
-      pixi run -e dev python manage.py shell -c "
+      pixi run stack-shell -c '
       from conda_sentinel.collectors.tasks import collect_sweep
-      for name in ('pypi_release', 'feedstock', 'python_readiness', 'source_release'):
+      for name in ("pypi_release", "feedstock", "python_readiness", "source_release"):
           collect_sweep.delay(collector=name)
-      "
+      '
       ```
 
       Then the allowances set the pace. `pypi_release` is 60 requests a minute,
@@ -230,10 +229,11 @@ task `cpm.policy.run` is registered and routable, but no beat entry fires it and
 sweep chains it — so a deployed component collects evidence and never computes a
 verdict from it until an operator arranges the run. See
 [Asynchronous work](asynchronous-work.md#two-tasks-nothing-fires) for what to do about
-that; locally the seeder executes a run inline, and you can run one by hand:
+that; locally the seeder executes a run inline, and you can run one by hand, from
+[a shell against the stack](#a-shell-against-the-stack):
 
 ```python
-# pixi run -e dev python manage.py shell
+# pixi run stack-shell
 from conda_sentinel.core.clock import SystemClock
 from conda_sentinel.core.policy_run import execute_policy_run
 from conda_sentinel.policies.parameters import parameters_file, parameters_from
@@ -348,14 +348,18 @@ not use your existing Redis or PostgreSQL, and it does not need you to stop them
 !!! warning "The stack's database is a different database"
 
     It is the PostgreSQL container, not the SQLite file the five commands above use.
-    Its first run needs its own migrate and seed:
+    Its first run needs its own migrate and seed, and the `stack-*` tasks are how —
+    each carries the stack's `DATABASE_URL` and `REDIS_URL` itself, so nothing has to
+    be exported by hand:
 
     ```bash
-    pixi run docker-up
-    export DATABASE_URL="postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel"
-    pixi run -e dev python manage.py migrate
-    pixi run -e dev seed-demo
+    pixi run stack-migrate   # brings the containers up first
+    pixi run stack-seed      # personas, then the demo inventory
     ```
+
+    Anything else run by hand goes through `stack-run` or `stack-shell`
+    ([below](#a-shell-against-the-stack)); a bare `pixi run -e dev python manage.py …`
+    is back on SQLite.
 
     That is also the more production-shaped place to work: SQLite serialises writes
     behind one lock, and a worker, beat and a web process writing at once is exactly
@@ -378,6 +382,47 @@ not use your existing Redis or PostgreSQL, and it does not need you to stop them
 environment, because that environment *is* the runtime — putting the app in a
 container as well would mean a rebuild on every edit and a second, slower way to run
 what pixi already runs. `Dockerfile` is what builds the deployable image.
+
+### A shell against the stack
+
+`pixi run -e dev python manage.py shell` opens a shell against **SQLite**, with every
+task it enqueues running inline in the shell — the two-database trap above, from the
+other side, and it looks like it worked (the `pixi.toml` comment above `stack-shell`
+records the afternoon it did).
+
+The `stack-*` tasks carry the stack's own environment — the same `DATABASE_URL`,
+`REDIS_URL` and `CELERY_TASK_ALWAYS_EAGER=0` that `local-stack` declares, and nothing
+else — so a task enqueued from them lands on the stack's worker and a query reads the
+database the screens read:
+
+| Task | Does |
+|---|---|
+| `pixi run stack-migrate` | apply migrations to the stack's PostgreSQL (starts the containers first) |
+| `pixi run stack-personas` | seed the six personas into it |
+| `pixi run stack-seed` | personas, then the demo inventory, resolving identity live; runs its tasks inline on purpose |
+| `pixi run stack-shell` | a Django shell against the stack's database and broker |
+| `pixi run stack-run …` | `manage.py` with whatever follows appended: `pixi run stack-run showmigrations collectors` |
+
+```bash
+pixi run stack-run showmigrations collectors
+pixi run stack-run shell -c 'from django.conf import settings; print(settings.CELERY_TASK_ALWAYS_EAGER)'   # False
+pixi run stack-run                                                     # no command: Django's list of them, not an error
+```
+
+Neither `stack-shell` nor `stack-run` starts the containers, so a stopped stack does
+not come up as a side effect of opening a shell. Nor does the shell refuse to open:
+Django connects lazily, so the shell opens and PostgreSQL's refusal arrives at the
+first query; a `.delay()` retries the broker before giving up. Both are the honest
+answer — the alternative was bringing up infrastructure you did not ask for.
+
+For a `shell -c` one-liner, the quoting is **outer single, inner double** — `pixi run`
+re-parses the arguments and strips inner single quotes. The full account is under
+[Operating Conda-Sentinel](operations.md#running-it-and-where-the-result-lands). A body
+that needs both kinds of quote goes in a file: `pixi run stack-shell < script.py`
+(`manage.py shell` reads stdin when it is not a terminal — and the file is against
+the stack, not SQLite, because the task's environment travels with it). The rule is
+for bash and zsh; the stack is Unix-only anyway
+([gunicorn](#the-web-process-is-the-deployed-one)).
 
 ### Two things that make it work, and fail quietly without
 

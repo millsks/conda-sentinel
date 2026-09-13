@@ -648,6 +648,10 @@ docs = { cmd = "mkdocs build --strict", default-environment = "dev", description
 #
 # `tests/unit/test_local_stack.py` asserts the exclusion is deliberate, so nobody
 # later "fixes" the omission by declaring them.
+#
+# `stack-shell` and `stack-run` (`CPM-OPERATE-S01`) are the operator's way in: a
+# `manage.py shell` and an arbitrary management command carrying the stack's
+# environment, so nothing run by hand silently talks to SQLite instead.
 # ---------------------------------------------------------------------------
 
 # --- Docker Compose convenience wrappers (compose file at repo root) ---
@@ -688,6 +692,28 @@ flower = { cmd = "celery -A config.celery_app flower --address=127.0.0.1 --port=
 stack-migrate = { cmd = "python manage.py migrate", default-environment = "dev", env = { REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["docker-up"], description = "Apply migrations to the local stack's PostgreSQL" }
 stack-seed = { cmd = "python -m config.local_dev.seed_demo", default-environment = "dev", env = { CELERY_TASK_ALWAYS_EAGER = "1", REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-personas"], description = "Seed personas and the demo inventory into the local stack; resolves identity live against conda-forge and PyPI" }
 stack-personas = { cmd = "python -m config.local_dev.seed", default-environment = "dev", env = { REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, depends-on = ["stack-migrate"], description = "Seed the local development personas into the local stack" }
+
+# The operator's way in (`CPM-OPERATE-S01`). Every hand-run action against the stack
+# was a `manage.py shell -c` that had to carry `DATABASE_URL`, `REDIS_URL` and
+# `CELERY_TASK_ALWAYS_EAGER=0` by hand, or it silently talked to SQLite and ran every
+# task it enqueued inline in the shell. This is the canonical account of the
+# afternoon that happened: on 2026-09-12 an identity-resolver loop was run from a
+# bare `manage.py shell -c`, printed a summary that looked right, and had written
+# every snapshot to the SQLite file while the stack's PostgreSQL held none of them
+# -- nothing errored, and the screens simply did not change. `stack-shell` opens the
+# shell; `stack-run` is `manage.py` with whatever follows appended, so
+# `pixi run stack-run showmigrations collectors` reads the stack's database. Both
+# carry those three variables with `local-stack`'s values -- `CELERY_TASK_ALWAYS_EAGER`
+# is `"0"`, not `stack-seed`'s `"1"` -- so a task enqueued from the shell goes to the
+# stack's worker rather than running in the shell.
+#
+# No `depends-on`, deliberately: a stopped stack must not come up as a side effect of
+# opening a shell. Django connects lazily, so the shell still opens and PostgreSQL's
+# refusal arrives at the first query; a `.delay()` retries the broker before giving
+# up. Both are the honest answer, rather than starting containers the operator did
+# not ask for.
+stack-shell = { cmd = "python manage.py shell", default-environment = "dev", env = { CELERY_TASK_ALWAYS_EAGER = "0", REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, description = "A Django shell against the local stack's PostgreSQL and Redis" }
+stack-run = { cmd = "python manage.py", default-environment = "dev", env = { CELERY_TASK_ALWAYS_EAGER = "0", REDIS_URL = "redis://localhost:6380/0", DATABASE_URL = "postgres://conda_sentinel:local-development-only@localhost:5433/conda_sentinel" }, description = "Run a Django management command against the local stack" }
 
 # `depends-on` carries the migration, so a fresh clone's first `local-stack` finds a
 # schema rather than fifty-two missing tables. Seeding stays a separate command: it
