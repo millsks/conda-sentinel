@@ -384,6 +384,25 @@ planning artifacts.
 drafted by the implementing agent.
 **Depends on:** nothing.
 
+### `CPM-EP-OPERATE`: Operating the inventory
+
+Turns the shell snippets that operate the product into named commands and declared
+options: a shell and a runner that carry the stack's environment, ingestion and sweeps and
+policy runs as management commands and admin processes, the inventory as a governed table
+shared by every pod and by the demo, a first sweep on day one, an authenticated GitHub allowance, a local
+channel default, ninety days of evidence purged nightly, a per-package re-run from the
+page, an operator digest, and the evidence tables measured at ten thousand packages.
+
+**User outcome:** an operator can add, resolve, observe, re-run and retire packages on the
+running product with named commands, on day one, without a Python shell.
+
+**FRs covered:** none new. Operates `CPM-FR-42`, `CPM-FR-15`, `CPM-FR-22`, `CPM-FR-10`.
+**NFRs covered:** `CPM-NFR-1`, `CPM-NFR-2`.
+**Depends on:** `CPM-EP-IDENTITY` (the resolver, the override's audit shape), `CPM-EP-CURRENCY`, `CPM-EP-APP` (S03's surface, S08).
+**Governed by:** `CPM-AD-2`, `CPM-AD-9`, `CPM-AD-14`, `CPM-AD-20`, `CPM-AD-25`, `CPM-AD-29`;
+inherited `AD-13`.
+**Raised by:** the product owner, 2026-09-13 (`sprint-change-proposal-2026-09-13.md`).
+
 ### Build order
 
 ```mermaid
@@ -399,6 +418,9 @@ graph LR
   SEC --> PRI
   PRI --> APP["CPM-EP-APP"]
   APP --> NL["CPM-EP-NL<br/>spike-gated"]
+  ID --> OP["CPM-EP-OPERATE"]
+  CUR --> OP
+  APP --> OP
 ```
 
 ---
@@ -3229,6 +3251,430 @@ So that we discover an incompatibility in a spike rather than in an epic.
 
 
 ---
+
+## CPM-EP-OPERATE: Operating the inventory
+
+> **Added after the initial plan**, by `sprint-change-proposal-2026-09-13.md`, and raised
+> by the product owner asking three questions in a row on 2026-09-13: how a package is
+> added to the inventory, whether there is a task that starts the collectors, and what
+> maintenance the platform still lacks.
+
+Every answer was a `manage.py shell -c` one-liner. The inventory is edited by hand in a
+CSV and ingested from a shell; a sweep, a policy run and a resolution are each a shell
+snippet that must carry three environment variables or it silently talks to SQLite and
+runs inline; the demo roster and the watchlist are two inventories that collide on
+forty-five names; a fresh stack observes nothing for a day because beat's interval
+entries start their clock on creation; reading GitHub unauthenticated means the daily
+upstream sweep covers fifteen packages an hour; published-conda currency never appears
+locally because the channel list is empty; and no evidence table has ever been pruned.
+
+None of that is a defect in a collector. It is the gap between a product that collects
+and a product that somebody operates.
+
+### CPM-OPERATE-S01: A shell against the stack carries the stack's environment
+
+As somebody operating the local stack,
+I want a task that opens a Django shell, or runs any management command, against the
+stack's own database and broker,
+So that I never again run a resolver inline against SQLite because I forgot three
+variables.
+
+**Acceptance Criteria:**
+
+**Given** the local stack's compose containers
+**When** `pixi run stack-shell` runs
+**Then** it opens `manage.py shell` in the `dev` environment carrying the stack's
+`DATABASE_URL`, `REDIS_URL` and `CELERY_TASK_ALWAYS_EAGER=0`, exactly as `local-stack` does
+
+**Given** the same containers
+**When** `pixi run stack-run -- <management command and arguments>` runs
+**Then** the command runs with that same environment, and its exit status is the task's
+
+**Given** `tests/unit/test_local_stack.py`'s reconciliation of the stack tasks
+**When** the two new tasks are declared
+**Then** they are in `AGAINST_THE_STACK`, name the same database and broker as the other
+four, and `test_every_stack_task_names_the_same_database` sweeps them
+
+**Given** the documentation
+**When** it shows a command against the stack
+**Then** no page carries an environment-prefixed `manage.py shell -c` any more; each uses
+the task
+
+**Satisfies:** nothing new directly; it is the precondition for every story below being
+usable by hand.
+**Governed by:** `CPM-AD-29`'s locality rule — `COMPONENT_RUNTIME=local` still comes from
+the `dev` feature's activation env and from nowhere else; the new tasks declare the stack's
+addresses, never the runtime.
+
+**Constrained:** the fourth copy of one URL was the shape `CPM-PLATFORM-S06`'s defect had,
+and this adds a fifth and sixth. The reconciliation test is what makes six copies safe.
+
+### CPM-OPERATE-S02: Ingest, sweep and run are commands, not shell snippets
+
+As an operator,
+I want ingestion, a collector sweep and a policy run to be named management commands,
+So that they can be run from a terminal, scheduled by the deployment platform, and read
+about in `--help`, instead of pasted from a runbook.
+
+**Acceptance Criteria:**
+
+**Given** the `collectors` app
+**When** `manage.py ingest_inventory [--force]` runs
+**Then** it enqueues `cpm.collect.inventory` (or runs it eagerly where settings say so),
+prints the run's ledger state, and opens no transaction of its own
+
+**Given** the same app
+**When** `manage.py dispatch_sweep <collector> | --all` runs
+**Then** it enqueues one `cpm.collect.sweep` per named registered, per-package collector,
+refuses a name the registry does not hold or one that is not swept, and prints each
+dispatch row's state and how many packages it offered
+
+**Given** the `policies` app
+**When** `manage.py run_policy [--version <v>]` runs
+**Then** it enqueues `cpm.policy.run` with the named version, defaulting to the newest
+recorded one, and refuses a version the parameters file does not record
+
+**Given** `component.toml`
+**When** the three commands exist
+**Then** each is declared as an `[[admin_processes]]` entry with a pixi task
+(`ingest`, `sweep`, `policy-run`), `schedule = "deployment-repository"`, and
+`tests/unit/test_process_model.py` reconciles them in both directions
+
+**Given** the local stack
+**When** `pixi run stack-run -- dispatch_sweep --all` runs
+**Then** nine dispatch rows appear in the ledger, `inventory` and `py314_verification`
+are not among them, and the runbook's shell recipes are replaced by these commands
+
+**Satisfies:** `CPM-FR-42` (ingestion is invocable), `CPM-FR-15` (a run record per
+invocation), `CPM-FR-22` (a run at a named version).
+**Governed by:** inherited `AD-13` — an administrative process never sets
+`COMPONENT_PROCESS`; `CPM-AD-9` — a command enqueues, it never collects in the caller
+unless the settings already make every task eager; `CPM-AD-20` — the commands dispatch
+through the same `cpm.collect.sweep` beat fires, so nothing about a sweep changes by
+being started by hand.
+
+### CPM-OPERATE-S03: The inventory is a governed table
+
+As an operator,
+I want the watchlist to live in the database and be changed on the record,
+So that adding a package is an audited write and not a release, every pod reads the same
+inventory, and the demo and the watchlist stop being two inventories that collide on
+forty-five names.
+
+**Acceptance Criteria:**
+
+**Given** a new `inventory` table of watchlist rows — the source key, the package name and
+the usage signals, with who last changed each row, when and why
+**When** ingestion runs
+**Then** it reads that table through an adapter behind the same `Transport` contract the
+CSV adapter implements, with no branch in the collector on which adapter is bound
+
+**Given** the wheel's watchlist file
+**When** the table is empty at first run
+**Then** a `manage.py import_watchlist [<path>] [--replace]` command seeds it from the
+file (the development file locally, the production file deployed, by locality), records
+the import as a change with a reason, and the docs make the file the *seed*, not the source
+
+**Given** a user holding the inventory permission
+**When** they add, edit or retire a row from the surface with a reason
+**Then** the row and an audit record (actor, timestamp, prior value, new value, reason)
+are written in one transaction; without the permission or without a reason the write is
+refused and the refusal is logged with the acting user identity; the audit records are
+retrievable as a set
+
+**Given** the demo seeder
+**When** it creates package shells
+**Then** it seeds the same table and files each shell under the inventory's own
+`(identity_source, associator_key)`, so a later ingestion finds every one; the roster's
+advisories, KEV listings and licences stay an overlay keyed by name; a seeded stack ingested
+afterwards raises no `IntegrityError` on `canonical_name`
+
+**Given** a row retired from the table
+**When** the next ingestion runs
+**Then** the package is recorded absent with a timestamp, keeps every row, leaves the
+queues, and the docs say how an operator finds it and that a wrong identity is corrected
+through the override (`CPM-IDENTITY-S05`), never by editing the inventory to match
+
+**Given** `running-it.md`
+**When** it explains adding a package
+**Then** it gives the end-to-end path: a row (from the surface or the import), `ingest`,
+`sweep resolve_identity`, then the sweeps that read the mappings
+
+**Satisfies:** `CPM-FR-42`; `CPM-FR-32` (a privileged write is audited).
+**Governed by:** `CPM-AD-29` — one declared adapter, and this is the "second adapter
+behind the same contract" it anticipated; `CPM-AD-14` — the package *set* is governed
+reference data, and this write carries the same three obligations as the identity
+override: a permission, a reason, an audit row in the same transaction (`CPM-AD-23`);
+`CPM-AD-25` — the collector still never writes the package table.
+
+**Constrained: why a table and not the file.** The file inside the wheel cannot drift
+between pods — every pod of a release carries the same bytes, ingestion runs one dispatch
+at a time on the collect queue, and beat is one replica — but it makes every package
+addition a review and a release. That was the right cost while the package set was
+`CPM-IDENTITY-S07`'s reviewed fixture; it is the wrong cost for an operator's routine
+action. A table shared by every pod, changed only through an audited write, keeps the
+governance and drops the release.
+
+**Constrained: this is a second governed human write, and the PRD says there is one.**
+`CPM-FR-3` calls the identity override "the only human write that mutates governed
+reference data". The inventory rows are governed reference data, so building this story
+amends `CPM-FR-3` to name two writes — identity and inventory — each with the same three
+obligations. The amendment is proposed with the story's pull request and accepted before
+the write ships; until then the import command is the only way rows change.
+
+**Constrained: the file adapter stays.** The CSV adapter is not deleted; it is what the
+import command reads through and what a deployment with no database inventory still
+selects by locality. Nothing about `CPM-IDENTITY-S07`'s fail-closed selection changes.
+
+### CPM-OPERATE-S04: Day one is observed
+
+As somebody bringing up a fresh stack,
+I want every scheduled collector to sweep once when beat starts, where the deployment
+says so,
+So that a new database is not blank for a day and a new weekly surface for a week.
+
+**Acceptance Criteria:**
+
+**Given** a declared setting, `CPM_SWEEP_ON_BEAT_START`, off by default
+**When** beat starts with it on
+**Then** one `cpm.collect.sweep` is dispatched per scheduled collector, in the schedule's
+own order and with its own offsets, and beat's interval entries are otherwise untouched
+
+**Given** the `dev` feature's activation env
+**When** the local stack starts
+**Then** the setting is on, and a fresh `local-stack` shows the first observations within
+the allowances rather than after a day
+
+**Given** a deployed component
+**When** the setting is absent
+**Then** nothing fires at start, and the start-up reconciliation still refuses an entry
+whose interval disagrees with its collector's cadence
+
+**Given** beat restarted on a stack that has already swept today
+**When** the setting is on
+**Then** the dispatch is still made and each collector's own observation window is what
+skips packages observed too recently — the option never bypasses a window
+
+**Satisfies:** `CPM-NFR-2`.
+**Governed by:** `CPM-AD-20` — cadence stays data in the scheduler; this adds one
+dispatch, never a cadence; `CPM-AD-29` — locality is read at settings time by the same
+`is_local()` and the setting fails closed toward deployment.
+
+### CPM-OPERATE-S05: An authenticated GitHub allowance
+
+As an operator,
+I want the two GitHub-reading collectors to use a token when one is declared,
+So that a daily sweep covers the inventory in a day rather than in a week of
+fifteen-an-hour.
+
+**Acceptance Criteria:**
+
+**Given** `CPM_GITHUB_TOKEN` declared in the environment
+**When** `source_release` or `feedstock` builds a request
+**Then** it carries the token as a bearer header, the declared allowance is GitHub's
+authenticated one (5,000 core calls an hour; 30 searches a minute), and the collector's
+freshness target still exceeds its cadence
+
+**Given** the token
+**When** any log line, ledger row, evidence row or `detail` is written
+**Then** the token appears in none of them; an audit test sweeps the two modules for a
+path from the setting to a string that is stored or logged
+
+**Given** no token
+**When** the same collectors run
+**Then** they behave exactly as today, and the docs say what the unauthenticated allowance
+buys at the inventory's size
+
+**Given** a token GitHub rejects
+**When** a collection runs
+**Then** the run is `failed` with a `detail` that says the credential was refused and
+names neither it nor its prefix
+
+**Satisfies:** `CPM-NFR-1` — full-inventory collection at ten thousand packages within
+the cadence, for the two surfaces that could not meet it unauthenticated.
+**Governed by:** `CPM-AD-27` — the header is added at the transport seam, so the parsers
+stay pure; `CPM-AD-20` — the raised allowance is a declaration reconciled at start-up like
+the cadence it serves; `CPM-AD-15` — a refused credential is a `failed` run an operator
+can trace, never a silent fallback to unauthenticated.
+
+### CPM-OPERATE-S06: Published-conda currency on the local stack
+
+As a developer,
+I want the local stack to monitor `conda-forge` by default,
+So that the published-conda surface and the licence collector work on my machine instead
+of selecting nothing forever.
+
+**Acceptance Criteria:**
+
+**Given** the `dev` feature's activation env
+**When** the local stack starts
+**Then** `CPM_MONITORED_CHANNELS` is `conda-forge`, `conda_package` and `license` select
+every package, and the Coverage screen shows both as run rather than never run
+
+**Given** a deployed component
+**When** the setting is absent
+**Then** it stays empty and the two collectors select nothing, as today, with the
+start-up refusal that already exists for an over-long list unchanged
+
+**Given** the settings tests
+**When** the local default is added
+**Then** `test_locality_declaration.py`'s rule holds — no task declares the runtime — and
+the default is reconciled against `MAX_MONITORED_CHANNELS`
+
+**Satisfies:** `CPM-FR-10` on the local stack.
+**Governed by:** `CPM-AD-29`'s fail-closed locality; `CPM-AD-20`.
+
+### CPM-OPERATE-S07: Ninety days of evidence, purged nightly
+
+As an operator,
+I want evidence older than ninety days purged every night,
+So that a log that grows one row per package per day holds a quarter, not forever, and
+what is kept is a declared number rather than an accident of disk.
+
+**Acceptance Criteria:**
+
+**Given** the versioned policy parameters
+**When** a retention is read
+**Then** it is one duration for evidence and run ledgers, defaulting to 90 days, and a
+deployment that declares a longer one keeps more; there is no way to declare "forever"
+except by a number
+
+**Given** `manage.py prune_evidence [--dry-run] [--batch <n>]`
+**When** it runs
+**Then** for every evidence table, collection-run and policy-run table it deletes rows
+whose `observed_at` (or `finished_at`) is older than the retention, in batches with a
+bounded transaction each, never holding a lock across the whole range — and never a
+package's newest row in any evidence table, so a package unobserved for a hundred days
+still says when it was last seen rather than reading `unknown`
+
+**Given** `CPM-AD-2`'s append-only base
+**When** the command deletes
+**Then** it goes through one audited door the base exposes for this command alone, each
+table's purge writes a run record naming the cut-off and the count, `save()` still refuses
+an update, and nothing else in the product can delete evidence
+
+**Given** a policy run inside the retention window
+**When** it is replayed after a purge
+**Then** it reproduces byte-identical results (`CPM-FR-22`); a replay of a run outside the
+window is refused with a message that says why, rather than reproducing something else
+
+**Given** `component.toml`
+**When** the command exists
+**Then** it is an `[[admin_processes]]` entry with `schedule = "deployment-repository"`,
+the deployment repository's nightly job, and the docs say so; the local stack gains a
+`stack-run -- prune_evidence` recipe and no beat entry
+
+**Given** the evidence tables
+**When** the purge's cut-off scan runs
+**Then** every table carries an index the scan uses (`observed_at`, or the existing
+`(package, -observed_at)` where the planner chooses it) — measured with `EXPLAIN` in the
+story, not assumed
+
+**Satisfies:** `CPM-FR-22` (replay inside retention), `CPM-NFR-1`.
+**Governed by:** `CPM-AD-2` — the base is the one door; `CPM-AD-11` — the rollup keeps
+one row per package regardless; `CPM-AD-23` — bounded transactions; inherited `AD-13`.
+
+**Constrained:** rollup and package rows are never purged; identity, overrides and
+workflow state are not evidence and are outside this story.
+
+### CPM-OPERATE-S08: A collector re-run for one package, from the page
+
+As a security reviewer,
+I want to re-run a package's collectors from its own page,
+So that after an override or a fix I do not wait a day for the daily sweep or ask an
+operator for a shell.
+
+**Acceptance Criteria:**
+
+**Given** a package page and a user holding the recollect permission
+**When** they choose "Collect now"
+**Then** one per-package task per swept collector is enqueued for that package with
+`force=True`, the request writes nothing but an audit row naming actor and package, and
+the page shows the runs as they finalise
+
+**Given** a user without the permission
+**When** they attempt it
+**Then** it is refused and the refusal is logged with the acting user identity
+
+**Given** the same package re-collected twice in a minute
+**When** the second request arrives
+**Then** it is refused as already in flight while any of the first's runs is `running`
+
+**Satisfies:** `CPM-UJ-1`'s manual recollection.
+**Governed by:** `CPM-AD-9` — a web request enqueues and never collects; `CPM-AD-13` —
+the permission is declared on the surface and enforced centrally; `CPM-AD-14` — the
+request mutates no identity; `CPM-AD-23` — the audit row and the enqueue are one unit.
+
+**Constrained:** this is the surface half of what `dispatch_sweep` gives an operator; it
+lands after `CPM-OPERATE-S02` so both enqueue the same tasks.
+
+### CPM-OPERATE-S09: An operator digest
+
+As an operator,
+I want a daily digest of what the collectors did and did not do,
+So that a sweep failing for three days is something I am told, not something I find on
+the Coverage screen when a reviewer asks.
+
+**Acceptance Criteria:**
+
+**Given** the run ledger
+**When** the digest task runs (`cpm.policy.digest`, daily, cadence as data)
+**Then** it computes, per collector: dispatches and their states, collections by state,
+how many were refused as rate-limited, and how many packages are past their freshness
+target unobserved; and overall: packages ingested, absent, resolved, unresolved, and the
+newest policy run's version and age
+
+**Given** a declared delivery — a webhook URL, an email address, or none
+**When** the digest is produced
+**Then** it is delivered there and stored as a row an operator can read from the surface;
+with none declared it is stored only, and the docs say so
+
+**Given** a day in which nothing changed
+**When** the digest runs
+**Then** it still delivers, saying so in one line, because silence and health look the
+same and must not
+
+**Given** a credential in the delivery configuration
+**When** anything is logged or stored
+**Then** it appears nowhere but the environment
+
+**Satisfies:** `CPM-FR-38` (visible staleness and failure), `CPM-NFR-12`, `CPM-NFR-13`.
+**Governed by:** `CPM-AD-20` — one more entry in the schedule; `CPM-AD-15`; `CPM-AD-9` —
+delivery is a task, never a request.
+
+### CPM-OPERATE-S10: The evidence tables at ten thousand packages
+
+As an operator,
+I want the evidence tables measured at the inventory's declared scale and indexed or
+partitioned by what the measurement says,
+So that the nightly purge and the rollup stay fast when the log holds nine million rows.
+
+**Acceptance Criteria:**
+
+**Given** a database seeded to `CPM-NFR-1`'s ten thousand packages over ninety days
+**When** the rollup's reads, the surface's package pages and `prune_evidence`'s cut-off
+scan are measured with `EXPLAIN (ANALYZE, BUFFERS)`
+**Then** each is recorded with its plan and timing in the story, and any sequential scan
+on an evidence table names the index that removes it
+
+**Given** the measurement
+**When** batched deletion at 90 days meets the nightly window
+**Then** partitioning is recorded as **not adopted**, with the numbers; otherwise the
+story proposes monthly range partitioning by `observed_at` as an architecture amendment
+(`CPM-AD-2` and the migration audit both need to know), with the purge becoming a
+partition drop, and does not implement it until the amendment is accepted
+
+**Given** any index this story adds
+**When** the migration audit runs
+**Then** the index is declared on the model, named per the existing constants, and
+reconciled by `test_migration_completeness`
+
+**Satisfies:** `CPM-NFR-1`.
+**Governed by:** `CPM-AD-2`, `CPM-AD-11`; the architecture's own rule that a decision
+with this blast radius is amended in the spine, not made in a migration.
+
+**Constrained:** a spike with a measured verdict first; indexes on evidence.
+Partitioning only after the amendment.
 
 ## Test design integration
 
