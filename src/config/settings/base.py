@@ -402,6 +402,21 @@ INVENTORY_WATCHLIST_PATH = watchlist_path(local=is_local())
 # fills. Stripped, so a trailing space in a ConfigMap does not become a third
 # value. See src/django_apps/conda_sentinel/collectors/inventory_source.py.
 CPM_INVENTORY_SOURCE = env.str("CPM_INVENTORY_SOURCE", default=DEFAULT_INVENTORY_SOURCE).strip()
+# Whether beat enqueues its first tick the moment it starts (CPM-OPERATE-S04).
+# django-celery-beat starts an interval entry's clock when it creates it, so a
+# fresh component fires no daily sweep for a day and no weekly one for a week;
+# with this on, the `beat_init` receiver in config/celery_app.py enqueues one
+# `cpm.collect.sweep` per CELERY_BEAT_SCHEDULE entry below, in that order and
+# with each entry's own countdown, and changes nothing about the entries. Off by
+# default and deliberately: deployed, beat restarts on every deploy, and a
+# dispatch on each would be a second sweep a day on top of the tick -- harmless,
+# because each dispatch skips itself over a previous one still draining and each
+# collection skips itself inside its observation window, but noise on the
+# Coverage screen. The `dev` pixi feature's activation env declares it on, where
+# a fresh volume is the common case and the day-one gap is the whole complaint.
+# The name is collectors/sweep.py's SWEEP_ON_BEAT_START_SETTING;
+# tests/unit/test_settings.py pins the default in every module.
+CPM_SWEEP_ON_BEAT_START = env.bool("CPM_SWEEP_ON_BEAT_START", default=False)
 # The conda channels and platforms the published-package collector observes
 # (CPM-FR-10, CPM-CURRENCY-S04). Both ship EMPTY, and that is the decision rather
 # than an omission.
@@ -848,6 +863,24 @@ CELERY_BEAT_SCHEDULE = {
         # docs/conda-sentinel/operations.md instead.
     },
 }
+# How long the Redis transport waits for a delivered message to be acknowledged
+# before it hands it to another worker, in seconds -- and the reason it is set
+# at all is the three countdowns above. Redis has no native delayed delivery:
+# kombu delivers a countdown message to a worker at once and the worker holds it
+# unacknowledged until the countdown elapses, so a countdown longer than the
+# visibility timeout is redelivered before it runs, and the second copy lands as
+# a second dispatch that the overlap guard records `skipped`. Kombu's default is
+# one hour, which is exactly the KEV offset and below the other two; every beat
+# tick -- and, on the local stack, every start dispatch (CPM-OPERATE-S04) --
+# would otherwise produce that second row. Four hours: strictly above the
+# largest declared countdown, which tests/unit/test_settings.py asserts against
+# every entry, and short enough that a worker that died holding a message hands
+# it back the same day. A new countdown above this is a change to this number in
+# the same edit.
+# https://docs.celeryq.dev/en/stable/getting-started/backends-and-brokers/redis.html#visibility-timeout
+BROKER_VISIBILITY_TIMEOUT_SECONDS = 4 * 60 * 60
+# https://docs.celeryq.dev/en/stable/userguide/configuration.html#broker-transport-options
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": BROKER_VISIBILITY_TIMEOUT_SECONDS}
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html#worker-send-task-events
 CELERY_WORKER_SEND_TASK_EVENTS = True
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html#std-setting-task_send_sent_event

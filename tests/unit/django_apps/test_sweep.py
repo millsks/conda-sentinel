@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import math
 from dataclasses import FrozenInstanceError
 from datetime import timedelta
 from pathlib import Path
@@ -48,15 +49,18 @@ from conda_sentinel.collectors.feedstock import FEEDSTOCK_CADENCE
 from conda_sentinel.collectors.feedstock import FeedstockCollector
 from conda_sentinel.collectors.kev import COLLECTOR_NAME as KEV_NAME
 from conda_sentinel.collectors.kev import KEV_CADENCE
+from conda_sentinel.collectors.kev import KEV_DISPATCH_OFFSET
 from conda_sentinel.collectors.kev import KevCollector
 from conda_sentinel.collectors.license import COLLECTOR_NAME as LICENSE_NAME
 from conda_sentinel.collectors.license import LICENSE_CADENCE
+from conda_sentinel.collectors.license import LICENSE_DISPATCH_OFFSET
 from conda_sentinel.collectors.license import LicenseCollector
 from conda_sentinel.collectors.pypi_release import COLLECTOR_NAME as PYPI_RELEASE_NAME
 from conda_sentinel.collectors.pypi_release import PYPI_RELEASE_CADENCE
 from conda_sentinel.collectors.pypi_release import PyPIReleaseCollector
 from conda_sentinel.collectors.python_readiness import COLLECTOR_NAME as PYTHON_READINESS_NAME
 from conda_sentinel.collectors.python_readiness import READINESS_CADENCE
+from conda_sentinel.collectors.python_readiness import READINESS_DISPATCH_OFFSET
 from conda_sentinel.collectors.python_readiness import PythonReadinessCollector
 from conda_sentinel.collectors.resolve_identity import COLLECTOR_NAME as RESOLVE_IDENTITY_NAME
 from conda_sentinel.collectors.resolve_identity import RESOLUTION_CADENCE
@@ -70,14 +74,21 @@ from conda_sentinel.collectors.sweep import PACKAGE_EVENT_KEYS
 from conda_sentinel.collectors.sweep import PACKAGE_KWARG
 from conda_sentinel.collectors.sweep import RESERVED_COLLECTOR_NAME
 from conda_sentinel.collectors.sweep import SELECTION_CHUNK
+from conda_sentinel.collectors.sweep import SWEEP_START_DISPATCHED_EVENT
+from conda_sentinel.collectors.sweep import SWEEP_START_REFUSED_EVENT
+from conda_sentinel.collectors.sweep import SWEEP_START_SUMMARY_EVENT
+from conda_sentinel.collectors.sweep import SWEEP_START_UNENQUEUED_EVENT
 from conda_sentinel.collectors.sweep import SWEEP_TASK_NAME
 from conda_sentinel.collectors.sweep import DispatchOutcome
+from conda_sentinel.collectors.sweep import ScheduledDispatch
 from conda_sentinel.collectors.sweep import SweepDispatchError
 from conda_sentinel.collectors.sweep import _as_interval
 from conda_sentinel.collectors.sweep import _scheduled_dispatches
 from conda_sentinel.collectors.sweep import _streamed
 from conda_sentinel.collectors.sweep import cadence_reconciliation_fault
 from conda_sentinel.collectors.sweep import collection_task_name
+from conda_sentinel.collectors.sweep import dispatch_scheduled_collectors_on_start
+from conda_sentinel.collectors.sweep import scheduled_dispatches
 from conda_sentinel.collectors.tasks import COLLECT_CONDA_PACKAGE_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECT_FEEDSTOCK_TASK_NAME
 from conda_sentinel.collectors.tasks import COLLECT_KEV_TASK_NAME
@@ -111,9 +122,14 @@ from tests.collectors import collector_class
 from tests.collectors import fixture_evidence_model
 from tests.collectors import selectable_collector_class
 from tests.source_scan import project_files
+from tests.start_dispatch import RecordedApplyAsync
+from tests.start_dispatch import StartReceipt
+from tests.start_dispatch import events_named
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from pytest_django.fixtures import SettingsWrapper
 
 #: The module the source sweeps at the foot of this file read.
 SWEEP_MODULE: Final[Path] = (
@@ -1009,3 +1025,314 @@ def test_the_scheduled_dispatches_reader_returns_what_it_could_and_counts_what_i
 
     assert by_collector == {"alpha": [FIXTURE_CADENCE]}
     assert unnamed == 1
+
+
+# ---------------------------------------------------------------------------
+# `CPM-OPERATE-S04`: the schedule read as a list of dispatches, and the start dispatch.
+# ---------------------------------------------------------------------------
+
+#: The phase each collector's schedule entry declares, from the collector
+#: modules' own constants. Exactly the three that declare one, as
+#: `tests/unit/test_settings.py` pins; a collector absent here carries none.
+DECLARED_OFFSETS: Final[dict[str, timedelta]] = {
+    KEV_NAME: KEV_DISPATCH_OFFSET,
+    LICENSE_NAME: LICENSE_DISPATCH_OFFSET,
+    PYTHON_READINESS_NAME: READINESS_DISPATCH_OFFSET,
+}
+
+
+def _scheduled(name: str, interval: timedelta | None, countdown: float = 0, **options: object) -> ScheduledDispatch:
+    """Build the reading `scheduled_dispatches` answers for one entry.
+
+    Args:
+        name: The collector the entry names.
+        interval: The entry's interval.
+        countdown: The phase, in seconds; `0` for none.
+        **options: Any other option the entry forwards.
+
+    Returns:
+        The dispatch, with `options` carrying the normalised countdown as the
+        module builds it.
+
+    """
+    return ScheduledDispatch(name, interval, countdown, {**options, "countdown": countdown})
+
+
+#: The nine dispatches `config/settings/base.py` declares, in its own order,
+#: **derived** from the per-package table above and the offset constants rather
+#: than written out: the cadences and the offsets are the collector modules' own,
+#: so this is the same source of truth `tests/unit/test_settings.py` pins the
+#: schedule against, read as what a start dispatch enqueues.
+THE_DECLARED_DISPATCHES: Final[tuple[ScheduledDispatch, ...]] = tuple(
+    _scheduled(name, cadence, DECLARED_OFFSETS[name].total_seconds() if name in DECLARED_OFFSETS else 0)
+    for _collector, name, cadence in PER_PACKAGE_COLLECTORS
+)
+
+#: A phase in whole seconds, for the entries the cases below build.
+A_COUNTDOWN: Final[int] = 90
+
+
+def test_the_schedule_reads_as_the_nine_dispatches_with_their_three_offsets() -> None:
+    """The live schedule, read as what a start dispatch enqueues: nine, in order, three phased.
+
+    Reconciled against the collector modules' own cadence and offset constants
+    rather than against numbers, and against the *declaration order* of the
+    settings module -- which is what beat's first tick would be, and what the
+    start dispatch reproduces. The offsets in `THE_DECLARED_DISPATCHES` arrive
+    as floats because `timedelta.total_seconds()` answers one; the settings
+    module declares integers, and the two compare equal, which is the point of
+    not truncating.
+    """
+    from django.conf import settings  # noqa: PLC0415 - the live declaration, read once
+
+    assert scheduled_dispatches(settings.CELERY_BEAT_SCHEDULE) == THE_DECLARED_DISPATCHES
+    assert len(THE_DECLARED_DISPATCHES) == len(PER_PACKAGE_COLLECTORS)
+
+
+def test_an_entry_firing_another_task_is_not_a_scheduled_dispatch() -> None:
+    """Only entries firing the dispatch task are dispatches; a foreign entry is left out, not refused."""
+    schedule = {
+        "a-dispatch": _entry("alpha", FIXTURE_CADENCE),
+        "elsewhere": _entry("gamma", FIXTURE_CADENCE, task="cpm.policy.currency"),
+        "nameless": _entry("beta", FIXTURE_CADENCE, kwargs={}),
+        "phased": {**_entry("delta", FIXTURE_CADENCE), "options": {"countdown": A_COUNTDOWN}},
+    }
+
+    assert scheduled_dispatches(schedule) == (
+        _scheduled("alpha", FIXTURE_CADENCE),
+        _scheduled("delta", FIXTURE_CADENCE, A_COUNTDOWN),
+    )
+
+
+def test_every_option_an_entry_declares_is_forwarded_beside_the_countdown() -> None:
+    """A start dispatch is exactly what beat's tick would enqueue: the whole `options`, countdown normalised."""
+    schedule = {"phased": {**_entry("alpha", FIXTURE_CADENCE), "options": {"countdown": A_COUNTDOWN, "expires": 5}}}
+
+    assert scheduled_dispatches(schedule) == (_scheduled("alpha", FIXTURE_CADENCE, A_COUNTDOWN, expires=5),)
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [True, -1, "60", None, 0, math.nan, math.inf, -math.inf],
+    ids=["bool", "negative", "string", "none", "zero", "nan", "inf", "-inf"],
+)
+def test_a_countdown_that_is_not_a_positive_finite_number_reads_as_no_countdown(declared: object) -> None:
+    """`options.countdown` is honoured when it is a positive finite number and read as zero otherwise."""
+    schedule = {"phased": {**_entry("alpha", FIXTURE_CADENCE), "options": {"countdown": declared}}}
+
+    assert scheduled_dispatches(schedule) == (_scheduled("alpha", FIXTURE_CADENCE),)
+
+
+@pytest.mark.parametrize("declared", [0.5, 3599.9, 1, 3600], ids=["half-second", "just-under-an-hour", "one", "hour"])
+def test_a_positive_finite_countdown_is_kept_as_the_number_it_is(declared: float) -> None:
+    """A float is not truncated: `apply_async` takes one, and beat would pass it through unchanged."""
+    schedule = {"phased": {**_entry("alpha", FIXTURE_CADENCE), "options": {"countdown": declared}}}
+
+    (scheduled,) = scheduled_dispatches(schedule)
+
+    assert scheduled.countdown == declared
+    assert type(scheduled.countdown) is type(declared)
+    assert scheduled.options == {"countdown": declared}
+
+
+def test_a_schedule_that_is_not_a_mapping_declares_no_dispatch() -> None:
+    """Read defensively, on the reconciliation's terms: a list is nothing to enqueue, not a crash."""
+    assert scheduled_dispatches(["not", "a", "mapping"]) == ()
+
+
+def test_the_scheduled_dispatch_is_frozen() -> None:
+    """A reading of settings, not a workspace."""
+    scheduled = _scheduled("alpha", FIXTURE_CADENCE)
+
+    with pytest.raises(FrozenInstanceError):
+        scheduled.countdown = A_COUNTDOWN  # type: ignore[misc]
+
+
+def test_the_start_dispatch_enqueues_each_entry_with_its_own_options(
+    start_dispatch: RecordedApplyAsync, captured_sweep_events: list[dict[str, object]]
+) -> None:
+    """One `apply_async` per entry, in order, with the entry's keyword and options; one event each and a summary."""
+    schedule = {
+        "first": _entry("alpha", FIXTURE_CADENCE),
+        "second": {**_entry("beta", FIXTURE_CADENCE), "options": {"countdown": A_COUNTDOWN, "expires": 5}},
+    }
+
+    enqueued = dispatch_scheduled_collectors_on_start(schedule)
+
+    assert enqueued == len(schedule)
+    assert start_dispatch.calls == [
+        {"kwargs": {COLLECTOR_KWARG: "alpha"}, "countdown": 0},
+        {"kwargs": {COLLECTOR_KWARG: "beta"}, "countdown": A_COUNTDOWN, "expires": 5},
+    ]
+    dispatched = events_named(captured_sweep_events, SWEEP_START_DISPATCHED_EVENT)
+    assert [(event["collector"], event["interval"], event["countdown"], event["task_id"]) for event in dispatched] == [
+        ("alpha", FIXTURE_CADENCE.total_seconds(), 0, "task-1"),
+        ("beta", FIXTURE_CADENCE.total_seconds(), A_COUNTDOWN, "task-2"),
+    ]
+    summary = events_named(captured_sweep_events, SWEEP_START_SUMMARY_EVENT)
+    assert len(summary) == 1
+    assert (summary[0]["declared"], summary[0]["enqueued"], summary[0]["refused"], summary[0]["not_offered"]) == (
+        2,
+        2,
+        0,
+        0,
+    )
+
+
+def test_an_empty_schedule_is_a_summary_of_nothing(
+    start_dispatch: RecordedApplyAsync, captured_sweep_events: list[dict[str, object]]
+) -> None:
+    """No entry, no enqueue, and still the one summary event -- a beat that started with nothing to bring forward."""
+    enqueued = dispatch_scheduled_collectors_on_start({})
+
+    assert enqueued == 0
+    assert start_dispatch.calls == []
+    summary = events_named(captured_sweep_events, SWEEP_START_SUMMARY_EVENT)
+    assert len(summary) == 1
+    assert (summary[0]["declared"], summary[0]["enqueued"], summary[0]["refused"], summary[0]["not_offered"]) == (
+        0,
+        0,
+        0,
+        0,
+    )
+
+
+def test_a_restart_the_same_day_enqueues_again_and_leaves_the_skipping_to_the_collector(
+    start_dispatch: RecordedApplyAsync,
+) -> None:
+    """Two starts are two dispatches per entry; nothing here remembers the first.
+
+    The "restart same day" row of the story's matrix, at this level: the start
+    dispatch holds no state and consults no ledger, so a second beat start
+    enqueues the same dispatches again. What makes that harmless is not here --
+    the dispatcher's overlap `skipped` and each collection's observation-window
+    skip, which `tests/integration/django_apps/test_sweep.py` proves -- and the
+    documentation says so rather than this function guarding it.
+    """
+    schedule = {"first": _entry("alpha", FIXTURE_CADENCE), "second": _entry("beta", FIXTURE_CADENCE)}
+
+    first = dispatch_scheduled_collectors_on_start(schedule)
+    second = dispatch_scheduled_collectors_on_start(schedule)
+
+    assert (first, second) == (len(schedule), len(schedule))
+    assert [call["kwargs"] for call in start_dispatch.calls] == [
+        {COLLECTOR_KWARG: "alpha"},
+        {COLLECTOR_KWARG: "beta"},
+        {COLLECTOR_KWARG: "alpha"},
+        {COLLECTOR_KWARG: "beta"},
+    ]
+
+
+@pytest.mark.parametrize("start_dispatch", [frozenset({"beta"})], indirect=True)
+def test_an_unreachable_broker_ends_the_start_dispatch_once_and_never_fails_beat(
+    start_dispatch: RecordedApplyAsync, captured_sweep_events: list[dict[str, object]]
+) -> None:
+    """`OperationalError` on one collector is logged once, naming it and how many were left to the tick.
+
+    The next entries would meet the same broker after the same retry window,
+    so they are not offered -- nine windows before beat's first tick is the
+    cost this avoids -- and nothing is raised out of a beat that was starting.
+    """
+    schedule = {
+        "first": _entry("alpha", FIXTURE_CADENCE),
+        "second": _entry("beta", FIXTURE_CADENCE),
+        "third": _entry("gamma", FIXTURE_CADENCE),
+        "fourth": _entry("delta", FIXTURE_CADENCE),
+    }
+
+    enqueued = dispatch_scheduled_collectors_on_start(schedule)
+
+    assert enqueued == 1
+    assert [call["kwargs"] for call in start_dispatch.calls] == [{COLLECTOR_KWARG: "alpha"}]
+    unenqueued = events_named(captured_sweep_events, SWEEP_START_UNENQUEUED_EVENT)
+    assert [(event["collector"], event["not_offered"]) for event in unenqueued] == [("beta", 2)]
+    assert "OperationalError" in str(unenqueued[0]["detail"])
+    summary = events_named(captured_sweep_events, SWEEP_START_SUMMARY_EVENT)
+    assert (summary[0]["declared"], summary[0]["enqueued"], summary[0]["refused"], summary[0]["not_offered"]) == (
+        4,
+        1,
+        1,
+        2,
+    )
+
+
+def test_a_refusal_that_is_not_a_connection_failure_costs_only_its_own_entry(
+    start_dispatch: RecordedApplyAsync, captured_sweep_events: list[dict[str, object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any other exception from `apply_async` is that entry's own; the next is still offered."""
+
+    class ARefusalError(RuntimeError):
+        """What the broker raises for one entry, and not a connection failure."""
+
+    inner = start_dispatch
+
+    def _refusing(**kwargs: object) -> StartReceipt:
+        keywords = kwargs["kwargs"]
+        assert isinstance(keywords, dict)
+        if keywords[COLLECTOR_KWARG] == "beta":
+            message = "not this one"
+            raise ARefusalError(message)
+        return inner(**kwargs)
+
+    monkeypatch.setattr(collect_sweep, "apply_async", _refusing)
+    schedule = {
+        "first": _entry("alpha", FIXTURE_CADENCE),
+        "second": _entry("beta", FIXTURE_CADENCE),
+        "third": _entry("gamma", FIXTURE_CADENCE),
+    }
+
+    enqueued = dispatch_scheduled_collectors_on_start(schedule)
+
+    assert enqueued == len(schedule) - 1
+    assert [call["kwargs"] for call in inner.calls] == [{COLLECTOR_KWARG: "alpha"}, {COLLECTOR_KWARG: "gamma"}]
+    unenqueued = events_named(captured_sweep_events, SWEEP_START_UNENQUEUED_EVENT)
+    assert [(event["collector"], event["not_offered"]) for event in unenqueued] == [("beta", 0)]
+    assert "ARefusalError" in str(unenqueued[0]["detail"])
+    summary = events_named(captured_sweep_events, SWEEP_START_SUMMARY_EVENT)
+    assert (summary[0]["declared"], summary[0]["enqueued"], summary[0]["refused"], summary[0]["not_offered"]) == (
+        3,
+        2,
+        1,
+        0,
+    )
+
+
+def test_the_start_dispatch_is_refused_under_eager_celery(
+    monkeypatch: pytest.MonkeyPatch, captured_sweep_events: list[dict[str, object]]
+) -> None:
+    """With every task inline, the beat process is the worker, and nine collectors would run in it.
+
+    Logged at `info`: a bare `pixi run -e dev beat` outside the stack meets this
+    every time, and it is the ordinary outcome there rather than a fault.
+    """
+    recorded = RecordedApplyAsync()
+    monkeypatch.setattr(collect_sweep, "apply_async", recorded)
+    schedule = {"first": _entry("alpha", FIXTURE_CADENCE)}
+
+    enqueued = dispatch_scheduled_collectors_on_start(schedule)
+
+    assert enqueued == 0
+    assert recorded.calls == []
+    refused = events_named(captured_sweep_events, SWEEP_START_REFUSED_EVENT)
+    assert len(refused) == 1
+    assert refused[0]["declared"] == 1
+    assert refused[0]["log_level"] == "info"
+    assert events_named(captured_sweep_events, SWEEP_START_SUMMARY_EVENT) == []
+
+
+def test_the_start_dispatch_is_refused_when_celery_does_not_hold_the_task(
+    monkeypatch: pytest.MonkeyPatch, settings: SettingsWrapper, captured_sweep_events: list[dict[str, object]]
+) -> None:
+    """A dispatch never enqueues into a name nothing consumes; refused with the event, nothing raised."""
+    from celery import current_app  # noqa: PLC0415 - the registry the module reads
+
+    settings.CELERY_TASK_ALWAYS_EAGER = False
+    monkeypatch.setattr(current_app, "tasks", {})
+    schedule = {"first": _entry("alpha", FIXTURE_CADENCE)}
+
+    enqueued = dispatch_scheduled_collectors_on_start(schedule)
+
+    assert enqueued == 0
+    refused = events_named(captured_sweep_events, SWEEP_START_REFUSED_EVENT)
+    assert len(refused) == 1
+    assert SWEEP_TASK_NAME in str(refused[0]["detail"])

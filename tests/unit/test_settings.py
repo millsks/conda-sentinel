@@ -36,6 +36,7 @@ from conda_sentinel.collectors.resolve_identity import IdentityResolutionCollect
 from conda_sentinel.collectors.source_release import COLLECTOR_NAME as SOURCE_RELEASE_NAME
 from conda_sentinel.collectors.source_release import SourceReleaseCollector
 from conda_sentinel.collectors.sweep import COLLECTOR_KWARG
+from conda_sentinel.collectors.sweep import SWEEP_ON_BEAT_START_SETTING
 from conda_sentinel.collectors.sweep import SWEEP_TASK_NAME
 from conda_sentinel.collectors.vulnerability import COLLECTOR_NAME as VULNERABILITY_NAME
 from conda_sentinel.collectors.vulnerability import VulnerabilityCollector
@@ -48,6 +49,9 @@ from config.locality import RUNTIME_ENV_VAR
 from config.startup.allowlist import CONTRIBUTABLE_KEYS
 from tests.logging_config import assert_writes_no_files
 from tests.pixi_manifest import REPO_ROOT
+from tests.pixi_manifest import load_manifest
+from tests.pixi_manifest import task_env
+from tests.pixi_manifest import tasks
 from tests.settings_import import evicted_settings_modules
 
 # AD-23's declared windows, in seconds, and the values the environment-driven
@@ -1525,3 +1529,121 @@ def test_the_monitored_surfaces_are_the_names_the_collector_reads(setting: str):
     settings_module = importlib.import_module(BASE)
 
     assert hasattr(settings_module, setting)
+
+
+# ---------------------------------------------------------------------------
+# CPM-OPERATE-S04 -- the start-of-beat dispatch, declared and off.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_sweep_on_beat_start_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the switch so the module's *default* is what the case reads.
+
+    Load-bearing rather than tidy: the `dev` pixi feature's activation env
+    declares the variable `"1"`, and that is the environment the suite runs in,
+    so a case that did not clear it would read the activation env back and call
+    it the default.
+    """
+    monkeypatch.delenv(SWEEP_ON_BEAT_START_SETTING, raising=False)
+
+
+@pytest.mark.usefixtures("any_settings_module", "no_sweep_on_beat_start_env")
+@pytest.mark.parametrize("module", EVERY_SETTINGS_MODULE, ids=lambda name: name.rpartition(".")[2])
+def test_the_start_dispatch_is_declared_and_off_in_every_settings_module(module: str):
+    """`CPM-OPERATE-S04`: the switch ships, and it ships off.
+
+    Two halves. *Declared*, over all four modules, because the `beat_init`
+    receiver reads the attribute and a leaf module that dropped it would be a
+    beat that never dispatches with nothing saying so. *Off*, because deployed
+    beat restarts on every deploy and a dispatch on each is a second sweep a day
+    on top of the tick -- harmless under the overlap and window skips, and
+    noise on the Coverage screen. The activation env is the one place that turns
+    it on, and the case below pins that.
+    """
+    settings_module = importlib.import_module(module)
+
+    assert getattr(settings_module, SWEEP_ON_BEAT_START_SETTING) is False
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_start_dispatch_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch):
+    """The switch is the variable of the same name, read as a boolean."""
+    monkeypatch.setenv(SWEEP_ON_BEAT_START_SETTING, "1")
+
+    base = importlib.import_module(BASE)
+
+    assert base.CPM_SWEEP_ON_BEAT_START is True
+
+
+def test_the_dev_environment_turns_the_start_dispatch_on_and_nothing_production_bound_does():
+    """`pixi.toml`: the local stack observes on day one; a deployment reads the default.
+
+    Three sites are checked and only one may carry the variable. The `dev`
+    feature's activation env declares `"1"`, which is what `local-stack`'s beat
+    resolves. The unscoped `[activation.env]` -- what `default` resolves, and
+    therefore what a deployed image evaluates -- declares nothing. And no task's
+    own `env` carries it at any value: a task `env` overrides the caller's, so a
+    declaration there could not be corrected by the deployment platform's
+    configuration, which is the same argument `test_locality_declaration.py`
+    makes for `COMPONENT_RUNTIME`.
+    """
+    manifest = load_manifest()
+
+    assert manifest["feature"]["dev"]["activation"]["env"][SWEEP_ON_BEAT_START_SETTING] == "1"
+    assert SWEEP_ON_BEAT_START_SETTING not in manifest.get("activation", {}).get("env", {})
+    offenders = sorted(
+        f"{name} in {table}"
+        for table, name, definition in tasks(manifest)
+        if SWEEP_ON_BEAT_START_SETTING in task_env(definition)
+    )
+    assert not offenders, offenders
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_only_option_a_schedule_entry_carries_is_a_countdown():
+    """The start dispatch forwards each entry's whole `options`, so what those hold is pinned.
+
+    `dispatch_scheduled_collectors_on_start` hands `apply_async` every key an
+    entry's `options` carry, with `countdown` normalised, so that a start
+    dispatch is exactly what beat's tick would enqueue. The documentation says
+    what that means today -- the three phased entries arrive on their offsets
+    and nothing else differs -- and that sentence stays true only while
+    `countdown` is the one option key. An `expires` or a `queue` added to an
+    entry is forwarded correctly and changes what the docs must say, which is
+    why it fails here first.
+    """
+    base = importlib.import_module(BASE)
+
+    option_keys = {key for entry in base.CELERY_BEAT_SCHEDULE.values() for key in entry.get("options", {})}
+
+    assert option_keys == {"countdown"}
+
+
+@pytest.mark.usefixtures("any_settings_module")
+@pytest.mark.parametrize("module", EVERY_SETTINGS_MODULE, ids=lambda name: name.rpartition(".")[2])
+def test_the_broker_visibility_timeout_exceeds_every_declared_countdown(module: str):
+    """A countdown longer than the visibility timeout is redelivered before it runs.
+
+    Redis has no delayed delivery: a countdown message is delivered to a worker
+    at once and held unacknowledged until the countdown elapses, and kombu
+    redelivers anything unacknowledged past `visibility_timeout` -- one hour by
+    default, which is exactly the KEV offset and below the licence and readiness
+    ones. The second copy is a second dispatch, recorded `skipped` by the overlap
+    guard: harmless, and one spurious row per phased collector on every tick and
+    on every start dispatch (`CPM-OPERATE-S04`). So the timeout is declared, and
+    it is declared *strictly* above the largest countdown, over all four modules
+    because `production.py` is the one a deployed component runs under.
+    """
+    settings_module = importlib.import_module(module)
+
+    timeout = settings_module.CELERY_BROKER_TRANSPORT_OPTIONS["visibility_timeout"]
+    countdowns = {
+        entry["kwargs"][COLLECTOR_KWARG]: entry["options"]["countdown"]
+        for entry in settings_module.CELERY_BEAT_SCHEDULE.values()
+        if "options" in entry
+    }
+
+    assert timeout == settings_module.BROKER_VISIBILITY_TIMEOUT_SECONDS
+    assert countdowns, "no entry declares a countdown, so the comparison would be vacuous"
+    assert all(timeout > countdown for countdown in countdowns.values()), (timeout, countdowns)

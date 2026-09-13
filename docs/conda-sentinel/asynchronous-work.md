@@ -157,12 +157,44 @@ cpm-sweep-vulnerability    enabled=True  interval=every 86400 seconds  last_run=
 …
 ```
 
-Everything is healthy. Nothing has run. The Coverage screen will say **never run** for
-all eleven collectors, and that is the screen working: the only runs in the ledger are the
-seeder's, filed under `local-dev-demo-seed`, which is deliberately not a registered
-collector name so that seeding cannot make a real collector look healthy.
+Everything is healthy, and the entries have not ticked. **What fires at start is the
+`CPM_SWEEP_ON_BEAT_START` switch**, which the `dev` pixi environment turns on and
+nothing production-bound does: when beat starts with it on, a receiver on Celery's
+`beat_init` signal enqueues one `cpm.collect.sweep` per entry in the table above, in
+that order and with each entry's own options — so `kev` arrives one hour in,
+`license` two and `python_readiness` three, and the other six at once. The nine entries
+themselves are untouched; their first tick is still one interval away. The receiver
+reads `CELERY_BEAT_SCHEDULE` rather than the scheduler's tables because the
+`DatabaseScheduler` rewrites those tables from settings on every beat start, so an
+entry disabled in the admin does not survive a restart either way.
 
-To confirm the worker actually works without waiting a day, enqueue something by hand,
+On the stack, then, the Coverage screen stops saying **never run** for all nine
+swept collectors — a dispatch row exists whether or not the selection was empty —
+six of them within the first minute and the three phased ones one, two and three
+hours in. What stays **never run** on a fresh stack is `inventory`, until
+`pixi run stack-run ingest_inventory` or the `ingest` admin process runs, and
+`py314_verification`, always, because it is triggered by hand and never swept. The
+only other runs in the ledger are the seeder's, filed under `local-dev-demo-seed`,
+which is deliberately not a registered collector name so that seeding cannot make a
+real collector look healthy.
+
+Restart beat the same day and the nine are enqueued again. That is harmless rather
+than a second sweep, and it is not free: the ledger gains nine more dispatch rows,
+and under each one a `skipped` collection row per package still inside that
+collector's observation window — the dispatcher's overlap guard covers only a
+previous dispatch that is *still draining*; a finished one is re-offered whole and
+each collection then skips itself. One narrow edge is documented rather than
+guarded: a restart within seconds of a start dispatch, with two workers, can have
+both dispatches see the other `running` and both record `skipped`, in which case
+that collector waits for its tick. Deployed, the switch is **off** — the reason is
+the comment on `CPM_SWEEP_ON_BEAT_START` in `src/config/settings/base.py` — so a
+fresh deployment's first sweep is still one interval after its first beat, or one
+`pixi run sweep` by hand. A bare `pixi run -e dev beat` outside the stack refuses the
+start dispatch with one logged event: under the local default
+`CELERY_TASK_ALWAYS_EAGER=1` the beat process has no worker to hand a sweep to, and
+would otherwise run nine collectors inline inside the scheduler.
+
+To confirm the worker actually works without waiting for any of that, enqueue something by hand,
 through a command that carries the stack's environment — `pixi run stack-run`, see
 [Running it](running-it.md#a-shell-against-the-stack). A bare `manage.py shell` talks to SQLite
 and runs the task inline — `src/config/settings/local.py:121` defaults
