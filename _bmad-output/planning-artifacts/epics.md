@@ -384,6 +384,24 @@ planning artifacts.
 drafted by the implementing agent.
 **Depends on:** nothing.
 
+### `CPM-EP-OPERATE`: Operating the inventory
+
+Turns the shell snippets that operate the product into named commands and declared
+options: a shell and a runner that carry the stack's environment, ingestion and sweeps and
+policy runs as management commands and admin processes, one inventory shared by the demo
+and the watchlist, a first sweep on day one, an authenticated GitHub allowance, a local
+channel default, governed evidence retention, and a per-package re-run from the page.
+
+**User outcome:** an operator can add, resolve, observe, re-run and retire packages on the
+running product with named commands, on day one, without a Python shell.
+
+**FRs covered:** none new. Operates `CPM-FR-42`, `CPM-FR-15`, `CPM-FR-22`, `CPM-FR-10`.
+**NFRs covered:** `CPM-NFR-1`, `CPM-NFR-2`.
+**Depends on:** `CPM-EP-IDENTITY` (the resolver), `CPM-EP-CURRENCY`, `CPM-EP-APP` (S08).
+**Governed by:** `CPM-AD-2`, `CPM-AD-9`, `CPM-AD-14`, `CPM-AD-20`, `CPM-AD-25`, `CPM-AD-29`;
+inherited `AD-13`.
+**Raised by:** the product owner, 2026-09-13 (`sprint-change-proposal-2026-09-13.md`).
+
 ### Build order
 
 ```mermaid
@@ -399,6 +417,9 @@ graph LR
   SEC --> PRI
   PRI --> APP["CPM-EP-APP"]
   APP --> NL["CPM-EP-NL<br/>spike-gated"]
+  ID --> OP["CPM-EP-OPERATE"]
+  CUR --> OP
+  APP --> OP
 ```
 
 ---
@@ -3229,6 +3250,320 @@ So that we discover an incompatibility in a spike rather than in an epic.
 
 
 ---
+
+## CPM-EP-OPERATE: Operating the inventory
+
+> **Added after the initial plan**, by `sprint-change-proposal-2026-09-13.md`, and raised
+> by the product owner asking three questions in a row on 2026-09-13: how a package is
+> added to the inventory, whether there is a task that starts the collectors, and what
+> maintenance the platform still lacks.
+
+Every answer was a `manage.py shell -c` one-liner. The inventory is edited by hand in a
+CSV and ingested from a shell; a sweep, a policy run and a resolution are each a shell
+snippet that must carry three environment variables or it silently talks to SQLite and
+runs inline; the demo roster and the watchlist are two inventories that collide on
+forty-five names; a fresh stack observes nothing for a day because beat's interval
+entries start their clock on creation; reading GitHub unauthenticated means the daily
+upstream sweep covers fifteen packages an hour; published-conda currency never appears
+locally because the channel list is empty; and no evidence table has ever been pruned.
+
+None of that is a defect in a collector. It is the gap between a product that collects
+and a product that somebody operates.
+
+### CPM-OPERATE-S01: A shell against the stack carries the stack's environment
+
+As somebody operating the local stack,
+I want a task that opens a Django shell, or runs any management command, against the
+stack's own database and broker,
+So that I never again run a resolver inline against SQLite because I forgot three
+variables.
+
+**Acceptance Criteria:**
+
+**Given** the local stack's compose containers
+**When** `pixi run stack-shell` runs
+**Then** it opens `manage.py shell` in the `dev` environment carrying the stack's
+`DATABASE_URL`, `REDIS_URL` and `CELERY_TASK_ALWAYS_EAGER=0`, exactly as `local-stack` does
+
+**Given** the same containers
+**When** `pixi run stack-run -- <management command and arguments>` runs
+**Then** the command runs with that same environment, and its exit status is the task's
+
+**Given** `tests/unit/test_local_stack.py`'s reconciliation of the stack tasks
+**When** the two new tasks are declared
+**Then** they are in `AGAINST_THE_STACK`, name the same database and broker as the other
+four, and `test_every_stack_task_names_the_same_database` sweeps them
+
+**Given** the documentation
+**When** it shows a command against the stack
+**Then** no page carries an environment-prefixed `manage.py shell -c` any more; each uses
+the task
+
+**Satisfies:** nothing new directly; it is the precondition for every story below being
+usable by hand.
+**Governed by:** `CPM-AD-29`'s locality rule — `COMPONENT_RUNTIME=local` still comes from
+the `dev` feature's activation env and from nowhere else; the new tasks declare the stack's
+addresses, never the runtime.
+
+**Constrained:** the fourth copy of one URL was the shape `CPM-PLATFORM-S06`'s defect had,
+and this adds a fifth and sixth. The reconciliation test is what makes six copies safe.
+
+### CPM-OPERATE-S02: Ingest, sweep and run are commands, not shell snippets
+
+As an operator,
+I want ingestion, a collector sweep and a policy run to be named management commands,
+So that they can be run from a terminal, scheduled by the deployment platform, and read
+about in `--help`, instead of pasted from a runbook.
+
+**Acceptance Criteria:**
+
+**Given** the `collectors` app
+**When** `manage.py ingest_inventory [--force]` runs
+**Then** it enqueues `cpm.collect.inventory` (or runs it eagerly where settings say so),
+prints the run's ledger state, and opens no transaction of its own
+
+**Given** the same app
+**When** `manage.py dispatch_sweep <collector> | --all` runs
+**Then** it enqueues one `cpm.collect.sweep` per named registered, per-package collector,
+refuses a name the registry does not hold or one that is not swept, and prints each
+dispatch row's state and how many packages it offered
+
+**Given** the `policies` app
+**When** `manage.py run_policy [--version <v>]` runs
+**Then** it enqueues `cpm.policy.run` with the named version, defaulting to the newest
+recorded one, and refuses a version the parameters file does not record
+
+**Given** `component.toml`
+**When** the three commands exist
+**Then** each is declared as an `[[admin_processes]]` entry with a pixi task
+(`ingest`, `sweep`, `policy-run`), `schedule = "deployment-repository"`, and
+`tests/unit/test_process_model.py` reconciles them in both directions
+
+**Given** the local stack
+**When** `pixi run stack-run -- dispatch_sweep --all` runs
+**Then** nine dispatch rows appear in the ledger, `inventory` and `py314_verification`
+are not among them, and the runbook's shell recipes are replaced by these commands
+
+**Satisfies:** `CPM-FR-42` (ingestion is invocable), `CPM-FR-15` (a run record per
+invocation), `CPM-FR-22` (a run at a named version).
+**Governed by:** inherited `AD-13` — an administrative process never sets
+`COMPONENT_PROCESS`; `CPM-AD-9` — a command enqueues, it never collects in the caller
+unless the settings already make every task eager; `CPM-AD-20` — the commands dispatch
+through the same `cpm.collect.sweep` beat fires, so nothing about a sweep changes by
+being started by hand.
+
+### CPM-OPERATE-S03: One inventory, and how a package joins it
+
+As an operator of the local stack,
+I want the demo and the watchlist to be one inventory, and a written path for adding a
+package to it,
+So that ingesting the watchlist onto a seeded database does not collide on forty-five
+names, and "how do I add a package" has one answer.
+
+**Acceptance Criteria:**
+
+**Given** the demo seeder
+**When** it creates package shells
+**Then** it takes its names from the development watchlist and files each shell under the
+inventory's own `(identity_source, associator_key)` — the pair ingestion looks up — so a
+later `ingest_inventory` finds every one rather than creating a second
+
+**Given** the roster
+**When** a name in it is not in the development watchlist
+**Then** the seeder refuses before any write, naming it; advisories, KEV listings and
+licences stay a roster overlay keyed by name
+
+**Given** a seeded stack
+**When** the watchlist is ingested
+**Then** no `IntegrityError` on `canonical_name`, every package has an inventory snapshot,
+and `test_local_dev_demo_seeding.py` pins the sequence seed → ingest
+
+**Given** `running-it.md`
+**When** it explains adding a package
+**Then** it gives the end-to-end path: a watchlist row, `ingest`, `sweep resolve_identity`,
+then the sweeps that read the mappings — and says that the deployed watchlist is changed
+by review and shipped by release (`CPM-IDENTITY-S07`'s deferred item), which this story
+does not alter
+
+**Given** a package removed from the watchlist
+**When** the next ingestion runs
+**Then** it is recorded absent with a timestamp, keeps every row, leaves the queues, and
+the page says how an operator finds it and that a wrong identity is corrected through
+the override (`CPM-IDENTITY-S05`) and never by editing the file to match
+
+**Satisfies:** `CPM-FR-42`.
+**Governed by:** `CPM-AD-25` — the collector never writes the package table and absence
+is an observation; `CPM-AD-29` — the watchlist stays the one declared source; `CPM-AD-14`.
+
+### CPM-OPERATE-S04: Day one is observed
+
+As somebody bringing up a fresh stack,
+I want every scheduled collector to sweep once when beat starts, where the deployment
+says so,
+So that a new database is not blank for a day and a new weekly surface for a week.
+
+**Acceptance Criteria:**
+
+**Given** a declared setting, `CPM_SWEEP_ON_BEAT_START`, off by default
+**When** beat starts with it on
+**Then** one `cpm.collect.sweep` is dispatched per scheduled collector, in the schedule's
+own order and with its own offsets, and beat's interval entries are otherwise untouched
+
+**Given** the `dev` feature's activation env
+**When** the local stack starts
+**Then** the setting is on, and a fresh `local-stack` shows the first observations within
+the allowances rather than after a day
+
+**Given** a deployed component
+**When** the setting is absent
+**Then** nothing fires at start, and the start-up reconciliation still refuses an entry
+whose interval disagrees with its collector's cadence
+
+**Given** beat restarted on a stack that has already swept today
+**When** the setting is on
+**Then** the dispatch is still made and each collector's own observation window is what
+skips packages observed too recently — the option never bypasses a window
+
+**Satisfies:** `CPM-NFR-2`.
+**Governed by:** `CPM-AD-20` — cadence stays data in the scheduler; this adds one
+dispatch, never a cadence; `CPM-AD-29` — locality is read at settings time by the same
+`is_local()` and the setting fails closed toward deployment.
+
+### CPM-OPERATE-S05: An authenticated GitHub allowance
+
+As an operator,
+I want the two GitHub-reading collectors to use a token when one is declared,
+So that a daily sweep covers the inventory in a day rather than in a week of
+fifteen-an-hour.
+
+**Acceptance Criteria:**
+
+**Given** `CPM_GITHUB_TOKEN` declared in the environment
+**When** `source_release` or `feedstock` builds a request
+**Then** it carries the token as a bearer header, the declared allowance is GitHub's
+authenticated one (5,000 core calls an hour; 30 searches a minute), and the collector's
+freshness target still exceeds its cadence
+
+**Given** the token
+**When** any log line, ledger row, evidence row or `detail` is written
+**Then** the token appears in none of them; an audit test sweeps the two modules for a
+path from the setting to a string that is stored or logged
+
+**Given** no token
+**When** the same collectors run
+**Then** they behave exactly as today, and the docs say what the unauthenticated allowance
+buys at the inventory's size
+
+**Given** a token GitHub rejects
+**When** a collection runs
+**Then** the run is `failed` with a `detail` that says the credential was refused and
+names neither it nor its prefix
+
+**Satisfies:** `CPM-NFR-1` — full-inventory collection at ten thousand packages within
+the cadence, for the two surfaces that could not meet it unauthenticated.
+**Governed by:** `CPM-AD-27` — the header is added at the transport seam, so the parsers
+stay pure; `CPM-AD-20` — the raised allowance is a declaration reconciled at start-up like
+the cadence it serves; `CPM-AD-15` — a refused credential is a `failed` run an operator
+can trace, never a silent fallback to unauthenticated.
+
+### CPM-OPERATE-S06: Published-conda currency on the local stack
+
+As a developer,
+I want the local stack to monitor `conda-forge` by default,
+So that the published-conda surface and the licence collector work on my machine instead
+of selecting nothing forever.
+
+**Acceptance Criteria:**
+
+**Given** the `dev` feature's activation env
+**When** the local stack starts
+**Then** `CPM_MONITORED_CHANNELS` is `conda-forge`, `conda_package` and `license` select
+every package, and the Coverage screen shows both as run rather than never run
+
+**Given** a deployed component
+**When** the setting is absent
+**Then** it stays empty and the two collectors select nothing, as today, with the
+start-up refusal that already exists for an over-long list unchanged
+
+**Given** the settings tests
+**When** the local default is added
+**Then** `test_locality_declaration.py`'s rule holds — no task declares the runtime — and
+the default is reconciled against `MAX_MONITORED_CHANNELS`
+
+**Satisfies:** `CPM-FR-10` on the local stack.
+**Governed by:** `CPM-AD-29`'s fail-closed locality; `CPM-AD-20`.
+
+### CPM-OPERATE-S07: Evidence retention is a governed decision
+
+As an operator,
+I want a declared retention per evidence table and a command that applies it,
+So that a log that grows one row per package per day does not grow forever, and what is
+kept is a decision on the record rather than an accident of disk.
+
+**Acceptance Criteria:**
+
+**Given** the versioned policy parameters
+**When** a retention is declared for an evidence table
+**Then** it is a duration per table, absent by default, and absent means keep everything
+
+**Given** `manage.py prune_evidence [--dry-run]`
+**When** it runs
+**Then** it deletes, per table with a retention, only rows older than the retention **and**
+superseded by a newer observation for the same package — never a package's newest row of
+any table, never a row a policy run inside retention read — and writes a run record
+naming the table, the cut-off and the count
+
+**Given** `CPM-AD-2`'s append-only base
+**When** the command deletes
+**Then** it goes through a single, audited door the base exposes for this command alone;
+`save()` still refuses an update and nothing else in the product can delete evidence
+
+**Given** a policy run recorded inside the retention window
+**When** it is replayed after a prune
+**Then** it reproduces byte-identical results (`CPM-FR-22`)
+
+**Given** `component.toml`
+**When** the command exists
+**Then** it is an `[[admin_processes]]` entry with `schedule = "deployment-repository"`
+
+**Satisfies:** `CPM-FR-22` (replay survives retention), `CPM-NFR-1`.
+**Governed by:** `CPM-AD-2` — the base is the one door; `CPM-AD-11` — the rollup keeps
+one row per package regardless; inherited `AD-13`.
+
+**Constrained:** the default is to keep everything. A deployment that never declares a
+retention is exactly as it is today, and the command with nothing declared is a no-op
+that says so.
+
+### CPM-OPERATE-S08: A collector re-run for one package, from the page
+
+As a security reviewer,
+I want to re-run a package's collectors from its own page,
+So that after an override or a fix I do not wait a day for the daily sweep or ask an
+operator for a shell.
+
+**Acceptance Criteria:**
+
+**Given** a package page and a user holding the recollect permission
+**When** they choose "Collect now"
+**Then** one per-package task per swept collector is enqueued for that package with
+`force=True`, the request writes nothing but an audit row naming actor and package, and
+the page shows the runs as they finalise
+
+**Given** a user without the permission
+**When** they attempt it
+**Then** it is refused and the refusal is logged with the acting user identity
+
+**Given** the same package re-collected twice in a minute
+**When** the second request arrives
+**Then** it is refused as already in flight while any of the first's runs is `running`
+
+**Satisfies:** `CPM-UJ-1`'s manual recollection.
+**Governed by:** `CPM-AD-9` — a web request enqueues and never collects; `CPM-AD-13` —
+the permission is declared on the surface and enforced centrally; `CPM-AD-14` — the
+request mutates no identity; `CPM-AD-23` — the audit row and the enqueue are one unit.
+
+**Constrained:** this is the surface half of what `dispatch_sweep` gives an operator; it
+lands after `CPM-OPERATE-S02` so both enqueue the same tasks.
 
 ## Test design integration
 

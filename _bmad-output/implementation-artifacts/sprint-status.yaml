@@ -40,7 +40,7 @@
 # exists, not that its contents are final.
 
 generated: 09-02-2026 18:00
-last_updated: 09-12-2026 17:30
+last_updated: 09-13-2026 09:00
 project: conda-package-supply-chain-monitor
 project_key: CPM
 tracking_system: file-system
@@ -177,6 +177,18 @@ development_status:
   epic-nl: backlog
   cpm-nl-s01-prove-analytics-stack-fits-before: ready-for-dev
   epic-nl-retrospective: optional
+
+  # CPM-EP-OPERATE: Operating the inventory (sprint-change-proposal-2026-09-13)
+  epic-operate: backlog
+  cpm-operate-s01-a-shell-against-the-stack-carries-its-environment: backlog
+  cpm-operate-s02-ingest-sweep-and-run-are-commands: backlog
+  cpm-operate-s03-one-inventory-and-how-a-package-joins-it: backlog
+  cpm-operate-s04-day-one-is-observed: backlog
+  cpm-operate-s05-an-authenticated-github-allowance: backlog
+  cpm-operate-s06-published-conda-currency-on-the-local-stack: backlog
+  cpm-operate-s07-evidence-retention-is-a-governed-decision: backlog
+  cpm-operate-s08-a-collector-re-run-for-one-package-from-the-page: backlog
+  epic-operate-retrospective: optional
 
 # CPM-EP-NL is blocked behind the CPM-NL-S01 fitness spike and is post-MVP; the status
 # vocabulary has no 'blocked' value, so it sits at backlog until the spike reports.
