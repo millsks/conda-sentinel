@@ -163,35 +163,41 @@ seeder's, filed under `local-dev-demo-seed`, which is deliberately not a registe
 collector name so that seeding cannot make a real collector look healthy.
 
 To confirm the worker actually works without waiting a day, enqueue something by hand,
-from a shell that carries the stack's environment — `pixi run stack-shell`, see
+through a command that carries the stack's environment — `pixi run stack-run`, see
 [Running it](running-it.md#a-shell-against-the-stack). A bare `manage.py shell` talks to SQLite
 and runs the task inline — `src/config/settings/local.py:121` defaults
 `CELERY_TASK_ALWAYS_EAGER` to true — so nothing would reach the worker:
 
-```python
-# pixi run stack-shell
-from config.celery_app import app
-from conda_sentinel.policies.parameters import parameters_file, parameters_from
-
-source = parameters_file()
-version = sorted(parameters_from(source.read_text(encoding="utf-8"), source=source))[-1]
-app.send_task("cpm.policy.run", args=[version])
+```sh
+pixi run stack-run run_policy
 ```
 
-A policy run is the right thing to send: it is pure computation over evidence that is
-already there, it makes no outbound call, and it is one of the two tasks nothing fires
-anyway. Watch it in flower, then look at the home page's "rollup computed" stamp.
+That is the `run_policy` management command: it reads the newest version the
+parameter file records (`--version 2026.09.1` names another; an unrecorded one is
+refused before anything is enqueued), calls `cpm.policy.run`'s `.delay()` with it,
+and prints the task id. A policy run is the right thing to send: it is pure
+computation over evidence that is already there, it makes no outbound call, and it
+is one of the two tasks nothing fires anyway. Watch it in flower, then look at the
+home page's "rollup computed" stamp.
 
 ### Making the collectors actually run
 
 Waiting a day is one option. The other is to enqueue a dispatch yourself:
 
-```python
-# pixi run stack-shell
-from config.celery_app import app
-
-app.send_task("cpm.collect.sweep", kwargs={"collector": "pypi_release"})
+```sh
+pixi run stack-run dispatch_sweep pypi_release            # one collector
+pixi run stack-run dispatch_sweep pypi_release feedstock  # several, in this order
+pixi run stack-run dispatch_sweep --all                   # every swept collector
 ```
+
+`dispatch_sweep` enqueues one `cpm.collect.sweep` per name — the same task beat
+fires — and prints one line per collector with the task id. It refuses a name the
+dispatch would refuse (blank, the reserved `sweep`, unregistered, one that is not
+swept per package such as run-scoped `inventory`, or one whose per-package task
+Celery does not hold) *before* anything is enqueued, listing the swept names, so
+a typo is not a `failed` run on the ledger. `--all` is every registered collector
+that is swept per package, in the registry's order — the same set the beat table
+above fires, which the suite reconciles.
 
 **On a component you have configured with a real watchlist, that is the answer.** Each
 dispatch selects the packages its collector can be asked about, enqueues one
@@ -222,21 +228,26 @@ declared — and an evidence log in which every row names a source somebody can 
     the record rather than refreshing it.
 
     If you want to see collection work over an inventory of your own, the honest way
-    is a **real watchlist** — even a three-row one — and a `cpm.collect.inventory`
-    run before any sweep. If you only wanted to prove the worker is alive, send
-    `cpm.policy.run` instead: it computes, and it writes no evidence at all.
+    is a **real watchlist** — even a three-row one — and an ingestion
+    (`pixi run stack-run ingest_inventory`, which enqueues `cpm.collect.inventory`)
+    before any sweep. If you only wanted to prove the worker is alive, run
+    `pixi run stack-run run_policy` instead: it computes, and it writes no evidence
+    at all.
 
 ### Two tasks nothing fires
 
 !!! warning "This is the most surprising thing in the system"
 
     **`cpm.policy.run` and `cpm.collect.inventory` are registered, routed and
-    runnable — and nothing enqueues either of them.** There is no beat entry, no
-    chained call at the end of a sweep, and no management command.
+    runnable — and nothing enqueues either of them on a schedule.** There is no beat
+    entry and no chained call at the end of a sweep. What there is, since
+    `CPM-OPERATE-S02`, is a management command for each — `run_policy` and
+    `ingest_inventory` — and an `[[admin_processes]]` entry in `component.toml`
+    (`policy-run`, `ingest`) that a deployment repository can put on a cadence.
 
     So a freshly deployed component collects evidence on schedule and **never
     computes a verdict from it**, until an operator arranges for the policy run to
-    happen.
+    happen — by scheduling `pixi run policy-run`, or by running it by hand.
 
 The reason it is like this rather than broken: cadence is data. `django_celery_beat`'s
 `DatabaseScheduler` rewrites the nine entries above from settings on every beat start
@@ -244,13 +255,18 @@ The reason it is like this rather than broken: cadence is data. `django_celery_b
 entry that settings does not declare lives in the database tables and survives. So the
 intended path is:
 
-**Add a periodic task in the Django admin** (`Periodic Tasks` → add), naming
-`cpm.policy.run`, with the policy version as its argument, at whatever cadence your
-collection schedule makes sensible — after the daily sweeps have had time to land.
-Do the same for `cpm.collect.inventory` at the cadence you re-read the watchlist.
+**Schedule the admin process** — `pixi run policy-run` (`run_policy` at the newest
+recorded version) at whatever cadence your collection schedule makes sensible, after
+the daily sweeps have had time to land, and `pixi run ingest` (`ingest_inventory`) at
+the cadence you re-read the watchlist. The cadence is the deployment repository's, as
+it is for `prune`; `component.toml` declares only that the processes exist. The other
+route, a periodic task added in the Django admin (`Periodic Tasks` → add) naming
+`cpm.policy.run` with the version as its argument, still works — but it is a version
+pinned in a database row, which stops being the newest the day somebody records
+another.
 
 Locally you do not need to: `seed-demo` executes a policy run inline, and you can run
-one by hand from a shell. [How](running-it.md#running-a-policy-pass-yourself).
+one by hand. [How](running-it.md#running-a-policy-pass-yourself).
 
 ---
 

@@ -252,6 +252,19 @@ ADOPTED_PASSES: Final[tuple[type[PolicyPass], ...]] = (
 #: the suite to move. `policies/data/README.md` records both directions.
 A_RECORDED_POLICY_VERSION: Final[str] = "2026.09.1"
 
+#: The newest version the shipped file records, pinned by hand (`CPM-OPERATE-S02`).
+#:
+#: `run_policy` without `--version` derives this from the file, so a case that
+#: derived the expectation the same way would prove the derivation agrees with
+#: itself. This constant is the independent oracle:
+#: `tests/unit/django_apps/test_operator_commands.py` reads the file with
+#: `tomllib` and takes the maximum under a numeric segment ordering, and the
+#: integration case asserts the run the command wrote is at *this* version.
+#: **Move it when a newer version is recorded** -- the unit case fails until you
+#: do, which is the point: a lexicographic "newest" would put `2026.09.10` before
+#: `2026.09.4`, and nothing but a pinned value catches that.
+THE_NEWEST_RECORDED_POLICY_VERSION: Final[str] = "2026.09.4"
+
 
 @memoized
 def fixture_derived_models() -> tuple[type[models.Model], type[models.Model]]:

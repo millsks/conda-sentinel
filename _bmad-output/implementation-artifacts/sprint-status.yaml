@@ -181,7 +181,7 @@ development_status:
   # CPM-EP-OPERATE: Operating the inventory (sprint-change-proposal-2026-09-13)
   epic-operate: in-progress
   cpm-operate-s01-a-shell-against-the-stack-carries-its-environment: done
-  cpm-operate-s02-ingest-sweep-and-run-are-commands: backlog
+  cpm-operate-s02-ingest-sweep-and-run-are-commands: done
   cpm-operate-s03-the-inventory-is-a-governed-table: backlog
   cpm-operate-s04-day-one-is-observed: backlog
   cpm-operate-s05-an-authenticated-github-allowance: backlog

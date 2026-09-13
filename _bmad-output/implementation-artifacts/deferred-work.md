@@ -16,3 +16,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/stories/cpm-platform-s08-the-demo-asserts-nothing-it-never-observed.md`
   summary: A name-keyed resolution reads whatever PyPI project shares a conda package's name, so `nodejs`, `ffmpeg` and `ripgrep` (unrelated PyPI projects exist) can be recorded with an unrelated repository and `pkg:pypi/<name>`.
   evidence: The resolver asks PyPI by the canonical name and has no package-type or cross-ecosystem source to refuse a coincidence; the demo roster's native packages make it visible. Closing it is the cross-ecosystem mapping (`CROSS_ECOSYSTEM`, today always `not_found`) or a package-type source, neither of which a seeder change can supply.
+- source_spec: `_bmad-output/implementation-artifacts/stories/cpm-operate-s02-ingest-sweep-and-run-are-commands.md`
+  summary: The demo seeder's `_shipped_policy_version` picks "newest" by lexicographic string sort over `2026.09.4`-style keys, so a `2026.09.10` entry would sort before `2026.09.2`.
+  evidence: Same flaw the `run_policy` command had and fixed with a numeric key; the seeder is rewritten by CPM-OPERATE-S03, which should take the same key (or import it) rather than keep a second derivation.

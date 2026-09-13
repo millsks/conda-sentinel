@@ -488,6 +488,19 @@ createsuperuser = { cmd = "python manage.py createsuperuser", default-environmen
 # the deployment repository's; the component declares only that the process
 # exists and what it is called.
 prune = { cmd = "python manage.py prune_expired_state", default-environment = "default", description = "Admin process: prune expired sessions and mapper epoch records" }
+# The three operating processes (`CPM-OPERATE-S02`), on exactly `prune`'s terms:
+# root `[tasks]` so the deployed environment has them, outside the
+# `# feature:celery` region, `default` environment, no `env` table at all, no
+# schedule here or in `component.toml`. Each is a management command that
+# enqueues a task which already exists and which nothing in `CELERY_BEAT_SCHEDULE`
+# fires -- `cpm.collect.inventory`, one `cpm.collect.sweep` per swept collector,
+# `cpm.policy.run` at the newest recorded version. Whether the task then runs
+# inline or on a worker is settings' decision, not the command's. Locally the
+# same commands run against the stack through `stack-run`:
+# `pixi run stack-run dispatch_sweep --all`.
+ingest = { cmd = "python manage.py ingest_inventory", default-environment = "default", description = "Admin process: enqueue one inventory ingestion (cpm.collect.inventory)" }
+sweep = { cmd = "python manage.py dispatch_sweep --all", default-environment = "default", description = "Admin process: enqueue a dispatch of every swept collector (cpm.collect.sweep)" }
+policy-run = { cmd = "python manage.py run_policy", default-environment = "default", description = "Admin process: enqueue a policy run at the newest recorded version (cpm.policy.run)" }
 # The cross-platform *local* ASGI server, and not a process type. uvicorn runs
 # on all three platforms, unlike the gunicorn+uvicorn-worker pairing the `web`
 # process uses, which is POSIX-only -- which is the only reason this task exists

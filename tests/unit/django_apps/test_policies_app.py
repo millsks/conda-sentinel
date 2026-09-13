@@ -163,6 +163,13 @@ MIGRATIONS_PACKAGE: Final[str] = "migrations"
 #: `collectors/data/` is the precedent and has the same shape.
 DATA_DIRECTORY: Final[str] = "data"
 
+#: The management-command package `CPM-OPERATE-S02` added, holding `run_policy`
+#: -- the one command that may derive a policy version, because the parameter
+#: file it reads lives beside it and `core/tasks.py` forbids a default. A
+#: package rather than a `tasks.py`: the task it enqueues is `core`'s, and this
+#: application still declares no work of its own to schedule.
+MANAGEMENT_PACKAGE: Final[str] = "management"
+
 #: What ships inside it. Named so that a file added there is a deliberate act and
 #: a file *lost* there fails here rather than at the first policy run in a
 #: container -- `tests/integration/test_import_resolution.py` asserts the same
@@ -425,10 +432,11 @@ def test_the_application_declares_no_urls_serializers_or_tasks() -> None:
     `tasks/` package, which is the same surface with the same consequences and a
     different filesystem shape -- so each name is checked as a directory as well.
 
-    Two subdirectories are expected and both have cases of their own:
-    `migrations/`, which must be a package, and `data/`, which must not be. The
-    equality here is what makes a *third* one -- an `api/` package, a stray
-    fixture tree -- a failure rather than something a later reader has to notice.
+    Three subdirectories are expected and each has a case of its own:
+    `migrations/`, which must be a package; `data/`, which must not be; and
+    `management/`, the command package `CPM-OPERATE-S02` added. The equality
+    here is what makes a *fourth* one -- an `api/` package, a stray fixture tree
+    -- a failure rather than something a later reader has to notice.
     """
     package = Path(apps.get_app_config(APPLICATION_LABEL).path)
 
@@ -439,7 +447,24 @@ def test_the_application_declares_no_urls_serializers_or_tasks() -> None:
     assert present == [], f"this story builds none of these surfaces, but they are present: {present}"
 
     subdirectories = sorted(path.name for path in package.iterdir() if path.is_dir() and not path.name.startswith("__"))
-    assert subdirectories == sorted([DATA_DIRECTORY, MIGRATIONS_PACKAGE])
+    assert subdirectories == sorted([DATA_DIRECTORY, MANAGEMENT_PACKAGE, MIGRATIONS_PACKAGE])
+
+
+def test_the_management_package_holds_exactly_the_policy_run_command() -> None:
+    """`management/commands/` is a package pair holding `run_policy` and nothing else.
+
+    Both `__init__.py` files, because Django discovers commands only through an
+    importable `management.commands` package -- a plain directory would leave
+    `pixi run policy-run` reporting `Unknown command` at whatever hour a
+    deployment scheduled it. Exactly one command, because `CPM-OPERATE-S02` put
+    the other two under `collectors/` and a fourth was its Block-If.
+    """
+    management = Path(apps.get_app_config(APPLICATION_LABEL).path) / MANAGEMENT_PACKAGE
+    commands = management / "commands"
+
+    assert (management / "__init__.py").is_file()
+    assert (commands / "__init__.py").is_file()
+    assert sorted(path.name for path in commands.glob("*.py") if path.name != "__init__.py") == ["run_policy.py"]
 
 
 def test_the_reviewed_parameter_tree_ships_beside_the_module_that_reads_it() -> None:
