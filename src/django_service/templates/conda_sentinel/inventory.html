@@ -1,0 +1,218 @@
+{% extends "conda_sentinel/base.html" %}
+{% load i18n health %}
+
+{% block title %}{% translate "Inventory" %}{% endblock title %}
+
+{% block content %}
+  {% comment %}
+    CPM-OPERATE-S03. The governed inventory table and the three forms that change
+    it: add or change (one form, two buttons), and retire (one form per row).
+    Every POST goes to the same view, which hands it to collectors/inventory.py;
+    nothing here decides anything. Leadership only, for the whole page.
+  {% endcomment %}
+  <div class="app-h">
+    <div>
+      <h2>{% translate "Inventory" %}</h2>
+      <div class="sub">
+        {% blocktranslate count total=paginator.count trimmed %}
+          {{ total }} row
+        {% plural %}
+          {{ total }} rows
+        {% endblocktranslate %}
+        &middot; {% blocktranslate with active=active_count trimmed %}{{ active }} active{% endblocktranslate %}
+        &middot; {% blocktranslate with retired=retired_count trimmed %}{{ retired }} retired{% endblocktranslate %}
+      </div>
+    </div>
+  </div>
+
+  {% if messages %}
+    {% for message in messages %}
+      <div class="toast">
+        <div><b>{{ message }}</b></div>
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if refusal %}
+    {% comment %} The service's or the form's own words, verbatim: a refusal names
+       the key, the field and the rule, and paraphrasing it here would be a second
+       place the rule lived. {% endcomment %}
+    <div class="toast">
+      <div>
+        <b>{% translate "Refused" %}</b>
+        <p>{{ refusal }}</p>
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="panel">
+    <header>
+      <h4>{% if editing %}{% blocktranslate with key=editing.source_package_key trimmed %}Change {{ key }}{% endblocktranslate %}{% else %}{% translate "Add a package" %}{% endif %}</h4>
+      <span class="hx">{% translate "CPM-AD-14 — permission, reason, audit row in one transaction" %}</span>
+    </header>
+    <div class="body">
+      <form method="post" action="{% url 'conda_sentinel:inventory' %}">
+        {% csrf_token %}
+        <dl class="kv">
+          <dt><label for="inv-key">{% translate "Source package key" %}</label></dt>
+          <dd><input class="searchbox" id="inv-key" name="{{ key_field }}" value="{{ form_values.source_package_key }}" maxlength="512" autocomplete="off" {% if editing %}readonly{% endif %} /></dd>
+          <dt><label for="inv-name">{% translate "Package name" %}</label></dt>
+          <dd><input class="searchbox" id="inv-name" name="{{ name_field }}" value="{{ form_values.package_name }}" maxlength="128" autocomplete="off" /></dd>
+          {% for signal, heading, value in signal_fields %}
+            <dt><label for="inv-{{ signal }}">{{ heading }}</label></dt>
+            <dd><input class="searchbox" id="inv-{{ signal }}" name="{{ signal }}" value="{{ value }}" inputmode="numeric" maxlength="{{ max_count_digits }}" autocomplete="off" /></dd>
+          {% endfor %}
+          <dt><label for="inv-reason">{% translate "Reason" %}</label></dt>
+          <dd><input class="searchbox" id="inv-reason" name="{{ reason_field }}" value="{{ form_values.reason }}" autocomplete="off" /></dd>
+        </dl>
+        <div class="btnrow" style="margin-top:11px">
+          {% if editing %}
+            <button class="btn primary" type="submit" name="{{ action_field }}" value="{{ change_action }}">{% translate "Save change" %}</button>
+            <a class="btn ghost" href="{% url 'conda_sentinel:inventory' %}">{% translate "Cancel" %}</a>
+          {% else %}
+            <button class="btn primary" type="submit" name="{{ action_field }}" value="{{ add_action }}">{% translate "Add" %}</button>
+          {% endif %}
+        </div>
+        <div class="ev" style="margin-top:9px">
+          {% translate "blank means the source did not say · a count is stored as stated · the next ingestion reads the table" %}
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {% comment %}
+    The two filters, as a GET so the narrowed page stays bookmarkable: active
+    rows only, and a key prefix (`conda-forge/`, `internal/`). Both read off the
+    query by `surface/inventory.py`; a parameter that is not a filter is ignored.
+  {% endcomment %}
+  <form class="findbar" method="get" style="margin-top:14px">
+    <input class="searchbox"
+           type="text"
+           name="{{ prefix_param }}"
+           value="{{ filters.prefix }}"
+           maxlength="512"
+           autocomplete="off"
+           placeholder="{% translate 'key starts with…' %}"
+           aria-label="{% translate 'Filter by key prefix' %}" />
+    <label class="facet">
+      <input type="checkbox" name="{{ active_only_param }}" value="1" {% if filters.active_only %}checked{% endif %} />
+      {% translate "Active only" %}
+    </label>
+    <button class="btn sm" type="submit">{% translate "Filter" %}</button>
+    {% if filters.active_only or filters.prefix %}
+      <a class="btn ghost sm" href="{{ request.path }}">{% translate "Clear" %}</a>
+    {% endif %}
+  </form>
+
+  <div class="panel">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>{% translate "Source package key" %}</th>
+          <th>{% translate "Package name" %}</th>
+          {% for signal, heading in signals %}<th class="num">{{ heading }}</th>{% endfor %}
+          <th>{% translate "State" %}</th>
+          <th>{% translate "Changed" %}</th>
+          <th>{% translate "Reason" %}</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in entries %}
+          <tr>
+            <td class="mono">{{ entry.source_package_key }}</td>
+            <td>{{ entry.package_name }}</td>
+            {% comment %} A NULL count renders as an em dash, never as 0 and never as
+               blank: blank is the form's spelling of missing, and on a table a
+               blank cell is indistinguishable from one nobody rendered. {% endcomment %}
+            <td class="num">{% if entry.internal_component_count is None %}&mdash;{% else %}{{ entry.internal_component_count }}{% endif %}</td>
+            <td class="num">{% if entry.internal_lob_count is None %}&mdash;{% else %}{{ entry.internal_lob_count }}{% endif %}</td>
+            <td class="num">{% if entry.apps is None %}&mdash;{% else %}{{ entry.apps }}{% endif %}</td>
+            <td class="num">{% if entry.platforms is None %}&mdash;{% else %}{{ entry.platforms }}{% endif %}</td>
+            <td class="num">{% if entry.downloads is None %}&mdash;{% else %}{{ entry.downloads }}{% endif %}</td>
+            <td class="num">{% if entry.versions is None %}&mdash;{% else %}{{ entry.versions }}{% endif %}</td>
+            <td>
+              {% if entry.is_active %}
+                <span class="chip {{ active_state|tone }}">{{ active_state|label }}</span>
+              {% else %}
+                <span class="chip {{ retired_state|tone }}" title="{{ entry.retired_at|date:'Y-m-d H:i' }}Z">{{ retired_state|label }}</span>
+              {% endif %}
+            </td>
+            <td class="mono">{{ entry.changed_at|date:"Y-m-d H:i" }}Z</td>
+            <td>{{ entry.reason }}</td>
+            <td>
+              <div class="btnrow">
+                <a class="btn sm" href="{% url 'conda_sentinel:inventory' %}?{{ edit_param }}={{ entry.source_package_key|urlencode }}">{% translate "Edit" %}</a>
+                {% if entry.is_active %}
+                  <form method="post" action="{% url 'conda_sentinel:inventory' %}">
+                    {% csrf_token %}
+                    <input type="hidden" name="{{ key_field }}" value="{{ entry.source_package_key }}" />
+                    <input class="searchbox" name="{{ reason_field }}" placeholder="{% translate 'why…' %}" aria-label="{% translate 'Reason for retiring' %}" autocomplete="off" />
+                    <button class="btn danger sm" type="submit" name="{{ action_field }}" value="{{ retire_action }}">{% translate "Retire" %}</button>
+                  </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="12">{% translate "No inventory row matches. Import the watchlist with import-watchlist, add a package above, or clear the filter." %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if page_obj.has_other_pages %}
+      <div class="applied">
+        {% if page_obj.has_previous %}
+          <a class="btn sm" href="?{% querystring request.GET page=page_obj.previous_page_number %}">{% translate "Previous" %}</a>
+        {% endif %}
+        <span>
+          {% blocktranslate with current=page_obj.number total=paginator.num_pages trimmed %}
+            Page {{ current }} of {{ total }}
+          {% endblocktranslate %}
+        </span>
+        {% if page_obj.has_next %}
+          <a class="btn sm" href="?{% querystring request.GET page=page_obj.next_page_number %}">{% translate "Next" %}</a>
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="panel" style="margin-top:14px">
+    <header>
+      <h4>{% translate "Recent changes" %}</h4>
+      <span class="hx">{% translate "inventory_changes — newest first" %}</span>
+    </header>
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>{% translate "When" %}</th>
+          <th>{% translate "Key" %}</th>
+          <th>{% translate "Who" %}</th>
+          <th>{% translate "What changed" %}</th>
+          <th>{% translate "Reason" %}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for change, differences in recent_changes %}
+          <tr>
+            <td class="mono">{{ change.observed_at|date:"Y-m-d H:i" }}Z</td>
+            <td class="mono">{{ change.entry.source_package_key }}</td>
+            {% comment %} A person, or the file an unattended import read: the audit
+               row carries exactly one of the two, never a default. {% endcomment %}
+            <td>{% if change.actor %}{{ change.actor }}{% else %}<span class="mono">{{ change.origin }}</span>{% endif %}</td>
+            {% comment %} Every field whose two sides differ, prior → new, so a count
+               change reads as a change and an add lists what it set. A NULL count
+               reads as an em dash on either side, never as 0 or blank. {% endcomment %}
+            <td class="mono">
+              {% for difference in differences %}
+                {{ difference.label }}: {{ difference.prior }} &rarr; {{ difference.new }}{% if not forloop.last %}<br />{% endif %}
+              {% endfor %}
+            </td>
+            <td>{{ change.reason }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5">{% translate "Nothing has changed yet." %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock content %}

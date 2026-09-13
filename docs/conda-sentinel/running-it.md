@@ -8,7 +8,8 @@ service running** — no Postgres, no Redis, no identity provider.
 ```bash
 pixi install                    # the environment
 pixi run migrate                # SQLite, locally
-# a hundred packages, their evidence, a live identity resolution, and a policy run
+# the watchlist into the inventory table, an ingestion, a live identity resolution,
+# the roster's evidence, and a policy run
 pixi run -e dev seed-demo
 pixi run runserver              # http://localhost:8000/
 ```
@@ -35,7 +36,7 @@ local-dev sign-in gives you six personas instead, at
 
 | Persona | Holds | Can reach |
 |---|---|---|
-| `leader-persona` | platform and engineering leadership | identity review; the identity override |
+| `leader-persona` | platform and engineering leadership | identity review; the identity override; the inventory page |
 | `reviewer-persona` | security review | compliance review |
 | `engineer-persona` | packaging engineering | remediation |
 | `reader-persona` | no product role | nothing — the state the `IsAuthenticated` floor lets through |
@@ -81,13 +82,23 @@ nothing.
 
 ## What the seeder does, and how
 
-It writes a hundred packages as `unmapped` shells, runs the real `resolve_identity`
-collector over every one of them — live, against conda-forge's index and PyPI — and
-then writes **evidence** with a real source behind each row: advisories, a KEV
-cross-reference, licence findings where the roster states a licence, and a PyPI
-release snapshot for each package the resolver has just found on PyPI. Then it
-**runs a real policy pass** over all of it. A hundred rollup rows, at the shipped
-policy version, in about half a minute online.
+It **imports the development watchlist** — 148 rows — into the governed `inventory`
+table through the same service the `import-watchlist` admin process uses (every audit
+row names the file and says "local development seed"), then runs the product's own
+**inventory ingestion** inline over that table, so every package shell and every
+inventory snapshot is written by the real collector under the real key scheme. It runs
+the real `resolve_identity` collector over every one of the 148 — live, against
+conda-forge's index and PyPI — and then overlays the roster's **evidence** on the
+hundred packages it has real sources for: advisories, a KEV cross-reference, licence
+findings where the roster states a licence, and a PyPI release snapshot for each roster
+package the resolver has just found on PyPI. Then it **runs a real policy pass** over
+all of it. 148 rollup rows, at the shipped policy version, in about a minute online.
+
+The seeder files no package shell of its own and keeps no second inventory: the roster
+is an overlay on packages the watchlist already names, and it refuses, before any
+write, a roster name the watchlist does not carry. That is what lets a seeded stack
+**ingest** afterwards — `pixi run stack-run ingest_inventory` onto a seeded database
+creates nothing, collides with nothing, and appends one snapshot per package.
 
 The distinction that matters: **it writes no derived status directly.** `CPM-AD-10`
 gives the application layer no write path to one, so the seeder produces evidence and
@@ -104,6 +115,11 @@ finalising it after, so the coverage screen reads the shape it would read in
 production.
 
 ### What the hundred are
+
+The roster's hundred, which carry evidence; the other 48 rows the watchlist names are
+ingested and resolved like the rest and carry nothing but what the resolver observed,
+so their advisory and licence columns honestly read
+<span class="cs-state unknown">unknown</span> until the sweeps run.
 
 A mixture, on purpose: **web frameworks** (django, flask, fastapi, tornado, litestar),
 **data science** (numpy, pandas, scikit-learn, pytorch, hdbscan), the **utilities every
@@ -145,13 +161,19 @@ queue holding two items looks like a queue.
 !!! note "A fresh seed needs the network, and shows `unknown` where nothing has looked yet"
 
     `seed-demo` and `stack-seed` reach `raw.githubusercontent.com` and `pypi.org`
-    for every package — about two hundred back-to-back requests to two public hosts,
-    because the seed runs the resolver **unmetered** (the daily sweep keeps the real
-    allowance). A healthy seed prints
+    for every package the watchlist names — about three hundred back-to-back requests
+    to two public hosts, because the seed runs the resolver **unmetered** (the daily
+    sweep keeps the real allowance). A healthy seed prints
 
     ```
-    resolved=98 not_on_conda_forge=2 unreachable=0 verified_kept=0
+    imported=148 ingestion_state=succeeded resolved=146 not_on_conda_forge=2 unreachable=0 verified_kept=0
     ```
+
+    `imported` is how many watchlist rows the table did not already hold — 148 on a
+    fresh volume, 0 on a re-seed — and `ingestion_state` is how the product's own
+    inventory run ended. A re-seed never reactivates a row you retired on the
+    inventory page (`import_retired_kept` counts them) and never retires a row you
+    added there: the seed imports without `--replace`.
 
     `not_on_conda_forge=2` is the two `internal-*` names, which the index has no
     entry for; it is the healthy number. Anything `unreachable` is a source that
@@ -159,7 +181,7 @@ queue holding two items looks like a queue.
     there — and that package stays `unmapped` until a **second seed** resolves it
     (which appends a second observation of everything else, as any re-seed does).
     Offline, the seed still completes: after three refused connections in a row the
-    resolver stops asking, the summary reports `unreachable=100`, one warning names
+    resolver stops asking, the summary reports `unreachable=148`, one warning names
     each package it asked about and one says how many it did not, and every package
     stays `unmapped` with every verdict gated
     <span class="cs-state unknown">unknown</span>. `verified_kept` counts packages a
@@ -192,7 +214,7 @@ queue holding two items looks like a queue.
       charged four per collection, so a sweep gets through about fifteen packages a
       minute and the rest are refused as rate-limited until the next sweep.
       `source_release` is **60 an hour**, charged four per collection — about fifteen
-      packages an hour, so the 98 resolved packages take several sweeps to cover.
+      packages an hour, so the 146 resolved packages take several sweeps to cover.
       Until each has reached a package, feedstock presence, upstream-release currency
       and Python 3.14 readiness read <span class="cs-state unknown">unknown</span>.
     - **Unreachable on the local stack at all** — published-conda currency needs
@@ -219,7 +241,7 @@ queue holding two items looks like a queue.
     On a fresh seed most of the ten cannot fire anyway: every rule that conditions
     on remediation readiness, feedstock presence or Python readiness is conditioning
     on a surface nothing has observed yet, so the 28 vulnerable packages land in
-    `p3` and the other 72 read <span class="cs-state unknown">unknown</span> until
+    `p3` and the rest read <span class="cs-state unknown">unknown</span> until
     the sweeps above have run.
 
 ## Running a policy pass yourself
@@ -318,10 +340,17 @@ finish), and then runs `docker-down`.
     Seeding one and starting the other gives you a product with no packages and — more
     confusingly — **no personas**, so there is no way to sign in and discover that it
     is empty. That is what `stack-seed` is for: it migrates and seeds the database the
-    stack is about to serve, in one command, and resolves every package's identity
-    live on the way — so it needs the network, and a fresh stack shows real
-    repositories and feedstocks on first paint and `unknown` for what its sweeps have
-    not yet observed.
+    stack is about to serve, in one command: it imports the development watchlist
+    into the inventory table, ingests it, and resolves every package's identity live
+    on the way — so it needs the network, and a fresh stack shows real repositories
+    and feedstocks on first paint and `unknown` for what its sweeps have not yet
+    observed.
+
+    A stack seeded **before** the inventory became a table (`CPM-OPERATE-S03`) holds
+    package shells under the old `pypi:<name>` key, and the seeder refuses to run
+    over them rather than collide with the shells the ingestion creates -- no package
+    row is ever deleted. Reset it once: `pixi run docker-down-v`, then
+    `pixi run -e dev stack-seed`.
 
     `local-stack` migrates on its own (`depends-on`), so a fresh clone finds a schema.
     It deliberately does **not** seed: evidence is append-only, so a stack that seeded
@@ -398,9 +427,16 @@ database the screens read:
 |---|---|
 | `pixi run stack-migrate` | apply migrations to the stack's PostgreSQL (starts the containers first) |
 | `pixi run stack-personas` | seed the six personas into it |
-| `pixi run stack-seed` | personas, then the demo inventory, resolving identity live; runs its tasks inline on purpose |
+| `pixi run stack-seed` | personas, then the demo inventory: imports the watchlist into the table, ingests it, resolves identity live; runs its tasks inline on purpose |
 | `pixi run stack-shell` | a Django shell against the stack's database and broker |
 | `pixi run stack-run …` | `manage.py` with whatever follows appended: `pixi run stack-run showmigrations collectors` |
+
+The stack reads its inventory from the **table** (`CPM_INVENTORY_SOURCE=database`, the
+`dev` environment's declaration), so after a seed the loop is: change the inventory —
+on `/conda-sentinel/inventory/` as `leader-persona`, or with
+`pixi run stack-run import_watchlist [<file>] [--replace]` — then
+`pixi run stack-run ingest_inventory`. [Managing the inventory](managing-the-inventory.md)
+walks it end to end.
 
 ```bash
 pixi run stack-run showmigrations collectors

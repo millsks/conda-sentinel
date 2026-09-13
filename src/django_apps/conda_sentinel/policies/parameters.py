@@ -118,11 +118,13 @@ __all__ = [
     "RULE_EXPRESSION_KEY",
     "RULE_KEYS",
     "VERSIONS_TABLE",
+    "VERSION_SEPARATOR",
     "LicenseRule",
     "PolicyParameterError",
     "PolicyParameters",
     "PriorityRule",
     "forget_recorded_parameters",
+    "newest_recorded_version",
     "parameters_at",
     "parameters_directory",
     "parameters_file",
@@ -130,6 +132,8 @@ __all__ = [
     "parameters_from",
     "parameters_in",
     "recorded_parameters",
+    "recorded_versions",
+    "version_key",
 ]
 
 #: The one top-level table the file declares: policy version to parameter set.
@@ -1412,6 +1416,73 @@ def parameters_for(version: str) -> PolicyParameters:
     """
     path = parameters_file()
     return parameters_in(recorded_parameters(path), version=version, source=path)
+
+
+#: What separates a version's segments, for `version_key`.
+VERSION_SEPARATOR: Final[str] = "."
+
+
+def version_key(version: str) -> tuple[tuple[int, int | str], ...]:
+    """Return a sort key that orders dotted versions numerically, segment by segment.
+
+    Lifted here from `run_policy`'s command by `CPM-OPERATE-S03`, so that the
+    command and the demo seeder derive "newest" through one rule rather than
+    two: the seeder's own `sorted(...)[-1]` was a lexicographic sort that would
+    have put `2026.09.10` before `2026.09.4` the day a tenth revision was
+    recorded.
+
+    Args:
+        version: A recorded version, such as `2026.09.4`.
+
+    Returns:
+        One pair per segment: an all-digit segment as `(0, int)`, any other as
+        `(1, str)`, so `2026.09.10` sorts after `2026.09.4`, a shorter version
+        sorts before its own extensions, and a segment that is not a number
+        compares against one that is without raising.
+
+    """
+    segments = version.split(VERSION_SEPARATOR)
+    return tuple((0, int(segment)) if segment.isdigit() else (1, segment) for segment in segments)
+
+
+def recorded_versions() -> list[str]:
+    """Return every policy version the shipped parameter file records, oldest first.
+
+    Read through `parameters_from` rather than the memoized `recorded_parameters`,
+    on the terms the command set: a corrected file is believed by the next
+    invocation without a restart.
+
+    Returns:
+        The versions under `version_key`'s ordering, so the last is the newest.
+
+    Raises:
+        PolicyParameterError: When the file cannot be read as a parameter set.
+            Not caught: a malformed reviewed file is a misconfigured deployment
+            (`CPM-AD-14`) and the refusal names the file to edit.
+
+    """
+    source = parameters_file()
+    return sorted(parameters_from(source.read_text(encoding="utf-8"), source=source), key=version_key)
+
+
+def newest_recorded_version() -> str:
+    """Return the newest policy version the shipped parameter file records.
+
+    What `run_policy` applies when no `--version` is given and what the demo
+    seeder runs at. Read rather than written down: an unrecorded version fails
+    every package (`CPM-CURRENCY-S07`), so a constant would break both on the day
+    somebody added a version and not before.
+
+    Returns:
+        The newest recorded version under `version_key`'s ordering.
+
+    Raises:
+        PolicyParameterError: When the file cannot be read as a parameter set,
+            or -- `parameters_from` refuses an empty version table -- records no
+            version at all.
+
+    """
+    return recorded_versions()[-1]
 
 
 def _priority_rules(rules: object, *, version: str, source: Path | str) -> tuple[PriorityRule, ...]:

@@ -93,11 +93,13 @@ THE_IMPLEMENTATION: Final[str] = f"{PRODUCT_TREE}/core/permissions.py"
 
 #: The reads licensed outside the implementation, spelled exactly and spent exactly.
 #:
-#: One entry, and it is not a role check -- which is the reason it is licensed rather
-#: than the reason it is suspicious. `CPM-AD-14` makes the audited identity override
-#: the product's one governed human write and gates it on a Django *permission*, and
+#: Two entries, and neither is a role check -- which is the reason they are licensed
+#: rather than the reason they are suspicious. `CPM-AD-14` makes the audited identity
+#: override a governed human write and gates it on a Django *permission*, and
 #: `core/permissions.py`'s own docstring says in as many words that it "stays where
 #: Django's permission system already puts it". `_require_permitted` is that gate.
+#: `CPM-OPERATE-S03` added the second governed write -- the inventory table -- and
+#: its service carries the same gate on the same terms, one read, spent here.
 #:
 #: Recorded as the exact list the sweep must find rather than as a licensed
 #: *attribute*, on the terms `tests/unit/django_apps/test_clock_audit.py` sets: a
@@ -105,6 +107,7 @@ THE_IMPLEMENTATION: Final[str] = f"{PRODUCT_TREE}/core/permissions.py"
 #: module whose recorded read has been deleted fails here rather than keeping a
 #: licence for something that is no longer there.
 RECORDED_EXEMPTIONS: Final[dict[str, tuple[str, ...]]] = {
+    f"{PRODUCT_TREE}/collectors/inventory.py": ("actor.has_perm",),
     f"{PRODUCT_TREE}/identity/services.py": ("actor.has_perm",),
 }
 

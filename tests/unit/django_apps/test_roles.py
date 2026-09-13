@@ -32,6 +32,9 @@ from conda_sentinel.core import roles
 from conda_sentinel.core.roles import IDENTITY_APP_LABEL
 from conda_sentinel.core.roles import IDENTITY_OVERRIDE_CODENAME
 from conda_sentinel.core.roles import IDENTITY_OVERRIDE_PERMISSION
+from conda_sentinel.core.roles import INVENTORY_APP_LABEL
+from conda_sentinel.core.roles import INVENTORY_CHANGE_CODENAME
+from conda_sentinel.core.roles import INVENTORY_CHANGE_PERMISSION
 from conda_sentinel.core.roles import LEADERSHIP
 from conda_sentinel.core.roles import PACKAGING_ENGINEER
 from conda_sentinel.core.roles import ROLE_ENVIRONMENT_VARIABLES
@@ -214,8 +217,12 @@ def test_the_permission_declaration_is_keyed_by_role_slot() -> None:
     assert set(ROLE_GROUP_PERMISSIONS) == ROLE_SLOTS
 
 
-def test_only_the_leadership_slot_grants_anything_and_it_grants_the_override() -> None:
-    """AC #7's declaration half: one grant, to one slot, and two slots still empty.
+def test_only_the_leadership_slot_grants_anything_and_it_grants_the_two_governed_writes() -> None:
+    """AC #7's declaration half: two grants, to one slot, and two slots still empty.
+
+    Two since `CPM-OPERATE-S03`: the identity override and the inventory change
+    are the two governed human writes `CPM-FR-3` (as amended) names, and both
+    arrive with the write rather than with a surface.
 
     This case used to assert that every slot granted nothing, which was the state
     until `CPM-IDENTITY-S05`. It is rewritten rather than deleted, because the
@@ -235,7 +242,7 @@ def test_only_the_leadership_slot_grants_anything_and_it_grants_the_override() -
     `tests/unit/django_apps/test_identity_overrides.py`, which reconciles it
     against the model's own `Meta.permissions`.
     """
-    assert ROLE_GROUP_PERMISSIONS[LEADERSHIP] == (IDENTITY_OVERRIDE_PERMISSION,)
+    assert ROLE_GROUP_PERMISSIONS[LEADERSHIP] == (IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION)
     assert ROLE_GROUP_PERMISSIONS[SECURITY_REVIEWER] == ()
     assert ROLE_GROUP_PERMISSIONS[PACKAGING_ENGINEER] == ()
 
@@ -256,6 +263,21 @@ def test_the_override_permission_is_an_app_label_and_a_codename() -> None:
     assert IDENTITY_OVERRIDE_PERMISSION.count(".") == 1
     assert IDENTITY_APP_LABEL
     assert IDENTITY_OVERRIDE_CODENAME
+
+
+def test_the_inventory_permission_is_an_app_label_and_a_codename() -> None:
+    """The second grant's shape, on the first's terms (`CPM-OPERATE-S03`).
+
+    The application is `collectors`, because that is where the table and the
+    audit model live; the codename must not collide with the four Django derives
+    for the two models there, which is why it names the *table* rather than a
+    model.
+    """
+    assert f"{INVENTORY_APP_LABEL}.{INVENTORY_CHANGE_CODENAME}" == INVENTORY_CHANGE_PERMISSION
+    assert INVENTORY_CHANGE_PERMISSION.count(".") == 1
+    assert INVENTORY_APP_LABEL == "collectors"
+    assert INVENTORY_CHANGE_CODENAME
+    assert INVENTORY_CHANGE_PERMISSION != IDENTITY_OVERRIDE_PERMISSION
 
 
 def test_the_declared_variables_pair_with_the_contract_fields_in_order() -> None:

@@ -130,8 +130,8 @@ projection — so a number in a dashboard and a number on a screen cannot disagr
   and the two only an operator's command fires
 - [The queues](the-queues.md) — how work opens, who may move it, and why `blocked`
   is not a state
-- [Managing the inventory](managing-the-inventory.md) — adding and removing packages,
-  and correcting an identity
+- [Managing the inventory](managing-the-inventory.md) — the governed table, adding
+  and retiring packages, and correcting an identity
 - [Operating it](operations.md) — what each collector needs before it observes
   anything
 - [Developing it](development.md) — the screens, the API, the reports

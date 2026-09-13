@@ -1,54 +1,92 @@
 # Managing the inventory
 
-Adding a package, removing one, and correcting an identity the resolver got wrong.
+Adding a package, retiring one, and correcting an identity the resolver got wrong.
 
 ---
 
 ## What the inventory is
 
-The list of packages this product watches is a **reviewed CSV file shipped inside the
-wheel** — not a database table, not an admin screen, and not an API.
+The list of packages this product watches is a **governed database table** — `inventory`,
+one row per package — changed through exactly two doors, each of which writes an audit
+row in the same transaction as the change:
+
+| Door | Who | Writes |
+|---|---|---|
+| The **inventory page** at `/conda-sentinel/inventory/` | a person in the `leadership` role, with a reason | one row: add, change, retire |
+| The **`import-watchlist`** admin process | the command line, unattended | every row a reviewed CSV names, one transaction per row |
+
+The reviewed CSV inside the wheel is still there, and it is the **first-run seed**:
 
 ```
 src/django_apps/conda_sentinel/collectors/data/
 ├── watchlist.csv               ← deployed. Ships with a header and no rows.
-├── watchlist-development.csv   ← read only when COMPONENT_RUNTIME=local
+├── watchlist-development.csv   ← what the local stack imports (148 rows)
 └── README.md                   ← the column contract, beside the files
 ```
 
-Which file is read is selected by **locality**, and it fails closed toward production:
-`COMPONENT_RUNTIME=local` reads the development subset, and *everything else* — absent,
-empty, or a value like `dev` — reads `watchlist.csv`.
+`import-watchlist` reads it into the table; from then on the table is the inventory
+and the file is where a reviewed bulk change comes from.
 
-That asymmetry is not fussiness. A deployed component that read the development subset
-would find every package outside that subset missing and record each one as **absent**,
-permanently, in an append-only log nothing may correct.
+### Which source ingestion reads
 
-### Why a file and not a table
+Ingestion reads the inventory through one declared adapter (`CPM-AD-29`), and
+**`CPM_INVENTORY_SOURCE`** says which:
 
-Because adding a package is a decision somebody should review. A CSV in the repository
-gets a pull request, a diff, an approver and a history; an admin form gets a Tuesday
-afternoon and no record of why. The inventory is governed reference data, and governed
-reference data has one write path.
+| Value | Ingestion reads | When |
+|---|---|---|
+| `watchlist` (the default) | the CSV file locality selects — `watchlist-development.csv` when `COMPONENT_RUNTIME=local`, `watchlist.csv` otherwise | a deployment that has never imported its watchlist |
+| `database` | the `inventory` table's active rows | after `import-watchlist` has filled the table |
+
+The default is the file, and that direction is the one that fails closed: a component
+that has never run the import keeps reading the reviewed file it ships, and switching
+to the table is an operator's declaration made *after* the import. Anything else is
+refused at boot, naming the setting. The `dev` pixi environment declares `database`,
+so the local stack and the test suite read the table the demo seeder fills.
+
+### Why a table, and why the file stays
+
+Because adding a package should be a decision somebody can make on a Tuesday afternoon
+*and* leave a record of why. A CSV in the repository gets a pull request and a diff; a
+governed table gets a permission, a required reason and an audit row that names the
+person or the file — which is the same record, without the release. The file keeps its
+job as the reviewed bulk source, and the audit trail keeps its.
 
 ---
 
-## Adding a package
+## Adding a package, end to end
 
-1. Add a row to `watchlist.csv` (or, for local work, `watchlist-development.csv`).
-2. Open a pull request. The gate validates the file.
-3. Once deployed, the next inventory ingestion creates the package shell and its
-   inventory snapshot.
-4. From then on, each collector's sweep offers it as soon as its identity resolution
-   has reached the mapping that collector reads.
+1. **Add the row.** Either on the inventory page — key, name, the two required counts,
+   any of the four optional ones, and a reason — or by adding a line to the reviewed
+   CSV and running the import:
+
+    ```sh
+    pixi run stack-run import_watchlist                 # the file locality selects
+    pixi run stack-run import_watchlist path/to/a.csv   # a named file
+    ```
+
+    Deployed, the same command is `pixi run import-watchlist`, the admin process
+    `component.toml` declares.
+
+2. **Ingest.** `pixi run stack-run ingest_inventory` (deployed: `pixi run ingest`). The
+   next ingestion creates the package **shell** at `unmapped` and its first inventory
+   snapshot. Nothing is created until this runs; the page says so.
+
+3. **Resolve its identity.** `pixi run stack-run dispatch_sweep resolve_identity`, or
+   wait for the daily sweep. The resolver reads conda-forge's index and PyPI and
+   establishes what the shell maps to.
+
+4. **Collect.** The other sweeps offer the package as soon as the mapping each one reads
+   is established — `pixi run stack-run dispatch_sweep --all` on day one, the beat
+   schedule after that.
 
 ### The eight columns
 
-The header is **exactly** these eight names, in any order, and nothing else:
+A row — on the page or in the file — carries **exactly** these eight names, and nothing
+else:
 
 | Column | Required | Meaning |
 |---|---|---|
-| `source_package_key` | yes | What the inventory files it under. Becomes `associator_key` — the stable value nothing corrects. Unique within the file. |
+| `source_package_key` | yes | What the inventory files it under. Becomes `associator_key` — the stable value nothing corrects. One row per key. |
 | `package_name` | yes | What it is called. Becomes `canonical_name`, the one *correctable* name. |
 | `internal_component_count` | yes | How many internal components use it |
 | `internal_lob_count` | yes | How many internal lines of business use it |
@@ -64,41 +102,80 @@ silently dropped column is a reviewer who believes they supplied one.
 !!! important "A blank optional cell is not a zero"
 
     Blank records that the source did not say, and is stored as NULL. `0` records
-    that the source counted none. Nothing in this product collapses the two, and
-    neither should an edit to these files.
+    that the source counted none. Nothing in this product collapses the two — the
+    page renders NULL as an em dash, never as `0` — and neither should an edit.
 
     The two required counts are the internal usage breadth the priority pass ranks by,
-    which is why a row cannot omit either.
+    which is why a row cannot omit either: the page and the import both refuse one
+    that does, naming the key.
 
-The full contract — bounds, encoding, what a malformed row does — is in
+The full file contract — bounds, encoding, what a malformed row does — is in
 `src/django_apps/conda_sentinel/collectors/data/README.md`, deliberately beside the
 files rather than only here.
 
+### Every change is audited, in the same transaction
+
+Each add, change or retirement writes one `inventory_changes` row beside it: the prior
+and new value of every changeable field, who (a person, or the file an unattended
+import read), why, and when. The row and its audit row commit together or not at all —
+a change with no reason is refused before anything is written, and so is a change by
+somebody without the `collectors.change_inventory` permission, which the
+[leadership role](authorization.md) holds. The page shows the newest twenty beneath
+the table.
+
+A file import writes no audit row for an entry it names exactly as the table already
+holds it, so a repeated import of the same file is a no-op that says so. One more rule
+every door enforces: **one active row per name**. The name becomes the package's
+canonical name, which is unique, so a second active row carrying a name another key
+already carries is refused naming that key — retire the other row first, or name this
+one differently. A retired row keeps its name and is outside the rule.
+
 ### The whole file is validated before anything is written
 
-A malformed file fails the run and leaves **no package and no snapshot** behind. Every
-refusal names the file and, where a row is at fault, the line.
-
-Two rows with different keys and the same `package_name` are a collision: the second
-row fails, the sweep carries on, and the run finalises `partial`. That is the
-difference between a bad row and a bad file — one loses a package, the other loses
-nothing.
+An import parses the file through the same parser a file-sourced ingestion uses, so
+every refusal about the file applies — a bad header, a blank line, a ragged row, a
+count the column will not hold, a repeated key — naming the file and the line, before
+a single row is written. A row the *service* refuses stops the import at that row: the
+rows before it stay committed, each with its audit row, and the message names the key.
 
 ---
 
-## Removing a package
+## Retiring a package
 
-**Delete its row and open a pull request.** What happens next is the part worth
-understanding.
+**Retire the row** — the button on the page, with a reason — or import a file that no
+longer names it with `--replace`:
 
-Nothing is deleted from the database. The next ingestion notices the package is no
-longer listed and writes an **absence observation** — a row saying "the source no
-longer lists this package", carrying this run's timestamp. The package, its evidence
-and its history all stay exactly where they are.
+```sh
+pixi run stack-run import_watchlist path/to/shorter.csv --replace
+```
 
-That is not a compromise. Evidence is append-only: what a source said at an instant
-cannot stop being true, and a product that deleted the record of a package it used to
-watch could not answer "what did we know about this in March".
+`--replace` retires every active row the file does not name, with a reason naming the
+file (composed after `--reason`, when one is given). Without it, rows the file does not
+name are left alone, which is what importing a *partial* file means. The scheduled
+`import-watchlist` admin process runs with `--replace`, because the reviewed file is the
+whole inventory. A file naming no packages at all is refused with `--replace` rather
+than retiring everything.
+
+**An import never reactivates a retired row.** A row somebody retired on the page is a
+decision with a reason; a file that still names it has not caught up, and the import
+leaves it retired and reports it as `retired kept`. Reactivation is a person's change
+on the page — the edit form on a retired row — audited as the `retired` transition.
+
+Nothing is deleted, from the table or from the database. Retirement is a column
+(`retired_at`); the adapter answers active rows only; the next ingestion notices the
+package is no longer listed and writes an **absence observation** — an inventory
+snapshot saying `not_found`, carrying that run's timestamp. The package, its evidence,
+its history and its inventory row all stay exactly where they are, and the row can be
+reactivated by changing it (the page's edit form, or a later import that names it).
+
+### What absence does today
+
+The `not_found` snapshot is the whole of it. Nothing downstream reads inventory absence
+yet: the package keeps its rollup row and its place on every screen, stays in the
+identity queue if it was there (sorting last, for want of usage breadth), and is still
+offered to the collectors that select on its mappings. Changing what the queues and the
+rollup do with an absent package is a policy decision with its own story, recorded in
+the deferred-work ledger; this page documents what happens, not what should.
 
 !!! warning "Absences are recorded only by a run that observed something"
 
@@ -106,30 +183,42 @@ watch could not answer "what did we know about this in March".
     Writing absences off the back of it would record every package the source *did*
     still list as departed — permanently, in a log nothing may correct.
 
-    This is also why an **empty** inventory document is refused one step earlier, and
-    why `watchlist.csv` shipping with no rows makes ingestion fail loudly rather than
-    quietly succeed. An inventory naming nothing is indistinguishable from a source
-    that has broken.
+    This is also why an **empty** inventory — a header-only file, or a table with no
+    active row — is refused one step earlier and nothing is marked absent. An inventory
+    naming nothing is indistinguishable from a source that has broken.
 
 ---
 
 ## A first deployment sees nothing, on purpose
 
-`watchlist.csv` ships with its header and **no rows**. Which packages your organisation
-tracks is your decision, so nothing is invented for you.
+`watchlist.csv` ships with its header and **no rows**, and the `inventory` table starts
+empty. Which packages your organisation tracks is your decision, so nothing is invented
+for you.
 
-The consequence to plan for: **inventory ingestion fails on every run until that file
-is reviewed in.** The task raises an `ImproperlyConfigured` naming the file, the run's
-ledger row finalises `failed`, and no package and no snapshot is written.
+!!! warning "A local stack seeded before the table existed must be reset once"
 
-A loud failure on day one is the alternative to a silently corrupted evidence log.
+    The demo seeder used to file its own package shells under a `pypi:<name>` key;
+    the product's ingestion files them under the watchlist's key, and no package row
+    is ever deleted. So a stack seeded before `CPM-OPERATE-S03` still holds the old
+    shells, they collide with the new ones on `canonical_name`, and the seeder refuses
+    before writing anything, saying so. `pixi run docker-down-v` discards the volume;
+    `pixi run -e dev stack-seed` then seeds cleanly.
+
+The consequence to plan for: **inventory ingestion fails on every run until the
+inventory has something in it.** Reading the file, the task raises an
+`ImproperlyConfigured` naming it; reading the table, it refuses the empty document. The
+run's ledger row finalises `failed`, and no package and no snapshot is written.
+
+Populate it by review — rows into `watchlist.csv`, then `import-watchlist`, then
+`CPM_INVENTORY_SOURCE=database` — or one row at a time on the inventory page. A loud
+failure on day one is the alternative to a silently corrupted evidence log.
 
 ---
 
 ## Identity, and correcting it
 
 Ingestion creates a package **shell** at confidence `unmapped`. It asserts no mapping —
-no repository, no purl, no feedstock — because an inventory file knows what a package
+no repository, no purl, no feedstock — because an inventory row knows what a package
 is called internally and nothing about what it *is*.
 
 Resolution is what promotes it, and until it does, the confidence gate writes `unknown`
@@ -148,14 +237,21 @@ POST /conda-sentinel/api/v1/packages/<package_id>/identity-override/
 - Requires a **reason**. Not optional, and not defaulted.
 - Records **who** did it.
 
-It is the only way to correct an identity, and it is deliberately narrow. `CPM-AD-14`
-gives governed reference data exactly one write path; a second one — an admin form, a
-management command — would be a second place identity could change with a different
-audit story.
+It is the only way to correct an identity. A wrong identity is corrected through the
+override, never through the inventory: changing a row's `package_name` changes what the
+*next* shell would be called, not what this package is.
+
+!!! note "Two governed writes, three obligations each"
+
+    `CPM-FR-3` names two human writes that mutate governed reference data — the
+    identity override and the inventory — and puts the same three obligations on each:
+    a permission, a required reason, and an audit row in the same transaction. There
+    is no third. An admin form or a management command that changed either table with
+    a different audit story would be a second place the rule lived.
 
 !!! note "`associator_key` is not correctable and `canonical_name` is"
 
-    The key is the stable value a later resolution matches on. If it changed, the next
+    The key is the stable value a later ingestion matches on. If it changed, the next
     ingestion would treat the row as a different package, create a second shell, and
     record the first as departed. The *name* is the correctable one.
 
@@ -163,10 +259,11 @@ audit story.
 
 ## Checking your work
 
-After changing the watchlist, the questions worth asking in order:
+After changing the inventory, the questions worth asking in order:
 
 | Ask | Where |
 |---|---|
+| Is the row there, and active? | `/conda-sentinel/inventory/` — and the audit row beneath says who and why |
 | Did ingestion run, and how did it end? | The run ledger — `ok`, `partial` or `failed` |
 | If `partial`, which rows failed? | The run's log names each one |
 | Is the new package there? | `/conda-sentinel/packages/?q=<name>` |
@@ -174,6 +271,6 @@ After changing the watchlist, the questions worth asking in order:
 | Is anything being collected about it? | Its detail page — each verdict traces to the observation behind it |
 | Which collectors *cannot* be asked about it yet? | The Coverage screen |
 
-Locally you can do the whole loop without waiting for a schedule: edit
-`watchlist-development.csv`, then `pixi run stack-run ingest_inventory` and
-`pixi run stack-run run_policy`. [How](running-it.md#running-a-policy-pass-yourself).
+Locally you can do the whole loop without waiting for a schedule: add the row, then
+`pixi run stack-run ingest_inventory`, `pixi run stack-run dispatch_sweep resolve_identity`
+and `pixi run stack-run run_policy`. [How](running-it.md#running-a-policy-pass-yourself).

@@ -49,6 +49,8 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
 from conda_sentinel.collectors.apps import WATCHLIST_PATH_SETTING
+from conda_sentinel.collectors.inventory_source import INVENTORY_SOURCE_SETTING
+from conda_sentinel.collectors.inventory_source import WATCHLIST_SOURCE
 from conda_sentinel.collectors.tasks import INVENTORY_SOURCE
 from conda_sentinel.collectors.tasks import MAX_COUNT
 from conda_sentinel.collectors.tasks import OPTIONAL_SIGNALS
@@ -225,7 +227,11 @@ def _slot_restored() -> Iterator[None]:
         None. The restoration is the effect.
 
     """
-    yield
+    # The file is what these cases are about, and the `dev` environment the
+    # suite runs in declares the *table* (`CPM-OPERATE-S03`), so the setting is
+    # pinned to the file here; `test_inventory_source.py` drives the other branch.
+    with override_settings(**{INVENTORY_SOURCE_SETTING: WATCHLIST_SOURCE}):
+        yield
     if declared_inventory_adapter() is not None:
         withdraw_inventory_adapter()
 

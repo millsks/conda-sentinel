@@ -11,33 +11,54 @@ guess, and what you must declare to make it observe anything at all.
 
 For the platform's own deployment mechanics — the process model, the release
 stage, the probes — see [deploying a component](../accelerator/deployment.md).
-## The inventory watchlist ships unpopulated
+## The inventory is a governed table, and it ships empty
 
-The inventory source is a reviewed CSV file the component ships
-(`CPM-AD-29`), and which file it reads is selected by locality:
+The inventory source is one declared adapter behind the collector base's
+transport seam (`CPM-AD-29`), and `CPM-OPERATE-S03` gives it two to choose from,
+selected by **`CPM_INVENTORY_SOURCE`**:
+
+| `CPM_INVENTORY_SOURCE` | Ingestion reads | Changed by |
+|---|---|---|
+| `watchlist` — the default | the reviewed CSV file locality selects | a pull request and a release |
+| `database` | the `inventory` table's active rows | the inventory page (`leadership`, with a reason) and the `import-watchlist` admin process |
+
+**Absent means the file, and that direction fails closed.** A component that has
+never imported its watchlist keeps reading the reviewed file it ships; switching
+to the table is your declaration, made *after* `import-watchlist` has filled it.
+Any other value is refused at boot, naming the setting -- a component that
+silently read the wrong source would record every package the other one names
+as absent, permanently, in an append-only log nothing may correct. The `dev`
+pixi environment declares `database`; the `default` environment declares
+nothing.
+
+Which file the `watchlist` source reads is selected by locality:
 `COMPONENT_RUNTIME=local` reads `watchlist-development.csv` and **everything
-else** — absent, empty, or a value like `dev` — reads `watchlist.csv`. Selection
-fails closed toward production for the same reason locality itself does: a
-deployed component that read the development subset would find every package
-outside that subset missing and record each one as *absent*, permanently, in an
-append-only log nothing may correct.
+else** -- absent, empty, or a value like `dev` -- reads `watchlist.csv`, for the
+same reason locality itself fails closed.
 
-`watchlist.csv` ships with its header and **no rows**. Which packages your
-organization tracks is your decision, not this component's, so nothing is
-invented for you. The consequence to plan for: **inventory ingestion fails on
-every run until that file is reviewed in.** The task raises an
-`ImproperlyConfigured` naming the file, the run's ledger row finalizes `failed`,
-and no package and no snapshot is written.
+`watchlist.csv` ships with its header and **no rows**, and the `inventory` table
+starts empty. Which packages your organization tracks is your decision, not this
+component's, so nothing is invented for you. The consequence to plan for:
+**inventory ingestion fails on every run until the inventory has something in
+it.** Reading the file, the task raises an `ImproperlyConfigured` naming it;
+reading the table, it refuses the empty document. Either way the run's ledger
+row finalizes `failed`, and no package and no snapshot is written.
 
 That failure is the intended behaviour rather than a gap. An inventory naming
 nothing is indistinguishable from a source that has broken, and a sweep that
 accepted one would record every package the inventory has ever named as departed.
 A loud failure on day one is the alternative to a silently corrupted evidence log.
 
-Populate it by pull request. The column contract, the bounds and the editing
-rules are documented beside the files, in
-`src/django_apps/conda_sentinel/collectors/data/README.md`. Both files ship
-inside the wheel, under `conda_sentinel/collectors/data/`;
+Populate it by review: rows into `watchlist.csv` by pull request, then
+`pixi run import-watchlist` on the deployment, then `CPM_INVENTORY_SOURCE=database`.
+From then on a row is added, changed or retired on
+`/conda-sentinel/inventory/` -- each with a required reason and an audit row in
+the same transaction, naming the person -- or by importing a revised file
+(`--replace` retires every active row the file no longer names; nothing is ever
+deleted). The column contract, the bounds and the editing rules are documented
+beside the files, in `src/django_apps/conda_sentinel/collectors/data/README.md`;
+[Managing the inventory](managing-the-inventory.md) walks an addition end to
+end. Both files ship inside the wheel, under `conda_sentinel/collectors/data/`;
 `tests/integration/test_import_resolution.py` asserts that against the built
 artifact, because a build that dropped them fails nowhere else until the first
 deployed sweep.
@@ -1271,7 +1292,7 @@ rate-limited or misconfigured source fails its own collector's dispatch and no
 other, so it costs you that surface for that cadence rather than a day of
 monitoring everywhere else.
 
-### Dispatching by hand, and the three admin processes
+### Dispatching by hand, and the four admin processes
 
 Beat's interval entries start their clock when they are created, so a fresh
 component sweeps nothing for a day and its weekly surfaces for a week. The
@@ -1303,21 +1324,35 @@ name for the same reason.
 
 `CPM-OPERATE-S02` declares three `[[admin_processes]]` in `component.toml` on
 exactly `prune`'s terms — each a root pixi task running a management command,
-`schedule = "deployment-repository"`, no cadence in the component. The
-mechanism, and the environment such a job must carry, is the accelerator's
-[deployment page](../accelerator/deployment.md):
+`schedule = "deployment-repository"`, no cadence in the component — and
+`CPM-OPERATE-S03` a fourth. The mechanism, and the environment such a job must
+carry, is the accelerator's [deployment page](../accelerator/deployment.md):
 
-| Admin process | Task | Command | Enqueues |
+| Admin process | Task | Command | Does |
 |---|---|---|---|
-| `ingest` | `pixi run ingest` | `ingest_inventory [--force]` | `cpm.collect.inventory` |
-| `sweep` | `pixi run sweep` | `dispatch_sweep --all` | one `cpm.collect.sweep` per registered collector that is swept per package |
-| `policy-run` | `pixi run policy-run` | `run_policy [--version V]` | `cpm.policy.run` at the newest recorded version |
+| `ingest` | `pixi run ingest` | `ingest_inventory [--force]` | enqueues `cpm.collect.inventory` |
+| `sweep` | `pixi run sweep` | `dispatch_sweep --all` | enqueues one `cpm.collect.sweep` per registered collector that is swept per package |
+| `policy-run` | `pixi run policy-run` | `run_policy [--version V]` | enqueues `cpm.policy.run` at the newest recorded version |
+| `import-watchlist` | `pixi run import-watchlist` | `import_watchlist --replace` | **writes**: brings the `inventory` table into line with the reviewed file, one audited transaction per row; retires what the file no longer names |
 
 Locally the same commands run against the stack through `pixi run stack-run
 <command>`; deployed, the deployment repository schedules `pixi run <task>`. None
-of the three collects, computes or writes a ledger row in the caller: each calls
-the task's `.delay()` and whether that runs inline or on a worker is the settings
-module's decision (`CELERY_TASK_ALWAYS_EAGER`), never the command's.
+of the first three collects, computes or writes a ledger row in the caller: each
+calls the task's `.delay()` and whether that runs inline or on a worker is the
+settings module's decision (`CELERY_TASK_ALWAYS_EAGER`), never the command's.
+`import-watchlist` is the one that writes, and writes inline: an import is
+governed reference data changing, and `CPM-AD-14` puts that behind a reason and
+an audit row in the same transaction as each row -- which a task could not carry
+for an operator at a terminal. It runs unattended, so every audit row names the
+file as its origin in place of an actor; it parses through the same parser a
+file-sourced ingestion uses, so a malformed file is refused naming the line
+before any row is written; and `--replace` *retires* rows the file no longer
+names, never deletes them, and reactivates nothing -- a row a person retired on
+the page stays retired whatever the file says, and comes back only through the
+page. Run it once after a first deploy and whenever the reviewed file changes,
+then let `ingest` observe the difference. By hand,
+`pixi run stack-run import_watchlist [<path>] [--replace] [--reason TEXT]` takes a
+named file and imports a partial one without retiring anything.
 
 Three things to know before scheduling any of them:
 
@@ -1742,7 +1777,7 @@ pixi run stack-run run_policy --version 2026.09.3  # a named one
 ```
 
 Deployed, it is `pixi run policy-run` — one of
-[the three admin processes](#dispatching-by-hand-and-the-three-admin-processes).
+[the four admin processes](#dispatching-by-hand-and-the-four-admin-processes).
 The command validates the version against the parameter file first (an unrecorded
 one is refused, listing the recorded ones, and nothing is enqueued), calls the
 task's `.delay()` with it, and prints the task id; under a settings module that

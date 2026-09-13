@@ -53,6 +53,9 @@ from django.db import connection
 
 from conda_sentinel.core.roles import IDENTITY_OVERRIDE_CODENAME
 from conda_sentinel.core.roles import IDENTITY_OVERRIDE_PERMISSION
+from conda_sentinel.core.roles import INVENTORY_APP_LABEL
+from conda_sentinel.core.roles import INVENTORY_CHANGE_CODENAME
+from conda_sentinel.core.roles import INVENTORY_CHANGE_PERMISSION
 from conda_sentinel.core.roles import RoleContract
 from conda_sentinel.core.roles import role_group_permissions
 from config.authorization.exceptions import ClaimsRejected
@@ -72,6 +75,12 @@ MIGRATION_MODULE = "conda_sentinel.core.migrations.0001_provision_role_groups"
 # `CPM-IDENTITY-S05`'s grant. `tests/unit/django_apps/test_role_migration.py`
 # holds its shape; what is here is the half only a run can show.
 GRANT_MIGRATION_MODULE = "conda_sentinel.core.migrations.0005_grant_identity_override"
+
+#: `CPM-OPERATE-S03`'s grant, on `0005`'s terms: the second governed write.
+INVENTORY_GRANT_MIGRATION_MODULE = "conda_sentinel.core.migrations.0011_grant_inventory_change"
+
+#: What the leadership row holds after both grants have run.
+THE_LEADERSHIP_GRANTS = {IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION}
 
 # The leadership group the suite is configured with, bound once so the
 # unconfigured-contract case can still name the row after it has replaced the
@@ -204,8 +213,11 @@ def test_the_migration_provisions_the_three_role_groups() -> None:
 
 
 @pytest.mark.django_db
-def test_the_migration_grants_the_override_permission_to_leadership_and_to_nobody_else() -> None:
-    """AC #7: the rows after migration hold exactly the grant, and the other two hold none.
+def test_the_migrations_grant_the_two_governed_writes_to_leadership_and_to_nobody_else() -> None:
+    """AC #7: the rows after migration hold exactly the two grants, and the other two hold none.
+
+    Two since `CPM-OPERATE-S03`: `core/0005` attaches the identity override and
+    `core/0011` the inventory change, both to the leadership row.
 
     This case used to assert that every role group carried no permissions at all,
     which was true until `CPM-IDENTITY-S05` -- the first story with anything to
@@ -239,7 +251,7 @@ def test_the_migration_grants_the_override_permission_to_leadership_and_to_nobod
         for name in role_group_permissions(contract)
     }
 
-    assert held[contract.leadership] == {IDENTITY_OVERRIDE_PERMISSION}
+    assert held[contract.leadership] == THE_LEADERSHIP_GRANTS
     assert held[contract.security_reviewer] == set()
     assert held[contract.packaging_engineer] == set()
 
@@ -632,7 +644,11 @@ def test_the_grant_pass_converges_rather_than_duplicating() -> None:
     grant.forward(global_apps, _schema_editor())
     grant.forward(global_apps, _schema_editor())
 
-    assert [_label(permission) for permission in leadership.permissions.all()] == [IDENTITY_OVERRIDE_PERMISSION]
+    # Both grants, once each: `core/0011` attached the second when the test
+    # database was built, and re-running this pass adds nothing and removes
+    # nothing -- it provisions its own codename and no other.
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
+    assert leadership.permissions.count() == len(THE_LEADERSHIP_GRANTS)
 
 
 @pytest.mark.django_db
@@ -651,12 +667,14 @@ def test_the_grant_reverse_detaches_the_permission_and_leaves_the_group() -> Non
     grant = import_module(GRANT_MIGRATION_MODULE)
     grant.forward(global_apps, _schema_editor())
     leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
-    assert leadership.permissions.count() == 1
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
 
     grant.reverse(global_apps, _schema_editor())
 
     leadership.refresh_from_db()
-    assert list(leadership.permissions.all()) == []
+    # Its own grant and no other: the inventory permission `core/0011` attached
+    # is not this migration's to take away.
+    assert {_label(permission) for permission in leadership.permissions.all()} == {INVENTORY_CHANGE_PERMISSION}
     assert Group.objects.filter(name=settings.ROLE_CONTRACT.leadership).exists()
     assert Permission.objects.filter(codename=IDENTITY_OVERRIDE_CODENAME).exists()
 
@@ -685,7 +703,7 @@ def test_the_grant_reverse_leaves_a_group_the_role_contract_does_not_name(
 
     grant.reverse(global_apps, _schema_editor())
 
-    assert list(Group.objects.get(name=settings.ROLE_CONTRACT.leadership).permissions.all()) == []
+    assert permission not in Group.objects.get(name=settings.ROLE_CONTRACT.leadership).permissions.all()
     assert list(somebody_elses.permissions.all()) == [permission]
 
 
@@ -718,3 +736,117 @@ def test_the_grant_pass_provisions_nothing_on_an_unconfigured_contract(
     assert set(Group.objects.get(name=TEST_LEADERSHIP_GROUP).permissions.values_list("pk", flat=True)) == (
         leadership_before
     )
+
+
+# ---------------------------------------------------------------------------
+# `core/0011_grant_inventory_change`, run rather than only read (CPM-OPERATE-S03).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_the_granted_inventory_permission_is_the_one_the_service_actually_checks() -> None:
+    """The grant and the check are one string, proven against a real user and real rows.
+
+    On the override's terms: a person put in the leadership group by nothing but
+    a membership passes `has_perm` for the permission `collectors/inventory.py`
+    asks about, and the same person outside it does not. Re-read from the
+    database each time, because Django caches permissions on the instance.
+    """
+    user = UserFactory.create(username="a-leader", idp_subject=SUBJECT)
+
+    assert get_user_model().objects.get(pk=user.pk).has_perm(INVENTORY_CHANGE_PERMISSION) is False
+
+    user.groups.add(Group.objects.get(name=settings.ROLE_CONTRACT.leadership))
+
+    assert get_user_model().objects.get(pk=user.pk).has_perm(INVENTORY_CHANGE_PERMISSION) is True
+
+
+@pytest.mark.django_db
+def test_the_inventory_grant_pass_converges_rather_than_duplicating() -> None:
+    """`migrate` is re-run on every deployment, so the pass must be idempotent."""
+    grant = import_module(INVENTORY_GRANT_MIGRATION_MODULE)
+    leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
+
+    grant.forward(global_apps, _schema_editor())
+    grant.forward(global_apps, _schema_editor())
+
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
+    assert leadership.permissions.count() == len(THE_LEADERSHIP_GRANTS)
+
+
+@pytest.mark.django_db
+def test_the_inventory_grant_reverse_detaches_only_its_own_permission() -> None:
+    """The rollback path, executed: the inventory grant goes, the override grant and the group stay."""
+    grant = import_module(INVENTORY_GRANT_MIGRATION_MODULE)
+    grant.forward(global_apps, _schema_editor())
+    leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
+
+    grant.reverse(global_apps, _schema_editor())
+
+    leadership.refresh_from_db()
+    assert {_label(permission) for permission in leadership.permissions.all()} == {IDENTITY_OVERRIDE_PERMISSION}
+    assert Group.objects.filter(name=settings.ROLE_CONTRACT.leadership).exists()
+    assert Permission.objects.filter(
+        content_type__app_label=INVENTORY_APP_LABEL,
+        codename=INVENTORY_CHANGE_CODENAME,
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_the_inventory_grant_reverse_leaves_a_group_the_role_contract_does_not_name() -> None:
+    """The rollback revokes what this migration granted, and not what somebody else did."""
+    grant = import_module(INVENTORY_GRANT_MIGRATION_MODULE)
+    grant.forward(global_apps, _schema_editor())
+    permission = Permission.objects.get(content_type__app_label=INVENTORY_APP_LABEL, codename=INVENTORY_CHANGE_CODENAME)
+    somebody_elses = Group.objects.create(name=A_REVIEWER_GROUP)
+    somebody_elses.permissions.add(permission)
+
+    grant.reverse(global_apps, _schema_editor())
+
+    assert permission not in Group.objects.get(name=settings.ROLE_CONTRACT.leadership).permissions.all()
+    assert list(somebody_elses.permissions.all()) == [permission]
+
+
+@pytest.mark.django_db
+def test_the_inventory_grant_pass_provisions_nothing_on_an_unconfigured_contract(
+    settings: SettingsWrapper,
+) -> None:
+    """A fresh clone is migrated long before anyone has role groups to declare; the permission row is still created."""
+    grant = import_module(INVENTORY_GRANT_MIGRATION_MODULE)
+    settings.ROLE_CONTRACT = AN_UNCONFIGURED_CONTRACT
+    leadership_before = set(
+        Group.objects.get(name=TEST_LEADERSHIP_GROUP).permissions.values_list("pk", flat=True),
+    )
+
+    grant.forward(global_apps, _schema_editor())
+    grant.reverse(global_apps, _schema_editor())
+
+    assert Permission.objects.filter(
+        content_type__app_label=INVENTORY_APP_LABEL, codename=INVENTORY_CHANGE_CODENAME
+    ).exists()
+    assert set(Group.objects.get(name=TEST_LEADERSHIP_GROUP).permissions.values_list("pk", flat=True)) == (
+        leadership_before
+    )
+
+
+@pytest.mark.django_db
+def test_the_two_grants_converge_whichever_order_a_rollback_and_a_re_apply_happen_in() -> None:
+    """Unapply the second, re-run the first, re-apply the second: both held, once each.
+
+    The order `0011`'s docstring claims converges. Each grant provisions only its
+    own codename and removes nothing, so no sequence of the two leaves the
+    leadership row with more or fewer than the two.
+    """
+    first = import_module(GRANT_MIGRATION_MODULE)
+    second = import_module(INVENTORY_GRANT_MIGRATION_MODULE)
+    leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
+
+    second.reverse(global_apps, _schema_editor())
+    assert {_label(permission) for permission in leadership.permissions.all()} == {IDENTITY_OVERRIDE_PERMISSION}
+    first.forward(global_apps, _schema_editor())
+    assert {_label(permission) for permission in leadership.permissions.all()} == {IDENTITY_OVERRIDE_PERMISSION}
+    second.forward(global_apps, _schema_editor())
+
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
+    assert leadership.permissions.count() == len(THE_LEADERSHIP_GRANTS)

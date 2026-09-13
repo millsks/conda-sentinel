@@ -144,8 +144,11 @@ Downstream artifacts must use these terms exactly. "Identity" alone is never use
   in no other sense.
 - **Match confidence** — the separate, unrelated certainty that a vulnerability advisory
   applies to a given package and version. Never abbreviated to "confidence".
-- **Governed reference data** — package identity and its provenance. Mutated by exactly
-  one human path (CPM-FR-3) and otherwise only by resolution.
+- **Governed reference data** — package identity and its provenance, and the inventory
+  (which packages are watched, and their usage signals). Mutated by exactly two human
+  paths (CPM-FR-3: the identity override, and the inventory change), each carrying a
+  permission, a required reason and an audit row in the same transaction, and
+  otherwise only by resolution and by ingestion's reading of the inventory.
 - **Workflow state** — what a human decided about a finding or a queue item. Written by
   queue actions (CPM-FR-25); never alters evidence or governed reference data.
 - **Freshness target** — the per-collector age beyond which evidence is stale, not clean.
@@ -183,20 +186,32 @@ Every resolution records where it came from and how confident it is.
 - A resolution never overwrites a `verified` confidence with a lower one.
 - The timestamp of the resolution is recorded and exposed wherever the identity is shown.
 
-#### CPM-FR-3: Manual package-identity override
+#### CPM-FR-3: Manual package-identity override, and the inventory change
 
-A platform lead can correct a package identity from the application, on the record. This
-is the only human write that mutates **governed reference data**. Queue actions (CPM-FR-25)
-write **workflow state**, which is a separate class: it records what a human decided
-about a finding, and never alters the package identity or the evidence beneath it.
+A platform lead can correct a package identity from the application, on the record, and
+can add, change or retire an inventory row from the application, on the record. These
+are the **two** human writes that mutate **governed reference data** — package identity
+and the inventory — and each carries the same three obligations: a permission, a reason
+the actor must supply, and an audit row (actor, timestamp, prior value, new value,
+reason) written in the same transaction as the change. Queue actions (CPM-FR-25) write
+**workflow state**, which is a separate class: it records what a human decided about a
+finding, and never alters the package identity, the inventory or the evidence beneath
+them. A wrong identity is corrected through the override, never through the inventory.
+*(Amended by `sprint-change-proposal-2026-09-13.md` §7, CPM-OPERATE-S03.)*
 
 **Consequences (testable):**
-- The write requires the override permission; the other two roles are refused.
-- Every override records actor, timestamp, prior value, new value, and a reason the
-  actor must supply. The write is rejected without a reason.
+- Each write requires its permission (`identity.override_package_identity`,
+  `collectors.change_inventory`); the other two roles are refused.
+- Every override, and every inventory change, records actor, timestamp, prior value, new
+  value, and a reason the actor must supply. The write is rejected without a reason.
 - An override survives every subsequent automated collection and is downgraded only by
   an explicit re-resolution.
-- Overrides are queryable as a set, so an auditor can review every human correction.
+- Overrides, and inventory changes, are queryable as a set, so an auditor can review
+  every human correction.
+- Retiring an inventory row is a column write; the next ingestion records the package
+  absent (CPM-FR-42). No package row and no inventory row is ever deleted. An unattended
+  import from a reviewed file writes the same audit rows, naming the file in place of an
+  actor.
 
 #### CPM-FR-4: Package-identity review queue
 
@@ -955,6 +970,12 @@ by resolution in the same transaction, never by the collector (`CPM-AD-25`).
 | `policy_runs` | Policy version, run timestamp, evidence cut-off, status |
 | `identity_overrides` | Actor, timestamp, prior value, new value, reason (CPM-FR-3) |
 | `inventory_snapshots` | Source package key; `internal_component_count` and `internal_lob_count`, required; `apps`, `platforms`, `downloads`, `versions`, nullable; presence or absence; observation time (CPM-FR-42, Open Question 3b) |
+| `inventory_changes` | Actor or the file an unattended import read; timestamp; prior and new value of every changeable inventory field, including retired; reason (CPM-FR-3 as amended, CPM-OPERATE-S03) |
+
+`inventory` — one mutable row per source package key, carrying the eight watchlist
+columns, `retired_at`, `changed_at` and the last reason — is governed reference data
+rather than evidence: it is what ingestion reads (`CPM_INVENTORY_SOURCE=database`), and
+every change to it is recorded in `inventory_changes` in the same transaction.
 
 ### A.3 Derived statuses
 

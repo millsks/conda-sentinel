@@ -66,6 +66,7 @@ def forward(apps, schema_editor):
     from django.conf import settings
     from django.contrib.auth.management import create_permissions
 
+    from conda_sentinel.core.roles import IDENTITY_OVERRIDE_PERMISSION
     from conda_sentinel.core.roles import role_group_permissions
     from django_service.users.provisioning import provision_groups
 
@@ -89,8 +90,21 @@ def forward(apps, schema_editor):
         )
         return
 
+    # Narrowed to this migration's own codename since `CPM-OPERATE-S03` added a
+    # second grant to the contract (`core/0011_grant_inventory_change`). Each
+    # grant migration provisions the codename it is about and no other: on a
+    # fresh database this one runs before `collectors/0013_inventory` exists,
+    # and provisioning the whole contract here would log the inventory codename
+    # as unresolved on every first `migrate` -- a warning about nothing, from the
+    # one pass an operator reads most carefully. Applied databases are unaffected:
+    # a data migration that has already run is not re-run by editing it, and the
+    # rows it left hold exactly what this narrowing would have written.
+    own = {
+        name: tuple(code for code in codenames if code == IDENTITY_OVERRIDE_PERMISSION)
+        for name, codenames in role_group_permissions(contract).items()
+    }
     provision_groups(
-        role_group_permissions(contract),
+        own,
         apps,
         declared_by="role_contract",
         preserve_existing=True,

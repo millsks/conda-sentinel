@@ -203,10 +203,12 @@ def test_the_seeder_never_spells_the_verified_confidence() -> None:
 
 
 def test_the_seeder_calls_no_recorder_and_sets_no_confidence() -> None:
-    """Identity is written through two doors and the seeder opens only the first.
+    """Identity is written through two doors and the seeder opens neither itself.
 
-    `resolve_package_shell` creates the shell; `record_resolution` is the resolver's
-    to call, through `IdentityResolutionCollector.collect`. A seeder that called the
+    Since `CPM-OPERATE-S03` the seeder files no shell of its own: the product's
+    `InventoryIngestionCollector` creates every shell through `resolve_package_shell`,
+    and `record_resolution` is the resolver's to call, through
+    `IdentityResolutionCollector.collect`. A seeder that called the
     recorder itself would be back to asserting mappings, whatever it asserted -- and
     a `confidence=` handed to anything that writes is the seeder deciding what it
     may claim. A `confidence=` on a queryset *read* (`filter`, `exclude`) is the
@@ -222,8 +224,34 @@ def test_the_seeder_calls_no_recorder_and_sets_no_confidence() -> None:
 
     assert "record_resolution" not in called
     assert "confidence" not in keywords
-    assert "resolve_package_shell" in called
+    assert "resolve_package_shell" not in called, "the seeder is filing shells again; the ingestion collector does that"
+    assert "InventoryIngestionCollector" in called
+    assert "DatabaseInventoryAdapter" in called
     assert "IdentityResolutionCollector" in called
+    assert "import_watchlist" in called
+
+
+def test_the_seeder_never_keys_a_shell_under_the_pypi_scheme() -> None:
+    """The collision `CPM-OPERATE-S03` removed, kept out of the source.
+
+    The first seeder filed every shell under `pypi:<name>` beside an inventory
+    that files the same packages under `conda-forge/<name>`, so a seeded stack
+    could not ingest. The seeder now writes no key at all -- the watchlist's keys
+    are the ingestion's -- and the literal must not come back as anything a call
+    *writes*. It may appear in a queryset read: `_require_no_legacy_shells`
+    detects exactly those old shells so a stack seeded before this story is told
+    to reset rather than colliding.
+    """
+    tree = ast.parse(inspect.getsource(demo_data))
+    writes = [
+        (call, keyword)
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and _called_name(call) not in QUERYSET_READS
+        for keyword in call.keywords
+        if keyword.arg in {"source_package_key", "identity_source", "associator_key"}
+    ]
+
+    assert writes == [], [ast.unparse(call) for call, _keyword in writes]
 
 
 def _called_name(call: ast.Call) -> str:

@@ -51,8 +51,9 @@ pixi run local-stack
 That is the **real product**: Redis and PostgreSQL in containers, then gunicorn with
 the deployed worker class, a Celery worker draining all four queues, beat scheduling
 the sweeps, and flower watching it. `stack-seed` brings the containers up, migrates
-the database, puts a hundred packages and six personas in it and resolves every
-package's identity live against conda-forge and PyPI (so it needs the network);
+the database, imports the 148-row development watchlist into the inventory table,
+ingests it, puts six personas in and resolves every package's identity live against
+conda-forge and PyPI (so it needs the network);
 `local-stack` starts the four processes.
 
 !!! tip "Start with the whole stack, not just the web process"
@@ -92,7 +93,8 @@ system.
 
 ### 1.2 What you are looking at
 
-The hundred package *names* are a roster; almost nothing else on the screen is. The
+The package *names* come from the development watchlist, and a hundred of them carry
+a roster of evidence; almost nothing else on the screen is asserted. The
 advisory identifiers, severities and affected ranges are real, taken from OSV.dev,
 and the single KEV listing is a real CISA catalogue entry — look one up. Each
 package's repository, purls and feedstock were **observed at seed time** by the real
@@ -207,7 +209,7 @@ open.
 
 | Collector | Evidence table | Reads | Freshness target |
 |---|---|---|---|
-| `inventory` | `InventorySnapshot` | A reviewed CSV shipped in the wheel | 2 days |
+| `inventory` | `InventorySnapshot` | The governed `inventory` table (`CPM_INVENTORY_SOURCE=database`), or the reviewed CSV shipped in the wheel (`watchlist`, the default) | 2 days |
 | `source_release` | `SourceReleaseSnapshot` | `https://api.github.com/repos/…` | 2 days |
 | `pypi_release` | `PyPIReleaseSnapshot` | `https://pypi.org/pypi/…` | 2 days |
 | `feedstock` | `FeedstockSnapshot` | `https://api.github.com/repos/conda-forge/…` and `https://raw.githubusercontent.com/conda-forge/…` | 14 days |
@@ -226,7 +228,9 @@ decision for you. Until you declare them, the vulnerability and KEV columns read
 `unknown` for every package — honestly.
 
 The `inventory` collector is also unpopulated on purpose: `watchlist.csv` ships with
-a header and no rows, and ingestion **fails loudly** until you review packages in.
+a header and no rows, the `inventory` table starts empty, and ingestion **fails
+loudly** until you review packages in -- rows into the file and `import-watchlist`,
+or one at a time on the inventory page.
 
 Read [Operating Conda-Sentinel](operations.md) for the per-collector detail — what
 each one asks for, what it does when rate-limited, what its `User-Agent` says, and
@@ -334,9 +338,12 @@ queue pages are read-only today.
 
 ## Part 7 — Changing what is watched
 
-Adding or removing a package is a **pull request against a CSV**, not an admin action.
-[Managing the inventory](managing-the-inventory.md) covers it, including why removal
-does not delete anything and what "departed" means.
+The inventory is a **governed table** with two doors: a row on `/conda-sentinel/inventory/`
+as a leadership persona, with a reason and an audit row in the same transaction, or a
+reviewed CSV brought in by the `import-watchlist` admin process. Either way the next
+ingestion is what creates the package. [Managing the inventory](managing-the-inventory.md)
+covers it end to end, including why retiring a row deletes nothing and what an
+absence observation is.
 
 ---
 
@@ -352,7 +359,8 @@ failure looks like.
 | Is anything not being collected? | The **Coverage** screen |
 | Did last night's sweeps run? | Coverage, and the run ledger |
 | Nothing has swept yet and I do not want to wait a day | `pixi run stack-run dispatch_sweep --all` (deployed: `pixi run sweep`) |
-| The watchlist changed | `pixi run stack-run ingest_inventory` (deployed: `pixi run ingest`) |
+| A reviewed watchlist file changed | `pixi run stack-run import_watchlist [--replace]` (deployed: `pixi run import-watchlist`), then `ingest` |
+| The inventory changed | `pixi run stack-run ingest_inventory` (deployed: `pixi run ingest`) |
 | Evidence is in and nothing has computed a verdict | `pixi run stack-run run_policy` (deployed: `pixi run policy-run`) |
 | Is the queue backing up? | flower |
 | Why does this package say that? | The package detail page |
@@ -392,6 +400,6 @@ You are through the primer when you can do all of these without looking them up:
 - [ ] Name the four Celery queues and say why they are four and not one
 - [ ] Say which two tasks no schedule fires, and which commands fire them
 - [ ] Trace a person from an OIDC claim to being refused a queue
-- [ ] Add a package to the watchlist and say what happens on the next sweep
+- [ ] Add a package on the inventory page and say what happens on the next ingestion and the next sweep
 - [ ] Move a queue item from `open` to `resolved` and name every step
 - [ ] Explain to somebody else why an export must never disagree with the screen

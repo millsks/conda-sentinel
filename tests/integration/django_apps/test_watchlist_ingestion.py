@@ -337,7 +337,10 @@ def test_a_packages_canonical_name_is_the_rows_name_and_its_key_is_the_rows_key(
     ingest_inventory()
 
     assert not Package.objects.filter(canonical_name__startswith="conda-forge/").exists()
-    assert not Package.objects.exclude(associator_key__startswith="conda-forge/").exists()
+    # Every key names its origin as a prefix: `conda-forge/` for what conda-forge
+    # ships, `internal/` for the two names that are not packages at all
+    # (`CPM-OPERATE-S03` added those rows so the demo roster is a subset of the file).
+    assert not Package.objects.exclude(associator_key__contains="/").exists()
     for package in Package.objects.all():
         assert package.associator_key.rsplit("/", 1)[-1] == package.canonical_name
 

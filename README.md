@@ -84,13 +84,17 @@ pixi run local-stack-down  # after honcho died without Ctrl-C: free 8000 and 555
 pixi run stack-shell       # a Django shell against the stack, not the SQLite file
 pixi run stack-run <cmd>   # any management command against the stack
 
-# Operating it: the three admin processes a deployment schedules, each enqueueing
-# an existing task. Through stack-run they land on the stack's worker; through
-# bare `pixi run <task>` in the default local environment they run inline against
-# the SQLite file, because that environment makes every task eager.
-pixi run stack-run ingest_inventory     # re-read the watchlist   (deployed: pixi run ingest)
-pixi run stack-run dispatch_sweep --all # sweep every collector   (deployed: pixi run sweep)
-pixi run stack-run run_policy           # compute the verdicts    (deployed: pixi run policy-run)
+# Operating it: the four admin processes a deployment schedules. Three enqueue an
+# existing task -- through stack-run they land on the stack's worker; through bare
+# `pixi run <task>` in the default local environment they run inline against the
+# SQLite file, because that environment makes every task eager. The fourth writes:
+# it brings the governed inventory table into line with a reviewed watchlist file,
+# one audited transaction per row, and ingestion reads that table when
+# CPM_INVENTORY_SOURCE=database (the dev environment's declaration).
+pixi run stack-run import_watchlist     # the file into the table  (deployed: pixi run import-watchlist)
+pixi run stack-run ingest_inventory     # observe the inventory    (deployed: pixi run ingest)
+pixi run stack-run dispatch_sweep --all # sweep every collector    (deployed: pixi run sweep)
+pixi run stack-run run_policy           # compute the verdicts     (deployed: pixi run policy-run)
 ```
 
 `pixi run ci` is the gate, and it is the same sequence locally and in CI:

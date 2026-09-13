@@ -43,16 +43,32 @@ from typing import Final
 from typing import cast
 
 from django.conf import settings
+from django.contrib import messages
 from django.contrib.auth import REDIRECT_FIELD_NAME
+from django.core.exceptions import PermissionDenied
 from django.http import Http404
 from django.http import HttpResponse
+from django.http import HttpResponseRedirect
 from django.shortcuts import redirect
+from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.utils.translation import gettext as _
 from django.views import View
 from django.views.generic import DetailView
 from django.views.generic import ListView
 from django.views.generic import TemplateView
 
+from conda_sentinel.collectors.inventory import InventoryChangeError
+from conda_sentinel.collectors.inventory import InventoryEntryMissingError
+from conda_sentinel.collectors.inventory import InventoryNotPermittedError
+from conda_sentinel.collectors.inventory import add_entry
+from conda_sentinel.collectors.inventory import change_entry
+from conda_sentinel.collectors.inventory import retire_entry
+from conda_sentinel.collectors.models import INVENTORY_KEY_FIELD
+from conda_sentinel.collectors.models import INVENTORY_NAME_FIELD
+from conda_sentinel.collectors.models import INVENTORY_SIGNALS
+from conda_sentinel.collectors.models import InventoryChange
+from conda_sentinel.collectors.models import InventoryEntry
 from conda_sentinel.core.clock import SystemClock
 from conda_sentinel.core.jobs import JobState
 from conda_sentinel.core.jobs import request_job
@@ -61,6 +77,7 @@ from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.core.pagination import DEFAULT_PAGE_SIZE
 from conda_sentinel.core.permissions import PRODUCT_ROLES
 from conda_sentinel.core.permissions import RoleRequiredMixin
+from conda_sentinel.core.roles import LEADERSHIP
 from conda_sentinel.surface.coverage import collector_health
 from conda_sentinel.surface.coverage import coverage_of
 from conda_sentinel.surface.detail import identity_of
@@ -75,6 +92,20 @@ from conda_sentinel.surface.filters import FACETS
 from conda_sentinel.surface.filters import applied_filters
 from conda_sentinel.surface.health import COLUMNS
 from conda_sentinel.surface.health import health_rows
+from conda_sentinel.surface.inventory import ACTION_FIELD
+from conda_sentinel.surface.inventory import ACTIVE_ONLY_PARAM
+from conda_sentinel.surface.inventory import ADD
+from conda_sentinel.surface.inventory import CHANGE
+from conda_sentinel.surface.inventory import MAX_COUNT_DIGITS
+from conda_sentinel.surface.inventory import PREFIX_PARAM
+from conda_sentinel.surface.inventory import REASON_FIELD
+from conda_sentinel.surface.inventory import RETIRE
+from conda_sentinel.surface.inventory import SIGNAL_LABELS
+from conda_sentinel.surface.inventory import InventoryFormError
+from conda_sentinel.surface.inventory import InventoryPosting
+from conda_sentinel.surface.inventory import applied_inventory_filters
+from conda_sentinel.surface.inventory import changed_fields
+from conda_sentinel.surface.inventory import read_posting
 from conda_sentinel.surface.labels import queue_label
 from conda_sentinel.surface.labels import role_label
 from conda_sentinel.surface.listing import DEFAULT_ORDERING
@@ -94,6 +125,8 @@ from conda_sentinel.surface.theming import THEME_COOKIE
 from conda_sentinel.surface.theming import THEME_COOKIE_MAX_AGE
 from conda_sentinel.surface.theming import THEME_PARAMETER
 from conda_sentinel.surface.theming import THEMES
+from conda_sentinel.surface.tone import INVENTORY_ACTIVE
+from conda_sentinel.surface.tone import INVENTORY_RETIRED
 from conda_sentinel.workflow.states import QUEUE_OWNERS
 
 if TYPE_CHECKING:
@@ -105,7 +138,7 @@ if TYPE_CHECKING:
 #: Re-exported: both names were declared here before `surface/listing.py` existed,
 #: and templates and tests reach for them at this path. The definitions live beside
 #: the queryset that uses them, which is what stops the API growing a second one.
-__all__ = ["DEFAULT_ORDERING", "EXPORT_TOO_LARGE", "ORDERINGS", "SORT_PARAM", "PackageHealthView"]
+__all__ = ["DEFAULT_ORDERING", "EXPORT_TOO_LARGE", "ORDERINGS", "SORT_PARAM", "InventoryView", "PackageHealthView"]
 
 #: What a URL naming no declared queue is told.
 #:
@@ -115,6 +148,12 @@ UNKNOWN_QUEUE: Final[str] = "no queue is called {queue!r}. The queues are {known
 
 #: What a URL naming no declared report is told, on the same terms.
 UNKNOWN_REPORT: Final[str] = "no report is called {slug!r}. The reports are {known}."
+
+#: The query parameter that prefills the inventory page's form with one row.
+EDIT_PARAM: Final[str] = "key"
+
+#: How many recent audit rows the inventory page shows beneath the table.
+RECENT_CHANGES: Final[int] = 20
 
 #: How many rows a report *page* shows. The export is bounded separately, by
 #: `CPM_SYNC_EXPORT_MAX_ROWS` -- a page is what somebody reads on a screen and an
@@ -825,3 +864,252 @@ class ThemeView(View):
             # hand-made request can.
             response.delete_cookie(THEME_COOKIE)
         return response
+
+
+class InventoryView(RoleRequiredMixin, ListView):  # type: ignore[type-arg]
+    """The governed inventory table, and the three forms that change it (`CPM-OPERATE-S03`).
+
+    A minimal server-rendered page: the table's rows, an add-or-change form, a
+    retire form per row, and the newest audit rows beneath. **Leadership only, for
+    the whole page** -- the inventory is governed reference data, its changes are
+    the second governed human write `CPM-FR-3` names, and the read is scoped with
+    the write rather than offered to two roles that could then do nothing on it.
+
+    **`POST` delegates and redirects.** Every write is `collectors/inventory.py`'s:
+    the view reads the form, hands the values to the service and answers what the
+    service answered -- a refusal about *who* is a 403, a key naming nothing is a
+    404, every other refusal re-renders the page with the message and 400, and a
+    change that landed is a 303 back to the page (post/redirect/get, so a refresh
+    cannot repeat a write). The view opens no transaction and checks no
+    permission of its own: the mixin gates the role, the service gates the
+    permission, and neither is re-implemented here.
+
+    **No DRF endpoint.** `CPM-FR-27` gives v1 two writes and
+    `tests/unit/django_apps/test_api_contract_audit.py` pins them; this is an
+    HTML form and stays one.
+    """
+
+    required_roles: ClassVar[frozenset[str]] = frozenset({LEADERSHIP})
+    model = InventoryEntry
+    template_name = "conda_sentinel/inventory.html"
+    context_object_name = "entries"
+    paginate_by = DEFAULT_PAGE_SIZE
+
+    #: What a refused posting said, carried into the re-render. Blank on a `GET`.
+    refusal: str = ""
+
+    def get_queryset(self) -> QuerySet[InventoryEntry]:
+        """Return the entries the page's two filters select, in key order.
+
+        Returns:
+            The table narrowed by `?active=` and `?prefix=`, ordered as its
+            `Meta` declares.
+
+        """
+        return InventoryEntry.objects.filter(applied_inventory_filters(self.request.GET).condition())
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        """Return the rows, the form's vocabulary, the row being edited and the recent changes.
+
+        Args:
+            **kwargs: Django's context.
+
+        Returns:
+            The context.
+
+        """
+        context = super().get_context_data(**kwargs)
+        # A refused `add` or `change` is carried into the re-render, so a person
+        # does not retype a row over a message; a refused `retire` prefills
+        # nothing, because its form is the row's own.
+        posted = self.request.POST if self.request.method == "POST" else None
+        if posted is not None and posted.get(ACTION_FIELD, "").strip() not in (ADD, CHANGE):
+            posted = None
+        editing = self._editing(posted=posted)
+        form_values = _form_values(posted=posted, editing=editing)
+        filters = applied_inventory_filters(self.request.GET)
+        context.update(
+            action_field=ACTION_FIELD,
+            add_action=ADD,
+            change_action=CHANGE,
+            retire_action=RETIRE,
+            key_field=INVENTORY_KEY_FIELD,
+            name_field=INVENTORY_NAME_FIELD,
+            reason_field=REASON_FIELD,
+            edit_param=EDIT_PARAM,
+            signals=[(signal, SIGNAL_LABELS[signal]) for signal in INVENTORY_SIGNALS],
+            signal_fields=[(signal, SIGNAL_LABELS[signal], form_values[signal]) for signal in INVENTORY_SIGNALS],
+            editing=editing,
+            form_values=form_values,
+            refusal=self.refusal,
+            active_state=INVENTORY_ACTIVE,
+            retired_state=INVENTORY_RETIRED,
+            max_count_digits=MAX_COUNT_DIGITS,
+            active_only_param=ACTIVE_ONLY_PARAM,
+            prefix_param=PREFIX_PARAM,
+            filters=filters,
+            active_count=InventoryEntry.objects.filter(retired_at__isnull=True).count(),
+            retired_count=InventoryEntry.objects.filter(retired_at__isnull=False).count(),
+            recent_changes=[
+                (change, changed_fields(change))
+                for change in InventoryChange.objects.select_related("entry", "actor")[:RECENT_CHANGES]
+            ],
+        )
+        return context
+
+    def post(self, request: Any, *args: Any, **kwargs: Any) -> HttpResponse:
+        """Apply one form's posting through the service, and answer what it answered.
+
+        Args:
+            request: The request, carrying one of the three forms.
+            *args: Django's positional URL arguments.
+            **kwargs: Django's keyword URL arguments.
+
+        Returns:
+            A 303 back to the page when the change landed; the page with the
+            refusal and 400 when the service or the form refused.
+
+        Raises:
+            PermissionDenied: When the service refused the actor. The mixin has
+                already admitted the role, so this is a leadership group that
+                does not hold the permission -- a provisioning fault, answered
+                as the 403 it is rather than as a bad form.
+            Http404: When the key names no row.
+
+        """
+        try:
+            posting = read_posting(request.POST)
+        except InventoryFormError as unreadable:
+            return self._refused(request, str(unreadable), *args, **kwargs)
+        try:
+            landed = _apply_posting(posting, actor=cast("User", request.user))
+        except InventoryNotPermittedError as forbidden:
+            raise PermissionDenied(str(forbidden)) from forbidden
+        except InventoryEntryMissingError as missing:
+            raise Http404(str(missing)) from missing
+        except InventoryChangeError as refused:
+            return self._refused(request, str(refused), *args, **kwargs)
+        messages.success(request, landed)
+        # 303, so a refresh of the page does not re-post the form and write twice.
+        return HttpResponseRedirect(reverse("conda_sentinel:inventory"), status=HTTPStatus.SEE_OTHER)
+
+    def _refused(self, request: Any, refusal: str, *args: Any, **kwargs: Any) -> HttpResponse:
+        """Re-render the page carrying a refusal, as a 400.
+
+        Args:
+            request: The request.
+            refusal: What was refused, in the service's or the form's words.
+            *args: Django's positional URL arguments.
+            **kwargs: Django's keyword URL arguments.
+
+        Returns:
+            The page, status 400.
+
+        """
+        self.refusal = refusal
+        response = self.get(request, *args, **kwargs)
+        response.status_code = HTTPStatus.BAD_REQUEST
+        return response
+
+    def _editing(self, *, posted: Any) -> InventoryEntry | None:
+        """Return the row the page's form is about, if any.
+
+        A refused `change` re-renders as the change form for the row it was
+        about -- the form's action carries no `?key=`, so the key comes off the
+        posting -- and otherwise `?key=` says which row to prefill.
+
+        Args:
+            posted: A refused `add` or `change` posting, or `None`.
+
+        Returns:
+            The entry, or `None` when nothing names one -- a stale link prefills
+            nothing rather than 404ing a page that is mostly a table.
+
+        """
+        key = ""
+        if posted is not None and posted.get(ACTION_FIELD, "").strip() == CHANGE:
+            key = posted.get(INVENTORY_KEY_FIELD, "").strip()
+        if not key:
+            key = self.request.GET.get(EDIT_PARAM, "").strip()
+        if not key:
+            return None
+        return InventoryEntry.objects.filter(source_package_key=key).first()
+
+
+def _form_values(*, posted: Any, editing: InventoryEntry | None) -> dict[str, str]:
+    """Return what the add-or-change form should show in each field.
+
+    Args:
+        posted: The refused posting, or `None`.
+        editing: The row being edited, or `None`.
+
+    Returns:
+        Field name to text, blank where nothing is known.
+
+    """
+    fields = (INVENTORY_KEY_FIELD, INVENTORY_NAME_FIELD, *INVENTORY_SIGNALS, REASON_FIELD)
+    if posted is not None:
+        return {field: str(posted.get(field, "")) for field in fields}
+    if editing is not None:
+        values = {field: _blank_for_none(getattr(editing, field)) for field in fields if field != REASON_FIELD}
+        values[REASON_FIELD] = ""
+        return values
+    return dict.fromkeys(fields, "")
+
+
+def _blank_for_none(value: object) -> str:
+    """Return a stored value as form text: NULL as blank, never as `None`.
+
+    Args:
+        value: The column's value.
+
+    Returns:
+        Its text, or blank for NULL.
+
+    """
+    return "" if value is None else str(value)
+
+
+def _apply_posting(posting: InventoryPosting, *, actor: User) -> str:
+    """Hand one posting to the service door it names, and say what landed.
+
+    Args:
+        posting: The form's posting, read.
+        actor: The signed-in user.
+
+    Returns:
+        A sentence for the page, naming the key.
+
+    Raises:
+        InventoryChangeError: Whatever the service refused, unchanged.
+
+    """
+    clock = SystemClock()
+    if posting.action == RETIRE:
+        retire_entry(source_package_key=posting.source_package_key, actor=actor, reason=posting.reason, clock=clock)
+        return _("Retired %(key)s. The next ingestion records it absent.") % {"key": posting.source_package_key}
+    if posting.row is None:
+        # Unreachable by construction -- `read_posting` builds a row for both
+        # -- and refused rather than asserted so a defect there cannot surface
+        # as an `AssertionError` out of a page.
+        message = (
+            f"the inventory page posted {posting.action!r} without a row, which is a defect in surface/inventory.py."
+        )
+        raise InventoryChangeError(message)
+    if posting.action == ADD:
+        add_entry(
+            source_package_key=posting.source_package_key,
+            row=posting.row,
+            actor=actor,
+            reason=posting.reason,
+            clock=clock,
+        )
+        return _("Added %(key)s. The next ingestion creates its package.") % {"key": posting.source_package_key}
+    change_entry(
+        source_package_key=posting.source_package_key,
+        row=posting.row,
+        actor=actor,
+        reason=posting.reason,
+        clock=clock,
+    )
+    return _("Changed %(key)s.") % {"key": posting.source_package_key}
