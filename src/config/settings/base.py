@@ -417,6 +417,31 @@ CPM_INVENTORY_SOURCE = env.str("CPM_INVENTORY_SOURCE", default=DEFAULT_INVENTORY
 # The name is collectors/sweep.py's SWEEP_ON_BEAT_START_SETTING;
 # tests/unit/test_settings.py pins the default in every module.
 CPM_SWEEP_ON_BEAT_START = env.bool("CPM_SWEEP_ON_BEAT_START", default=False)
+# The GitHub credential the two GitHub-reading collectors send
+# (CPM-OPERATE-S05). Empty by default, and empty means what it says: both
+# collectors read GitHub unauthenticated at its sixty-an-hour and ten-a-minute
+# allowances, which cannot sweep CPM-NFR-1's ten thousand packages inside the
+# upstream-release collector's two-day target. With a token -- a fine-grained
+# personal access token with no permissions selected, or a GitHub App
+# installation token -- each collector sends it as `Authorization: Bearer` to
+# https://api.github.com and to no other host, and declares GitHub's
+# authenticated allowances instead (collectors/github.py). It is read from the
+# environment: the shell that started the process, a deployment's secret, or
+# the gitignored `.env` this module reads when DJANGO_READ_DOT_ENV_FILE is on.
+# Never from pixi.toml, compose.yaml, the Dockerfile or a workflow --
+# tests/unit/test_settings.py scans all of them. Read once, here, at settings
+# import: a token rotated in the environment reaches a worker when the worker
+# restarts. Stripped, so a trailing newline from a ConfigMap is not sent as
+# part of the header. A malformed value -- no GitHub token prefix, a line
+# break, embedded whitespace, non-ASCII, or wider than a token can be -- is
+# refused at boot by CollectorsConfig.ready(), naming this setting and never
+# the value; the value reaches no log line, ledger row, evidence row or
+# exception message on any path, and the JSON log renderer prints no frame
+# locals for the same reason. The name is collectors/github.py's
+# GITHUB_TOKEN_SETTING; tests/unit/test_settings.py pins the empty default in
+# every module, and config/settings/test.py empties it unconditionally so a
+# developer's export never enters the suite.
+CPM_GITHUB_TOKEN = env.str("CPM_GITHUB_TOKEN", default="").strip()
 # The conda channels and platforms the published-package collector observes
 # (CPM-FR-10, CPM-CURRENCY-S04). Both ship EMPTY, and that is the decision rather
 # than an omission.

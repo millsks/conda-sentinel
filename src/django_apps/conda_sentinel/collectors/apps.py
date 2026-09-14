@@ -208,7 +208,10 @@ class CollectorsConfig(AppConfig):
                 setting is missing or what declares it. Also when a registered
                 collector declares no usable freshness target (`CPM-AD-28`), or
                 when the registered collectors and `CELERY_BEAT_SCHEDULE`
-                disagree about a cadence (`CPM-AD-20`).
+                disagree about a cadence (`CPM-AD-20`). And when `CPM_GITHUB_TOKEN`
+                is undeclared or malformed (`CPM-OPERATE-S05`): the refusal names
+                the setting and never the value, because a boot failure is
+                written to whatever collects a crashed container's logs.
 
         """
         # Imported here rather than at module scope: `AppConfig` classes are
@@ -223,6 +226,8 @@ class CollectorsConfig(AppConfig):
         from conda_sentinel.collectors.conda_package import CondaPackageCollector  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.conda_package import declaration_fault  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.feedstock import FeedstockCollector  # noqa: PLC0415 - see above
+        from conda_sentinel.collectors.github import GITHUB_TOKEN_SETTING  # noqa: PLC0415 - see above
+        from conda_sentinel.collectors.github import token_fault  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.kev import KevCollector  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.license import LicenseCollector  # noqa: PLC0415 - see above
         from conda_sentinel.collectors.py314_verification import Py314VerificationCollector  # noqa: PLC0415
@@ -286,6 +291,27 @@ class CollectorsConfig(AppConfig):
             unusable = declaration_fault(declared, setting=monitored_setting)
             if unusable:
                 raise ImproperlyConfigured(unusable)
+
+        # The GitHub credential, on the same three-part posture: absent from the
+        # settings module is a dropped assignment and refused by name; empty is
+        # the shipped state and boots, reading GitHub unauthenticated; a value
+        # that can never become a header -- a line break, embedded whitespace,
+        # non-ASCII, wider than a token can be -- is refused here rather than
+        # sent on every request. `token_fault` is the collectors' own rule, so
+        # boot and construction cannot come to disagree, and its sentences never
+        # carry the value (CPM-OPERATE-S05).
+        declared_token = getattr(settings, GITHUB_TOKEN_SETTING, None)
+        if declared_token is None:
+            message = (
+                f"{GITHUB_TOKEN_SETTING} is not configured, so this component cannot tell whether the two "
+                f"GitHub-reading collectors send a credential. config/settings/base.py assigns it -- empty by "
+                f"default, which reads GitHub unauthenticated -- and a settings module with no assignment at all "
+                f"is one that dropped the line (CPM-OPERATE-S05)."
+            )
+            raise ImproperlyConfigured(message)
+        unusable_token = token_fault(declared_token)
+        if unusable_token:
+            raise ImproperlyConfigured(unusable_token)
 
         _declare_inventory_source(settings)
 

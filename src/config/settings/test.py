@@ -127,6 +127,19 @@ CELERY_TASK_ALWAYS_EAGER = True
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html#task-eager-propagates
 CELERY_TASK_EAGER_PROPAGATES = True
 
+# GITHUB CREDENTIAL
+# ------------------------------------------------------------------------------
+# Emptied, whatever the developer's shell holds (CPM-OPERATE-S05). base.py reads
+# CPM_GITHUB_TOKEN from the environment, and a developer who exported a real
+# token for the local stack would otherwise run the suite with it: every
+# collector constructed outside `override_settings` would carry it in its
+# instance headers, and a failing assertion that printed `sent_headers` would
+# print the credential into a terminal, a CI log or a pasted bug report. The
+# cases that need a token declare `tests.collectors.A_GITHUB_TOKEN` through
+# `override_settings`; tests/unit/test_settings.py pins that this module reads
+# empty even with the variable exported.
+CPM_GITHUB_TOKEN = ""
+
 # EMAIL
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#email-backend

@@ -98,34 +98,91 @@ had a choice, and moving it would silently rewrite the identity every dashboard
 and alert is keyed on, with no equivalent note to catch it. A story that wants the
 trace identity renamed owns that migration.
 
-## The upstream-release collector reads GitHub unauthenticated
+## The upstream-release collector reads GitHub, with or without a credential
 
 `cpm.collect.source_release` observes a package's own source repository
-(`CPM-FR-7`) by asking GitHub's API for one page of its releases. It sends **no
-credential**, and its declared allowance says so: sixty requests an hour, which
-is GitHub's documented limit for unauthenticated requests, counted per source IP
-rather than per component.
+(`CPM-FR-7`) by asking GitHub's API for one page of its releases. Whether it
+sends a credential is one setting, `CPM_GITHUB_TOKEN`
+([the settings table](#dispatching-by-hand-and-the-four-admin-processes)), and
+the setting decides the allowance too, because the number and the credential are
+one decision (`CPM-OPERATE-S05`).
 
-Two consequences to plan for.
+**Without a token** it sends **no credential**, and its declared allowance says
+so: sixty requests an hour, which is GitHub's documented limit for unauthenticated
+requests, counted per source IP rather than per component.
 
-**The allowance is spent in requests, not collections.** The collector base
-charges `1 + retries` against the allowance before each call, because that is how
-many requests the mounted retry policy may issue — so sixty an hour is fifteen
-packages an hour on the declared retry count. That is enough to observe a small
-inventory and is **not** enough to sweep the ten thousand packages `CPM-NFR-1`
-sizes for. **The full-inventory sweep below now schedules it daily**, so the
-arithmetic is live rather than latent: a sweep of an inventory this allowance
-cannot drain records `skipped` dispatch rows and `error` collection rows rather
-than exceeding GitHub's budget. Raising it means authenticating, which is recorded
-as deferred work.
+**With a token** it sends `Authorization: Bearer <token>` to
+`https://api.github.com` and declares its share of GitHub's authenticated *core*
+allowance instead. That pool is five thousand requests an hour per token, and
+**both** GitHub-reading collectors draw on it: every feedstock collection makes at
+most one core call, and its own counter permits at most thirty collections a
+minute, so in one hour it can spend at most 1,800 core requests. This collector
+therefore declares the pool less that worst case — **3,200 an hour** — so the two
+local counters can never sum past the one pool a token has. The arithmetic is
+written beside the constant in `collectors/github.py`.
+
+**The allowance is spent in requests, not collections**, and that is what turns
+either number into a sweep time. The collector base charges `1 + retries` against
+the allowance before each call, because that is how many requests the mounted
+retry policy may issue — four per collection on the declared retry count. So:
+
+| | Allowance | Collections an hour | `CPM-NFR-1`'s 10,000 packages | Against the 2-day freshness target |
+|---|---|---|---|---|
+| without a token | 60 / hour | 15 | about 28 days | cannot be swept inside it |
+| with a token | 3,200 / hour | 800 | about 12.5 hours | swept with the day to spare |
+
+**The full-inventory sweep below schedules this collector daily**, so the
+arithmetic is live rather than latent. Without a token, a sweep of an inventory
+the allowance cannot drain records `skipped` dispatch rows and `error` collection
+rows rather than exceeding GitHub's budget, and every package past the fifteenth
+in an hour reads stale a day later. Declaring the token is what closes that; it is
+the only thing that does.
+
+**Whose pool it is.** A user's personal access tokens — every one of them,
+classic or fine-grained — share one five-thousand pool per account, so a second
+component minting its own PAT from the same account halves what this one gets. A
+GitHub App installation token has a pool of its own per installation, which is
+the reason to prefer one where the deployment already runs an App.
 
 **A repository that publishes no releases costs a second call.** `CPM-FR-7` asks
 for the latest release *or tag*, and many projects tag without ever publishing a
 GitHub Release — so an empty release list falls back to the repository's tags. The
 fallback fires only then, and it is **not** charged against the local allowance:
 the base charges `1 + retries` once, before the first call, so a repository on the
-tag path spends more of the *remote* budget than the local counter believes. That
-matters only at sweep volume, which nothing reaches yet.
+tag path spends more of the *remote* budget than the local counter believes. With
+a token that gap is the same shape and a smaller share — the tags call is the API
+host, so it carries the credential and is counted by GitHub against the same
+five-thousand pool — and at sweep volume it is the reason to read the table above
+as a floor rather than a promise.
+
+**The credential reaches exactly one host and appears nowhere else.** It is sent
+to `api.github.com` and to no other host. It is never written to a log line, a
+ledger row, an evidence row or a run's `detail`, on any path — the test suite
+greps every one of those for the token and for its first eight characters, on the
+success, refused, forbidden, absent and unreachable paths of both GitHub-reading
+collectors. A token that GitHub refuses is a `failed` run whose `detail` begins
+`the declared credential was refused by api.github.com`, naming the host and
+nothing about the header; it is never retried, because a `401` answers identically
+however many times it is asked. A malformed value — no GitHub token prefix, a line
+break, whitespace inside it, a non-ASCII character, or something wider than any
+token — refuses the component at boot, naming the setting and never the value.
+
+**A refused credential is remembered for the rest of the allowance window, and
+that is the blast radius of a wrong token.** Without it, a daily sweep against a
+refused credential would write up to ten thousand `failed` runs at the
+authenticated rate. Instead the first `401` in a window is remembered in the
+cache under the collector's name, and every later collection in that window
+fails fast — no allowance charged, no call made — with a `detail` saying the
+credential was refused earlier this window and naming the instant the window
+turns, when it is tried once more. The memo lives exactly as long as the window
+(the collector's `rate_limit.per`, an hour here and a minute for `feedstock`), so
+a corrected token is picked up at the next window without anything to clear. The
+fail-fast runs are `failed` with an `error` row each, logged under
+`collection.credential_refused_this_window` rather than `collection.failed`, so
+the ledger still shows every package the sweep could not observe and the log
+shows one cause. What a wrong token costs, then, is one refused call per window
+per collector — plus the restart after you fix it, because the setting is read
+once per process.
 
 **A spent allowance is recorded, never queued.** The call is refused rather than
 waited on — a worker blocked on a limiter holds a slot doing nothing against the
@@ -142,23 +199,27 @@ refusal names the allowance and the window it was spent in; a transport failure
 carries the exception's type and message; a document that could not be read names
 the locator and what was wrong with it.
 
-One thing the local counter cannot currently see: GitHub signals an exhausted
-anonymous quota with a `403`, which this product's transport reads as an ordinary
+One thing the local counter cannot see, with or without a token: GitHub signals an
+exhausted quota with a `403`, which this product's transport reads as an ordinary
 failure. So a remote refusal produces an `error` row that looks like any other,
-and the local allowance keeps granting until its own window turns over.
+and the local allowance keeps granting until its own window turns over. The local
+counter also keys its window on the collector's name, not on the allowance: a
+restart with a new token — the setting is read once per process, so a rotation
+*is* a restart — judges the rest of the current window under the new allowance,
+which is documented here rather than changed, because the window turns over
+inside the hour either way.
 
-**A `not_found` row means "absent **or** unreadable" while no credential is
-configured.** GitHub answers `404` identically for a repository that is absent,
-one that is private, one that has moved and one that is blocked — by design, so an
-unauthenticated reader cannot enumerate private repositories. This collector
-cannot tell them apart, so it records `not_found` (which is what the source said)
-and writes the caveat into the row's `detail`. Do not read these rows as proof a
-repository is gone; a private mirror or a moved upstream produces the same row.
-
-Raising the real allowance, and resolving that ambiguity, both mean authenticating
-— which needs a credential, a setting to carry it and a declared header to send it
-in. None of the three exists yet; when they do, the allowance declaration moves
-with them, because the number and the credential are one decision.
+**A `not_found` row means "absent **or** unreadable".** GitHub answers `404`
+identically for a repository that is absent, one that is private, one that has
+moved and one that is blocked — by design, so an unauthenticated reader cannot
+enumerate private repositories. This collector cannot tell them apart, so it
+records `not_found` (which is what the source said) and writes the caveat into
+the row's `detail`. A token with the recommended no-permission shape reads exactly
+what an anonymous caller reads, so it changes nothing here; only a token granted
+broader access than recommended changes which private repositories stop answering
+`404` — and even then it changes nothing about what the row says, because a `404`
+still says nothing about *why*. Do not read these rows as proof a repository is
+gone; a private mirror or a moved upstream produces the same row.
 
 ## The PyPI collector reads pypi.org unauthenticated, and asks only about Python packages
 
@@ -214,24 +275,38 @@ projects for an unauthenticated reader to be shut out of, so a `404` is a projec
 that does not exist or has never released — unlike the GitHub collector above,
 this row carries no caveat.
 
-## The feedstock collector reads conda-forge unauthenticated, and asks one of two questions
+## The feedstock collector reads conda-forge, with or without a credential, and asks one of two questions
 
 `cpm.collect.feedstock` observes whether conda-forge has a feedstock for a
-package (`CPM-FR-9`). It sends **no credential**, and its declared allowance is
-**ten requests a minute**.
+package (`CPM-FR-9`). It reads the same setting the upstream-release collector
+does, `CPM_GITHUB_TOKEN`, and the same rule applies: the credential and the
+allowance are one decision (`CPM-OPERATE-S05`). Without a token it sends **no
+credential** and declares **ten requests a minute**; with one it sends the bearer
+to `api.github.com` and declares **thirty a minute**.
 
-**The declared allowance is GitHub's *search* allowance, and that is deliberate.**
-One of the two questions this collector asks is a search of the staged-recipes
-queue (`GET /search/issues`), which GitHub limits to ten a minute for an
-unauthenticated caller — far below the sixty an hour its core API allows, but
-counted per minute rather than per hour. The collector base charges one allowance
-before it knows which question a package will produce, so a single number has to
-cover both, and the tighter of the two is the only one that cannot be exceeded by
-accident. At `1 + retries` per collection that is two packages a minute, which is
-**not** a rate that sweeps `CPM-NFR-1`'s ten thousand packages. **The
-full-inventory sweep below now schedules it weekly**, so the arithmetic is live:
-expect `skipped` dispatch rows and `error` collection rows at that scale rather
-than a sweep that quietly exceeds GitHub's search budget.
+**The declared allowance is GitHub's *search* allowance either way, and that is
+deliberate.** One of the two questions this collector asks is a search of the
+staged-recipes queue (`GET /search/issues`), which GitHub limits to ten a minute
+for an unauthenticated caller and thirty a minute for an authenticated one — far
+below its core API's numbers, and counted per minute rather than per hour. The
+collector base charges one allowance before it knows which question a package
+will produce, so a single number has to cover both, and the tighter of the two is
+the only one that cannot be exceeded by accident. At `1 + retries` per collection:
+
+| | Allowance | Collections an hour | `CPM-NFR-1`'s 10,000 packages | Against the 14-day freshness target |
+|---|---|---|---|---|
+| without a token | 10 / minute | 150 | about 67 hours | swept inside it, with days to spare |
+| with a token | 30 / minute | 450 | about 22 hours | swept inside a day |
+
+**The full-inventory sweep below schedules this collector weekly**, so the
+arithmetic is live. Three days against a fourteen-day target is slow, not short:
+what a token buys here is a sweep that finishes inside a day rather than one that
+finishes at all. Where the unauthenticated rate genuinely falls short is the
+*upstream-release* collector above, whose daily cadence and two-day target the
+same inventory overruns fourteen times over. With a token, a refused credential
+is remembered for the rest of the minute-long window exactly as the
+upstream-release collector remembers it for the hour, so a wrong token costs this
+collector one refused call a minute rather than one per package.
 
 **Which question is asked is read from the package's identity, before any call is
 made.**
@@ -251,11 +326,15 @@ made.**
 **The second call on each branch is not charged against the local allowance.** The
 base charges `1 + retries` once, before the first call, so every package spends
 more of the *remote* budget than the local counter believes — the same gap the
-upstream-release collector's tag fallback has, and it matters only at sweep
-volume, which nothing reaches yet. The second call is also outside the retry
-policy: a failure of it is recorded in the row's `detail` and never fails the
-collection, because the first call has already established the fact the row's
-`state` claims.
+upstream-release collector's tag fallback has. It is a smaller gap than it looks
+with a token, and the reason is worth knowing: GitHub keeps its *core* and
+*search* allowances as separate pools, so the absent branch's search is counted
+against one pool and its conventional-repository read against the other, while
+the local counter charges both to the search number. The mapped branch's recipe
+read is on `raw.githubusercontent.com`, which is counted against neither and is
+sent no credential. The second call is also outside the retry policy: a failure
+of it is recorded in the row's `detail` and never fails the collection, because
+the first call has already established the fact the row's `state` claims.
 
 **A `not_found` row does not prove the same thing on both branches, and it does
 not always prove absence at all — the row's `detail` is what says which.** On the
@@ -298,19 +377,25 @@ names how many there were. Nothing about the others is recorded, and a reader
 must not treat one row as covering a package's whole feedstock mapping.
 
 **The local counter cannot see a remote refusal, and there are two of them here.**
-GitHub signals an exhausted anonymous quota with a `403`, and its search endpoint
-applies a *secondary* rate limit that also arrives as a `403`; this product's
-transport reads both as ordinary failures. So a remote refusal produces an `error`
-row that looks like any other, and the local allowance keeps granting until its own
-window turns over. The search endpoint is the one to watch: its limit is the
-tightest thing this collector touches, and the secondary limit fires on burst
-rather than on rate.
+GitHub signals an exhausted quota with a `403`, and its search endpoint applies a
+*secondary* rate limit that also arrives as a `403`; this product's transport
+reads both as ordinary failures, with or without a token. So a remote refusal
+produces an `error` row that looks like any other, and the local allowance keeps
+granting until its own window turns over. The search endpoint is the one to
+watch: its limit is the tightest thing this collector touches, and the secondary
+limit fires on burst rather than on rate. A `401` is different and is told apart:
+a token GitHub refuses is a `failed` run whose `detail` begins `the declared
+credential was refused by api.github.com`, and the token itself reaches no row,
+log line or `detail` on any path.
 
-**Egress must be open to two hosts.** `api.github.com` for the repository and the
-staged-recipes search, and `raw.githubusercontent.com` for the recipe. A network
-policy that allowed only the first would leave every determinate row carrying a
-blank `recipe_version` with "the recipe's version could not be read" in `detail` --
-a quiet, permanent degradation rather than a failure anything reports.
+**Egress must be open to two hosts, and the credential goes to one of them.**
+`api.github.com` for the repository and the staged-recipes search, and
+`raw.githubusercontent.com` for the recipe. The bearer header is sent to the
+first and stripped for the second, because the raw host neither needs it nor
+counts against the allowance it buys. A network policy that allowed only the
+first would leave every determinate row carrying a blank `recipe_version` with
+"the recipe's version could not be read" in `detail` -- a quiet, permanent
+degradation rather than a failure anything reports.
 
 **A determinate row found on the absent branch carries no recipe facts.** When
 resolution established no feedstock and the conventional repository turns out to
@@ -1296,14 +1381,41 @@ monitoring everywhere else.
 
 Beat's interval entries start their clock when they are created, so a fresh
 component sweeps nothing for a day and its weekly surfaces for a week — unless
-you tell beat to enqueue its first tick the moment it starts. Two settings
-govern what a sweep reads and when the first one fires; the second is
-`CPM-OPERATE-S04`'s:
+you tell beat to enqueue its first tick the moment it starts. Three settings
+govern what a sweep reads, when the first one fires, and how fast the two
+GitHub-reading collectors may go; the second is `CPM-OPERATE-S04`'s and the
+third `CPM-OPERATE-S05`'s:
 
 | Setting | Default | Declared where | Does |
 |---|---|---|---|
 | `CPM_INVENTORY_SOURCE` | `watchlist` | the `dev` pixi environment declares `database` | which inventory an ingestion reads — [above](#the-inventory-is-a-governed-table-and-it-ships-empty) |
 | `CPM_SWEEP_ON_BEAT_START` | off | the `dev` pixi environment declares `1`; nothing production-bound does | beat enqueues its first tick the moment it starts — [what fires at start](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run) |
+| `CPM_GITHUB_TOKEN` | empty | **your shell, the gitignored `.env`, or your deployment's secret store — never a checked-in file**: no pixi table, task `env`, compose service, `Dockerfile` or workflow carries it, and the suite scans all of them | the credential `source_release` and `feedstock` send to `https://api.github.com`, and with it GitHub's authenticated allowances — [the arithmetic](#the-upstream-release-collector-reads-github-with-or-without-a-credential) |
+
+`CPM_GITHUB_TOKEN` wants a credential with **no permissions selected**: every
+endpoint the two collectors read is public, and the token exists to be counted,
+not to be allowed anything. Two shapes work. A **fine-grained personal access
+token** — GitHub settings, *Developer settings*, *Personal access tokens*,
+*Fine-grained tokens*, *Generate new token* — with *Public repositories*
+(read-only) as its repository access and no account or repository *permissions*
+selected (fine-grained tokens have permissions, not the classic tokens' scopes);
+give it an expiry and put the renewal in your calendar, and remember that every
+PAT on the account shares the account's one five-thousand pool. Or a **GitHub App
+installation token**, if the deployment already runs an App: every App carries
+`metadata: read` and needs nothing more, the token is minted for an
+*installation* — so the App has to be installed on some account or organisation
+before one can be issued — it has a pool of its own, and it expires after an
+hour, so that route needs something re-minting it into the environment. Locally,
+export it in the shell that starts the stack or keep it in the gitignored `.env`
+(read when `DJANGO_READ_DOT_ENV_FILE` is on); deployed, mount it as a secret
+into the worker's environment. It is read **once per process**, at settings
+import, stripped — so a rotated token reaches a worker when the worker restarts —
+and sent as `Authorization: Bearer` to `https://api.github.com` only; never
+written to a log line, ledger row, evidence row or `detail`, and the JSON log
+renderer prints no frame locals for the same reason; a value GitHub refuses is a
+`failed` run that names the host and nothing else, remembered for the rest of the
+window; and a malformed value — anything without a GitHub token prefix included —
+refuses the component at boot naming the setting and never the value.
 
 With `CPM_SWEEP_ON_BEAT_START` on, a receiver on Celery's `beat_init` signal
 enqueues one `cpm.collect.sweep` per `CELERY_BEAT_SCHEDULE` entry, in the
@@ -1579,9 +1691,11 @@ fresher one.
 nothing.** Without that, a sweep that cannot be drained inside its cadence would
 enqueue a second whole inventory behind the first on every tick and the queue
 would grow without bound. If you see `skipped` dispatch rows accumulating, the
-collector is not keeping up with its cadence: lengthen the cadence, or raise the
-allowance (which means authenticating — see the deferred work on
-`CPM-CURRENCY-S01` and `CPM-CURRENCY-S03`).
+collector is not keeping up with its cadence: lengthen the cadence, or — for the
+two GitHub-reading collectors — declare `CPM_GITHUB_TOKEN`, which raises their
+allowances to GitHub's authenticated numbers
+([the upstream-release section](#the-upstream-release-collector-reads-github-with-or-without-a-credential)
+has the arithmetic).
 
 **The inherited sixty-second soft limit applies to the dispatch task.** Ten
 thousand packages is ten thousand broker round trips inside one task, so a slow

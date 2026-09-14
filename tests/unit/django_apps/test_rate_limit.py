@@ -46,11 +46,15 @@ from django.core.cache import cache
 
 from conda_sentinel.core import rate_limit
 from conda_sentinel.core.rate_limit import KEY_PREFIX
+from conda_sentinel.core.rate_limit import REFUSAL_KEY_PREFIX
 from conda_sentinel.core.rate_limit import WINDOW_EXPIRED_EVENT
 from conda_sentinel.core.rate_limit import CacheRateLimiter
+from conda_sentinel.core.rate_limit import CredentialRefusal
 from conda_sentinel.core.rate_limit import RateLimit
 from conda_sentinel.core.rate_limit import RateLimiter
 from conda_sentinel.core.rate_limit import RateLimitError
+from conda_sentinel.core.rate_limit import refusal_key
+from conda_sentinel.core.rate_limit import window_end
 from conda_sentinel.core.rate_limit import window_key
 from tests.clocks import FIXED_INSTANT
 from tests.collectors import A_NAIVE_INSTANT
@@ -71,10 +75,12 @@ LIMITER_MODULE: Final[str] = "django_apps/conda_sentinel/core/rate_limit.py"
 #: The cache methods the limiter is permitted to call.
 #:
 #: `add` creates the window's counter, `incr` counts a call, and `set` recovers
-#: the one race the two of them have. All three are `BaseCache`'s own public
-#: API, offered identically by every backend -- which is the property that makes
-#: LocMem a substitution rather than a second code path.
-PERMITTED_CACHE_CALLS: Final[frozenset[str]] = frozenset({"add", "incr", "set"})
+#: the one race the two of them have; `set` and `get` are also how a credential
+#: refusal is remembered and read back (`CPM-OPERATE-S05`). All four are
+#: `BaseCache`'s own public API, offered identically by every backend -- which
+#: is the property that makes LocMem a substitution rather than a second code
+#: path.
+PERMITTED_CACHE_CALLS: Final[frozenset[str]] = frozenset({"add", "get", "incr", "set"})
 
 #: Names that would mean the module knows what is underneath it. `CACHES` is the
 #: settings table; the two class names are the backends `config/settings/*.py`
@@ -301,6 +307,101 @@ def test_something_without_an_acquire_is_not_a_limiter() -> None:
         """Something with no way to answer whether a call is permitted."""
 
     assert not isinstance(NotALimiter(), RateLimiter)
+
+
+def test_something_that_only_acquires_is_not_a_limiter_either() -> None:
+    """`CPM-OPERATE-S05`: the memo pair is part of the contract, so a double lacking it is refused by the check."""
+
+    class OnlyAcquires:
+        """A limiter from before the credential memo existed."""
+
+        def acquire(self, *, collector: str, limit: RateLimit, now: datetime, cost: int = 1) -> bool:
+            return True
+
+    assert not isinstance(OnlyAcquires(), RateLimiter)
+
+
+# ---------------------------------------------------------------------------
+# The credential-refusal memo (`CPM-OPERATE-S05`).
+# ---------------------------------------------------------------------------
+
+
+def test_the_window_end_is_the_first_instant_of_the_next_window() -> None:
+    """The counter's arithmetic read the other way: the next index times the window length, in UTC."""
+    at = datetime(2026, 4, 11, 14, 0, 37, tzinfo=UTC)
+
+    end = window_end(limit=A_LIMIT, now=at)
+
+    assert end == datetime(2026, 4, 11, 14, 1, tzinfo=UTC)
+    assert window_key(collector=A_COLLECTOR, limit=A_LIMIT, now=end) != window_key(
+        collector=A_COLLECTOR,
+        limit=A_LIMIT,
+        now=at,
+    )
+    assert window_key(collector=A_COLLECTOR, limit=A_LIMIT, now=end - timedelta(seconds=1)) == window_key(
+        collector=A_COLLECTOR,
+        limit=A_LIMIT,
+        now=at,
+    )
+
+
+def test_the_window_end_refuses_a_naive_instant() -> None:
+    """On `window_key`'s terms: a naive instant is local time, and two workers would disagree."""
+    with pytest.raises(RateLimitError, match="naive"):
+        window_end(limit=A_LIMIT, now=A_NAIVE_INSTANT)
+
+
+def test_the_refusal_key_names_the_collector_and_the_window_under_its_own_prefix() -> None:
+    """Same window index as the counter, different namespace, so neither read answers the other."""
+    key = refusal_key(collector=A_COLLECTOR, limit=A_LIMIT, now=FIXED_INSTANT)
+    counter = window_key(collector=A_COLLECTOR, limit=A_LIMIT, now=FIXED_INSTANT)
+
+    assert key.startswith(f"{REFUSAL_KEY_PREFIX}:{A_COLLECTOR}:")
+    assert key.rpartition(":")[2] == counter.rpartition(":")[2]
+    assert key != counter
+    assert REFUSAL_KEY_PREFIX != KEY_PREFIX
+
+
+def test_a_remembered_refusal_is_read_back_for_the_window_and_gone_when_it_turns() -> None:
+    """Remember, recall inside the window, nothing after it; another collector sees nothing at all."""
+    limiter = CacheRateLimiter()
+
+    until = limiter.remember_refusal(collector=A_COLLECTOR, limit=A_LIMIT, now=FIXED_INSTANT, detail="refused")
+
+    assert until == window_end(limit=A_LIMIT, now=FIXED_INSTANT)
+    later_this_window = until - timedelta(seconds=1)
+    assert limiter.refusal(collector=A_COLLECTOR, limit=A_LIMIT, now=later_this_window) == CredentialRefusal(
+        detail="refused",
+        until=until,
+    )
+    assert limiter.refusal(collector=ANOTHER_COLLECTOR, limit=A_LIMIT, now=later_this_window) is None
+    assert limiter.refusal(collector=A_COLLECTOR, limit=A_LIMIT, now=until) is None
+
+
+def test_a_remembered_refusal_is_given_the_windows_own_time_to_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The memo cannot outlive the window even if the key arithmetic did: the TTL handed to the cache is `per`."""
+    timeouts: list[object] = []
+    original = cache.set
+
+    def _recording_set(key: str, value: object, timeout: object = None, *args: object, **kwargs: object) -> None:
+        timeouts.append(timeout)
+        original(key, value, timeout, *args, **kwargs)
+
+    monkeypatch.setattr(cache, "set", _recording_set)
+
+    CacheRateLimiter().remember_refusal(collector=A_COLLECTOR, limit=A_LIMIT, now=FIXED_INSTANT, detail="refused")
+
+    assert timeouts == [A_LIMIT.window_seconds]
+
+
+def test_a_memo_that_is_not_the_shape_this_module_writes_reads_as_no_memo() -> None:
+    """A foreign value under the key is not a reason to refuse a call nobody refused."""
+    limiter = CacheRateLimiter()
+    key = refusal_key(collector=A_COLLECTOR, limit=A_LIMIT, now=FIXED_INSTANT)
+
+    for foreign in ("a string", 7, {"detail": "x"}, {"detail": 1, "until": "2026"}, {"detail": "x", "until": "nope"}):
+        cache.set(key, foreign, 60)
+        assert limiter.refusal(collector=A_COLLECTOR, limit=A_LIMIT, now=FIXED_INSTANT) is None
 
 
 def test_the_limiter_calls_only_the_public_cache_api() -> None:

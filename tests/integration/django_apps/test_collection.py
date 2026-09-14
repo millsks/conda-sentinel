@@ -80,6 +80,7 @@ from django.db import connection
 
 from conda_sentinel.core import collection
 from conda_sentinel.core.clock import FixedClock
+from conda_sentinel.core.collection import COLLECTION_CREDENTIAL_REFUSED_EVENT
 from conda_sentinel.core.collection import COLLECTION_FAILED_EVENT
 from conda_sentinel.core.collection import COLLECTION_NOT_APPLICABLE_EVENT
 from conda_sentinel.core.collection import COLLECTION_NOT_MODIFIED_EVENT
@@ -90,11 +91,13 @@ from conda_sentinel.core.collection import COLLECTION_SKIPPED_EVENT
 from conda_sentinel.core.collection import EVENT_KEYS
 from conda_sentinel.core.collection import NO_CACHE
 from conda_sentinel.core.collection import NO_WINDOW
+from conda_sentinel.core.collection import REFUSED_CREDENTIAL_STATUS
 from conda_sentinel.core.collection import CollectionWriteError
 from conda_sentinel.core.collection import CollectorConfigurationError
 from conda_sentinel.core.models import CollectionRun
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.core.rate_limit import RateLimit
+from conda_sentinel.core.rate_limit import window_end
 from conda_sentinel.core.response_cache import CachedResponse
 from conda_sentinel.core.runs import RunState
 from conda_sentinel.core.transport import RequestsTransport
@@ -103,6 +106,8 @@ from tests.clocks import FIXED_INSTANT
 from tests.collectors import A_CACHED_BODY
 from tests.collectors import A_FABRICATED_ROW_COUNT
 from tests.collectors import A_FOREIGN_PACKAGE
+from tests.collectors import A_GITHUB_TOKEN
+from tests.collectors import A_GITHUB_TOKEN_PREFIX
 from tests.collectors import A_LAST_MODIFIED
 from tests.collectors import A_NOT_APPLICABLE_REASON
 from tests.collectors import A_PAYLOAD_BODY
@@ -111,6 +116,7 @@ from tests.collectors import DETERMINATE_VALUE
 from tests.collectors import FIXTURE_CACHE_TTL
 from tests.collectors import FIXTURE_COLLECTOR
 from tests.collectors import FIXTURE_HEADERS
+from tests.collectors import FIXTURE_RATE_LIMIT
 from tests.collectors import FIXTURE_REQUEST_COST
 from tests.collectors import FIXTURE_SOURCE_PREFIX
 from tests.collectors import FIXTURE_SWEEP_SOURCE
@@ -222,6 +228,9 @@ COLLECTIONS_IN_THE_ROUND_TRIP: Final[int] = 2
 #: encoding decision in `core/transport.py` is only observable on a body whose
 #: UTF-8 and ISO-8859-1 readings differ.
 SERVED_BODY: Final[str] = '{"maintainer": "Ana Muñoz", "version": "2.4.0"}'
+
+#: The header the `CPM-OPERATE-S05` cases declare, as the fixture host must receive it.
+THE_BEARER: Final[str] = f"Bearer {A_GITHUB_TOKEN}"
 
 #: Bytes that are valid ISO-8859-1 and are not valid UTF-8, served with no
 #: charset declared. `requests`' own `.text` would hand these back as a string of
@@ -528,6 +537,39 @@ def _collector(transport: RecordedTransport, *, permitted: bool = True) -> Colle
     return working_collector(clock=_clock(), transport=transport, limiter=FixedLimiter(permitted=permitted))
 
 
+def _credentialed_collector(
+    transport: RecordedTransport,
+    *,
+    limiter: FixedLimiter | None = None,
+    at: datetime = FIXED_INSTANT,
+    credential_host: str = "fixture.invalid",
+) -> Collector:
+    """Build the fixture collector with a bearer declared for the fixture host (`CPM-OPERATE-S05`).
+
+    Args:
+        transport: The scripted transport.
+        limiter: The limiter, so a case can read what it remembered; a fresh
+            permitting one when omitted.
+        at: The instant the run's clock is stopped at.
+        credential_host: The host the credential belongs to. Defaults to the
+            fixture locators' own host; a case about the strip declares another.
+
+    Returns:
+        A constructed collector.
+
+    """
+    built = collector_class(
+        declared_model=fixture_evidence_model(),
+        declared_headers={**FIXTURE_HEADERS, "Authorization": THE_BEARER},
+        declared_credential_host=credential_host,
+    )
+    return built(
+        clock=FixedClock(instant=at),
+        transport=transport,
+        limiter=limiter if limiter is not None else FixedLimiter(permitted=True),
+    )
+
+
 def _record_run(*, collector: str, package_id: int | None, state: RunState, ago: timedelta) -> CollectionRun:
     """Write a finished ledger row, as a previous run would have left it.
 
@@ -828,6 +870,132 @@ def test_a_source_that_never_answers_writes_error_evidence(
     assert run.detail == result.detail
     assert "nothing answered" in run.detail
     assert [event["event"] for event in captured_events] == [COLLECTION_FAILED_EVENT]
+
+
+@pytest.mark.django_db
+def test_a_source_that_refuses_the_credential_is_a_failed_run_that_says_so_by_host(
+    evidence_table: type[AppendOnlyModel],
+    captured_events: list[EventDict],
+) -> None:
+    """`CPM-OPERATE-S05`'s `Refused` row, at the base: a `401` to a credentialed request is a refused credential.
+
+    Everything else about the path is the failure path above -- an `error` row,
+    a `failed` run, one event -- and the three `detail`s are one string. What
+    the string says is "the declared credential was refused by <host>", naming
+    the host the transport was reading and nothing about the header, because
+    the base never held the header in a string to begin with. The base does not
+    know which collector declared the credential and does not need to: the
+    ledger row already names the collector. And it remembers the refusal for
+    the window, which the case after this one is about.
+    """
+    locator = f"{FIXTURE_SOURCE_PREFIX}{A_PACKAGE}"
+    refusal = TransportError(f"{locator} answered 401", source=locator, status_code=REFUSED_CREDENTIAL_STATUS)
+    transport = RecordedTransport(failure=refusal)
+    limiter = FixedLimiter(permitted=True)
+
+    result = _credentialed_collector(transport, limiter=limiter).collect(package_id=A_PACKAGE)
+
+    assert result.state is RunState.FAILED
+    assert result.detail.startswith("the declared credential was refused by fixture.invalid: ")
+    assert result.detail.endswith(str(refusal))
+    assert A_GITHUB_TOKEN_PREFIX not in result.detail
+    assert "Authorization" not in result.detail
+    assert [row.state for row in _rows(evidence_table)] == [OutcomeState.ERROR.value]
+    run = _finished_run()
+    assert run.status == RunState.FAILED
+    assert run.detail == result.detail
+    assert [(event["event"], event["detail"]) for event in captured_events] == [
+        (COLLECTION_FAILED_EVENT, result.detail)
+    ]
+    assert transport.calls == [locator]
+    assert dict(transport.sent_headers[0] or {})["Authorization"] == THE_BEARER
+    assert [refusal.detail for refusal in limiter.refusals.values()] == [result.detail]
+
+
+@pytest.mark.django_db
+def test_a_401_to_a_request_that_carried_no_credential_is_worded_as_any_other_failure(
+    captured_events: list[EventDict],
+) -> None:
+    """A collector that declared no credential meets a `401`: the transport's words, and nothing remembered."""
+    locator = f"{FIXTURE_SOURCE_PREFIX}{A_PACKAGE}"
+    refusal = TransportError(f"{locator} answered 401", source=locator, status_code=REFUSED_CREDENTIAL_STATUS)
+    transport = RecordedTransport(failure=refusal)
+    limiter = FixedLimiter(permitted=True)
+
+    result = working_collector(clock=_clock(), transport=transport, limiter=limiter).collect(package_id=A_PACKAGE)
+
+    assert result.state is RunState.FAILED
+    assert result.detail == f"TransportError: {refusal}"
+    assert [event["event"] for event in captured_events] == [COLLECTION_FAILED_EVENT]
+    assert limiter.refusals == {}
+
+
+@pytest.mark.django_db
+def test_a_credential_refused_earlier_this_window_fails_fast_without_a_fetch_until_the_window_turns(
+    evidence_table: type[AppendOnlyModel],
+    captured_events: list[EventDict],
+) -> None:
+    """The guard behind the wording: one refused call per window per collector, not one per package.
+
+    The first collection meets the `401` and remembers it; the second, inside
+    the same window, fails before the allowance is asked or any fetch is made,
+    with a detail that says so and names when the credential is tried again;
+    the third, in the next window, fetches -- and meets the refusal afresh,
+    which is the whole blast radius.
+    """
+    locator = f"{FIXTURE_SOURCE_PREFIX}{A_PACKAGE}"
+    transport = RecordedTransport(
+        failure=TransportError(f"{locator} answered 401", source=locator, status_code=REFUSED_CREDENTIAL_STATUS),
+    )
+    limiter = FixedLimiter(permitted=True)
+    first_window = FIXED_INSTANT
+    later_this_window = FIXED_INSTANT + FIXTURE_RATE_LIMIT.per / 2
+    next_window = FIXED_INSTANT + FIXTURE_RATE_LIMIT.per
+
+    first = _credentialed_collector(transport, limiter=limiter, at=first_window).collect(package_id=A_PACKAGE)
+    second = _credentialed_collector(transport, limiter=limiter, at=later_this_window).collect(
+        package_id=A_PACKAGE,
+        force=True,
+    )
+    third = _credentialed_collector(transport, limiter=limiter, at=next_window).collect(
+        package_id=A_PACKAGE,
+        force=True,
+    )
+
+    assert [first.state, second.state, third.state] == [RunState.FAILED, RunState.FAILED, RunState.FAILED]
+    assert transport.calls == [locator, locator]
+    assert len(limiter.asks) == 2  # noqa: PLR2004 - the fail-fast run asked the allowance for nothing
+    assert second.detail.startswith("the declared credential was refused earlier in this allowance window")
+    assert window_end(limit=FIXTURE_RATE_LIMIT, now=first_window).isoformat() in second.detail
+    assert second.detail.endswith(first.detail)
+    assert third.detail == first.detail
+    assert [event["event"] for event in captured_events] == [
+        COLLECTION_FAILED_EVENT,
+        COLLECTION_CREDENTIAL_REFUSED_EVENT,
+        COLLECTION_FAILED_EVENT,
+    ]
+    assert [row.state for row in _rows(evidence_table)] == [OutcomeState.ERROR.value] * 3
+    assert CollectionRun.objects.filter(collector=FIXTURE_COLLECTOR, status=RunState.FAILED).count() == 3  # noqa: PLR2004
+
+
+@pytest.mark.django_db
+def test_a_credential_declared_for_one_host_is_not_sent_to_a_source_on_another(
+    evidence_table: type[AppendOnlyModel],
+) -> None:
+    """The base's own strip: a collector whose `source_for` names a host other than its credential host sends no bearer.
+
+    The declaration is honest and the locator is not, which is the mistake a
+    rewritten `source_for` makes; the credential stays home and the collection
+    proceeds without it.
+    """
+    transport = RecordedTransport(payload=recorded_payload())
+
+    result = _credentialed_collector(transport, credential_host="api.example.test").collect(package_id=A_PACKAGE)
+
+    assert result.state is RunState.SUCCEEDED
+    assert dict(transport.sent_headers[0] or {}) == dict(FIXTURE_HEADERS)
+    assert A_GITHUB_TOKEN_PREFIX not in str(transport.sent_headers)
+    assert [row.state for row in _rows(evidence_table)] == [DETERMINATE_VALUE]
 
 
 @pytest.mark.django_db
@@ -2307,6 +2475,77 @@ def _sweeping_collector(transport: RecordedTransport, *, permitted: bool = True)
     """
     built = sweeping_collector_class(declared_model=fixture_evidence_model())
     return built(clock=_clock(), transport=transport, limiter=FixedLimiter(permitted=permitted))
+
+
+def _credentialed_sweeper(transport: RecordedTransport, *, limiter: FixedLimiter, at: datetime) -> Collector:
+    """Build the sweeping fixture with a bearer declared for the fixture host (`CPM-OPERATE-S05`).
+
+    Args:
+        transport: The scripted transport.
+        limiter: The limiter, so a case can read what it remembered.
+        at: The instant the run's clock is stopped at.
+
+    Returns:
+        A constructed collector with a run-scoped source.
+
+    """
+    built = sweeping_collector_class(
+        declared_model=fixture_evidence_model(),
+        declared_headers={**FIXTURE_HEADERS, "Authorization": THE_BEARER},
+        declared_credential_host="fixture.invalid",
+    )
+    return built(clock=FixedClock(instant=at), transport=transport, limiter=limiter)
+
+
+@pytest.mark.django_db
+def test_a_sweep_whose_credential_is_refused_says_so_and_fails_fast_for_the_rest_of_the_window(
+    captured_events: list[EventDict],
+) -> None:
+    """`CPM-OPERATE-S05` on the run-scoped path: the same wording, the same memo, the same one call per window."""
+    refusal = TransportError(
+        f"{FIXTURE_SWEEP_SOURCE} answered 401",
+        source=FIXTURE_SWEEP_SOURCE,
+        status_code=REFUSED_CREDENTIAL_STATUS,
+    )
+    transport = RecordedTransport(failure=refusal)
+    limiter = FixedLimiter(permitted=True)
+
+    first = _credentialed_sweeper(transport, limiter=limiter, at=FIXED_INSTANT).sweep()
+    second = _credentialed_sweeper(transport, limiter=limiter, at=FIXED_INSTANT + FIXTURE_RATE_LIMIT.per / 2).sweep(
+        force=True,
+    )
+    third = _credentialed_sweeper(transport, limiter=limiter, at=FIXED_INSTANT + FIXTURE_RATE_LIMIT.per).sweep(
+        force=True,
+    )
+
+    assert first.state is RunState.FAILED
+    assert first.detail == f"the declared credential was refused by fixture.invalid: {refusal}"
+    assert second.detail.startswith("the declared credential was refused earlier in this allowance window")
+    assert third.detail == first.detail
+    assert transport.calls == [FIXTURE_SWEEP_SOURCE, FIXTURE_SWEEP_SOURCE]
+    assert dict(transport.sent_headers[0] or {})["Authorization"] == THE_BEARER
+    assert [event["event"] for event in captured_events] == [
+        COLLECTION_FAILED_EVENT,
+        COLLECTION_CREDENTIAL_REFUSED_EVENT,
+        COLLECTION_FAILED_EVENT,
+    ]
+    assert CollectionRun.objects.filter(collector=FIXTURE_COLLECTOR, package_id=None).count() == 3  # noqa: PLR2004
+
+
+@pytest.mark.django_db
+def test_a_sweep_that_carried_no_credential_words_a_401_as_any_other_failure() -> None:
+    """The run-scoped half of the wording rule: no `Authorization` sent, the transport's words kept."""
+    refusal = TransportError(
+        f"{FIXTURE_SWEEP_SOURCE} answered 401",
+        source=FIXTURE_SWEEP_SOURCE,
+        status_code=REFUSED_CREDENTIAL_STATUS,
+    )
+    transport = RecordedTransport(failure=refusal)
+
+    result = _sweeping_collector(transport).sweep()
+
+    assert result.state is RunState.FAILED
+    assert result.detail == f"TransportError: {refusal}"
 
 
 @pytest.mark.django_db

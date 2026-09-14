@@ -235,9 +235,11 @@ UNBOUNDED_TIMEOUT_FORM: Final[str] = "timeout=None"
 # rather than by every collector remembering. It constructs no session and issues
 # no request; only the keyword is licensed here.
 # core/rate_limit.py -- one of the two modules that read the cache, and the one
-# that owns the counter. Three calls, which
-# `tests/unit/django_apps/test_rate_limit.py` separately reconciles against the
-# cache's public API.
+# that owns the counter. Five calls: the counter's three, and the `set`/`get`
+# pair that remembers a refused credential for the rest of the window
+# (`CPM-OPERATE-S05`) -- a statement about whether a call may be issued, which
+# is why it lives here and not in a third module. All reconciled separately
+# against the cache's public API by `tests/unit/django_apps/test_rate_limit.py`.
 # core/response_cache.py -- the other, and the one that owns the remembered
 # response (`CPM-EVIDENCE-S08`). Three calls, reconciled the same way by
 # `tests/unit/django_apps/test_response_cache.py`. It is a second entry rather
@@ -249,8 +251,9 @@ RECORDED_EXEMPTIONS: Final[dict[str, dict[str, int]]] = {
     "django_apps/conda_sentinel/core/collection.py": {STATED_TIMEOUT_FORM: 1},
     "django_apps/conda_sentinel/core/rate_limit.py": {
         "cache.add(...)": 1,
+        "cache.get(...)": 1,
         "cache.incr(...)": 1,
-        "cache.set(...)": 1,
+        "cache.set(...)": 2,
     },
     "django_apps/conda_sentinel/core/response_cache.py": {
         "cache.delete(...)": 2,

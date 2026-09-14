@@ -333,6 +333,27 @@ healthy, **migrates**, and then runs four processes together under
 `Ctrl-C` stops all four. The containers keep running — `pixi run docker-down` stops
 them, `pixi run docker-down-v` also discards their data.
 
+**To let the stack read GitHub at its authenticated allowance, give it
+`CPM_GITHUB_TOKEN`** — `export CPM_GITHUB_TOKEN=…` in the shell before
+`pixi run local-stack` (or in front of `stack-run` and `stack-shell` for a
+one-off), or a line in the gitignored `.env` at the repository root with
+`DJANGO_READ_DOT_ENV_FILE=True` exported so `base.py` reads it. It wants a
+fine-grained personal access token with no permissions selected (every endpoint
+the two GitHub-reading collectors touch is public; the token is there to be
+counted, not to be allowed anything), and it lives in your shell or your `.env`
+and nowhere else: no pixi table, task `env`, compose service, `Dockerfile` or
+workflow carries it, and the suite scans them all. It is read once when the
+process starts, so a token changed after `local-stack` is up needs a restart.
+Without it the stack reads GitHub unauthenticated, at sixty requests an hour,
+which is fifteen packages an hour for `source_release` — fine for the demo
+roster, and the reason a real inventory's upstream sweep stalls at the fifteenth
+package. The token never reaches a log line, a ledger row or an evidence row; a
+wrong one is a `failed` run whose `detail` begins `the declared credential was
+refused by api.github.com`, and the rest of that hour's collections fail fast
+without calling GitHub again
+([operations](operations.md#dispatching-by-hand-and-the-four-admin-processes) has
+where to mint one and the sweep arithmetic).
+
 If honcho ended some other way — the terminal closed, `kill -9` — its four children
 outlive it: gunicorn keeps 8000, flower keeps 5555, and the next `local-stack` fails
 on both. `pixi run local-stack-down` finds those stragglers by this checkout's

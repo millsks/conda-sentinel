@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib
 
 import pytest
+import yaml
 from django.core.exceptions import ImproperlyConfigured
 
 from conda_sentinel.collectors.conda_package import CHANNELS_SETTING
@@ -20,6 +21,7 @@ from conda_sentinel.collectors.conda_package import PLATFORMS_SETTING
 from conda_sentinel.collectors.conda_package import CondaPackageCollector
 from conda_sentinel.collectors.feedstock import COLLECTOR_NAME as FEEDSTOCK_NAME
 from conda_sentinel.collectors.feedstock import FeedstockCollector
+from conda_sentinel.collectors.github import GITHUB_TOKEN_SETTING
 from conda_sentinel.collectors.kev import COLLECTOR_NAME as KEV_NAME
 from conda_sentinel.collectors.kev import KEV_DISPATCH_OFFSET
 from conda_sentinel.collectors.kev import KevCollector
@@ -47,6 +49,9 @@ from config.local_dev import keys
 from config.locality import LOCAL as LOCAL_RUNTIME
 from config.locality import RUNTIME_ENV_VAR
 from config.startup.allowlist import CONTRIBUTABLE_KEYS
+from tests.collectors import A_GITHUB_TOKEN
+from tests.dockerfile import DOCKERFILE
+from tests.dockerfile import instruction_lines
 from tests.logging_config import assert_writes_no_files
 from tests.pixi_manifest import REPO_ROOT
 from tests.pixi_manifest import load_manifest
@@ -1598,6 +1603,147 @@ def test_the_dev_environment_turns_the_start_dispatch_on_and_nothing_production_
         if SWEEP_ON_BEAT_START_SETTING in task_env(definition)
     )
     assert not offenders, offenders
+
+
+@pytest.fixture
+def no_github_token_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the credential so the module's *default* is what the case reads.
+
+    A developer who has exported `CPM_GITHUB_TOKEN` for the local stack would
+    otherwise read their own shell back and call it the default -- and the
+    value would be in a test's assertion output, which is the one place this
+    story says it must never be.
+    """
+    monkeypatch.delenv(GITHUB_TOKEN_SETTING, raising=False)
+
+
+@pytest.mark.usefixtures("any_settings_module", "no_github_token_env")
+@pytest.mark.parametrize("module", EVERY_SETTINGS_MODULE, ids=lambda name: name.rpartition(".")[2])
+def test_the_github_token_is_declared_and_empty_in_every_settings_module(module: str):
+    """`CPM-OPERATE-S05`: the setting ships, and it ships empty.
+
+    *Declared*, over all four modules, because `CollectorsConfig.ready()` refuses
+    a settings module with no assignment as one that dropped the line. *Empty*,
+    because empty means both GitHub-reading collectors send no credential and
+    keep their unauthenticated allowances -- the state every existing
+    declaration test describes. The environment is the only place a value
+    comes from, and the case below pins that it is read stripped.
+    """
+    settings_module = importlib.import_module(module)
+
+    assert getattr(settings_module, GITHUB_TOKEN_SETTING) == ""
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_github_token_is_read_from_the_environment_and_stripped(monkeypatch: pytest.MonkeyPatch):
+    """The variable of the same name, with surrounding whitespace removed before it can become a header."""
+    monkeypatch.setenv(GITHUB_TOKEN_SETTING, f"  {A_GITHUB_TOKEN}\n")
+
+    base = importlib.import_module(BASE)
+
+    assert base.CPM_GITHUB_TOKEN == A_GITHUB_TOKEN
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_test_settings_empty_the_github_token_whatever_the_shell_holds(monkeypatch: pytest.MonkeyPatch):
+    """A developer's exported token never enters the suite.
+
+    Every collector constructed outside `override_settings` would otherwise
+    carry the real credential in its instance headers, and a failing assertion
+    printing `sent_headers` would print it. So the test module empties the
+    setting unconditionally, and this reads it back with the variable exported
+    -- against `base`, which must still read the export, so the case cannot
+    pass because the variable was never seen.
+    """
+    monkeypatch.setenv(GITHUB_TOKEN_SETTING, A_GITHUB_TOKEN)
+
+    base = importlib.import_module(BASE)
+    test_module = importlib.import_module(TEST)
+
+    assert base.CPM_GITHUB_TOKEN == A_GITHUB_TOKEN
+    assert test_module.CPM_GITHUB_TOKEN == ""
+
+
+def test_no_checked_in_file_declares_the_github_token():
+    """The credential comes from a shell, the gitignored `.env`, or a deployment's secret -- never a checked-in file.
+
+    Six sites are scanned and none may name it: the unscoped `[activation.env]`;
+    the `dev` feature's activation env (which *does* carry the two `CPM_`
+    switches the stack needs, and must not grow a credential beside them);
+    every task's own `env`; every `compose.yaml` service's `environment` in
+    either of its two forms, and any `env_file` it names; the `Dockerfile`'s
+    `ENV` and `ARG` instructions; and every workflow under `.github/workflows`.
+    A value in any of them would be a credential in the repository; an empty
+    declaration in any of them would override the developer's export with
+    nothing, silently, on every `pixi run`.
+    """
+    manifest = load_manifest()
+
+    assert GITHUB_TOKEN_SETTING not in manifest.get("activation", {}).get("env", {})
+    assert GITHUB_TOKEN_SETTING not in manifest["feature"]["dev"]["activation"]["env"]
+    offenders = sorted(
+        f"{name} in {table}"
+        for table, name, definition in tasks(manifest)
+        if GITHUB_TOKEN_SETTING in task_env(definition)
+    )
+    assert not offenders, offenders
+
+    compose = yaml.safe_load((REPO_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    carrying = sorted(
+        name
+        for name, service in compose["services"].items()
+        if GITHUB_TOKEN_SETTING in _compose_environment_names(service.get("environment"))
+    )
+    assert not carrying, carrying
+    env_files = sorted(
+        f"{name}: {env_file}"
+        for name, service in compose["services"].items()
+        for env_file in _as_list(service.get("env_file"))
+    )
+    assert not env_files, f"a compose service names an env_file, which this scan does not read: {env_files}"
+
+    declared_in_image = [
+        (line, instruction, arguments)
+        for line, instruction, arguments in instruction_lines(DOCKERFILE.read_text(encoding="utf-8"))
+        if instruction in {"ENV", "ARG"} and GITHUB_TOKEN_SETTING in arguments
+    ]
+    assert not declared_in_image, declared_in_image
+
+    workflows = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflow found, so the scan of them would be vacuous"
+    naming_it = [path.name for path in workflows if GITHUB_TOKEN_SETTING in path.read_text(encoding="utf-8")]
+    assert not naming_it, naming_it
+
+
+def _as_list(value: object) -> list[object]:
+    """Return a compose scalar-or-list value as a list.
+
+    Args:
+        value: What the key holds, or `None` when absent.
+
+    Returns:
+        The values, or an empty list.
+
+    """
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _compose_environment_names(environment: object) -> set[str]:
+    """Return the variable names a compose `environment` block declares, in either of its two forms.
+
+    Args:
+        environment: The block: a mapping of names to values, or a list of
+            `NAME=value` / bare `NAME` strings, or `None`.
+
+    Returns:
+        The names.
+
+    """
+    if isinstance(environment, dict):
+        return set(environment)
+    return {str(entry).partition("=")[0] for entry in _as_list(environment)}
 
 
 @pytest.mark.usefixtures("any_settings_module")

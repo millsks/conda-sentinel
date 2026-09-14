@@ -62,6 +62,7 @@ from django.urls import path
 
 from conda_sentinel.collectors.tasks import declared_inventory_adapter
 from conda_sentinel.collectors.tasks import withdraw_inventory_adapter
+from conda_sentinel.core import collection as core_collection
 from conda_sentinel.identity import services as identity_services
 from config import urls as config_urls
 from config.authorization.claims import ClaimsContract
@@ -740,6 +741,78 @@ def captured_identity_service_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[
         assert [event["event"] for event in captured] == [IDENTITY_SERVICE_CAPTURE_CONTROL], (
             "structlog.testing.capture_logs() cannot see identity.services' logger, so every assertion "
             "over what it logged would be vacuous"
+        )
+        captured.clear()
+        yield captured
+
+
+#: The control event the collector-base capture below emits, on the terms the
+#: identity-service one is named.
+COLLECTION_CAPTURE_CONTROL: Final[str] = "collection-capture-control"
+
+
+@pytest.fixture
+def captured_collection_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any]]]:
+    """Capture what `core/collection.py` logs, with the same two guards as the identity capture.
+
+    Shared by the `CPM-OPERATE-S05` hygiene cases in
+    `tests/integration/django_apps/test_source_release.py` and
+    `tests/integration/django_apps/test_feedstock.py`, which grep every event
+    the base emitted for a credential that must not be there -- and a grep
+    over an empty list passes for the wrong reason, which is what the control
+    event rules out. `core/collection.py` is the one module on the collection
+    path that logs a run's `detail`; the collectors themselves log nothing.
+
+    Args:
+        monkeypatch: pytest's patcher, which restores the module's own logger.
+
+    Yields:
+        The captured events, in order, with the control event already cleared.
+
+    """
+    monkeypatch.setattr(core_collection, "logger", structlog.get_logger(core_collection.__name__))
+    with structlog.testing.capture_logs() as captured:
+        core_collection.logger.warning(COLLECTION_CAPTURE_CONTROL)
+        assert [event["event"] for event in captured] == [COLLECTION_CAPTURE_CONTROL], (
+            "structlog.testing.capture_logs() cannot see core/collection.py's logger, so every assertion "
+            "over what it logged would be vacuous"
+        )
+        captured.clear()
+        yield captured
+
+
+@pytest.fixture
+def captured_every_structlog_logger(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any]]]:
+    """Capture what *every* first-party structlog logger emits, for the `CPM-OPERATE-S05` task-path hygiene cases.
+
+    The collection-only capture above rebinds one module's logger; the task
+    path crosses several -- the task module, the ledger, the base, the rate
+    limiter, the response cache -- and a credential printed by any of them is
+    the same leak. So every already-imported module under `conda_sentinel` and
+    `config` that holds a module-scope structlog `logger` is rebound to a fresh
+    proxy inside the capture's processor chain (`cache_logger_on_first_use` is
+    on, so a proxy bound before the capture would keep the old chain), and the
+    control event is emitted through the collector base's, which is the one
+    the assertions cannot be vacuous without.
+
+    Args:
+        monkeypatch: pytest's patcher, which restores every module's own logger.
+
+    Yields:
+        The captured events, in order, with the control event already cleared.
+
+    """
+    for name, module in list(sys.modules.items()):
+        if module is None or not (name.startswith(("conda_sentinel.", "config."))):
+            continue
+        logger = getattr(module, "logger", None)
+        if logger is not None and type(logger).__module__.startswith("structlog"):
+            monkeypatch.setattr(module, "logger", structlog.get_logger(name))
+    with structlog.testing.capture_logs() as captured:
+        core_collection.logger.warning(COLLECTION_CAPTURE_CONTROL)
+        assert [event["event"] for event in captured] == [COLLECTION_CAPTURE_CONTROL], (
+            "structlog.testing.capture_logs() cannot see the rebound loggers, so every assertion over what "
+            "the task path logged would be vacuous"
         )
         captured.clear()
         yield captured
