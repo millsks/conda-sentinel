@@ -43,8 +43,14 @@ from typing import Final
 
 import pytest
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
+from django.test import override_settings
 
 from conda_sentinel.collectors import agent
+from conda_sentinel.collectors.github import AUTHENTICATED_CORE_ALLOWANCE
+from conda_sentinel.collectors.github import AUTHORIZATION_HEADER
+from conda_sentinel.collectors.github import BEARER_SCHEME
+from conda_sentinel.collectors.github import GITHUB_TOKEN_SETTING
 from conda_sentinel.collectors.models import SourceReleaseSnapshot
 from conda_sentinel.collectors.source_release import ABSENT_CAVEAT
 from conda_sentinel.collectors.source_release import ACTIVITY_FIELDS
@@ -100,6 +106,7 @@ from conda_sentinel.core.transport import DEFAULT_BACKOFF_FACTOR
 from conda_sentinel.core.transport import DEFAULT_RETRIES
 from conda_sentinel.core.transport import MAX_TIMEOUT
 from tests.clocks import FIXED_INSTANT
+from tests.collectors import A_GITHUB_TOKEN as A_TOKEN
 from tests.collectors import recorded_payload
 from tests.source_scan import SRC_ROOT
 from tests.source_scan import dotted_name
@@ -518,6 +525,61 @@ def test_the_collector_is_constructed_from_its_declarations_alone() -> None:
         assert SOURCE_RELEASE_RATE_LIMIT.calls >= collector.request_cost
     finally:
         collector.close()
+
+
+def test_without_a_token_the_instance_sends_the_class_declarations_exactly() -> None:
+    """`CPM-OPERATE-S05`'s `No token` row: nothing about an unauthenticated collector changed.
+
+    The instance's `headers` and `rate_limit` are set in `__init__` from the
+    setting, so with the setting empty they have to be *equal* to the class's
+    declarations and carry no `Authorization` -- which is what keeps every
+    declaration test above, and every request a deployment without a token
+    sends, exactly as they were.
+    """
+    with override_settings(**{GITHUB_TOKEN_SETTING: ""}):
+        collector = SourceReleaseCollector(clock=_stopped_clock())
+
+    try:
+        assert dict(collector.headers) == dict(SOURCE_RELEASE_HEADERS)
+        assert collector.rate_limit == SOURCE_RELEASE_RATE_LIMIT
+        assert not any(name.lower() == AUTHORIZATION_HEADER.lower() for name in collector.headers)
+    finally:
+        collector.close()
+
+
+def test_with_a_token_the_instance_declares_the_bearer_and_the_authenticated_allowance() -> None:
+    """`CPM-OPERATE-S05`'s `Token, API` row, at construction.
+
+    The instance carries `Authorization: Bearer <token>` on top of the declared
+    headers and GitHub's authenticated core allowance in place of the
+    unauthenticated one; the *class* still declares the unauthenticated pair,
+    because that is the honest statement about a collector nobody has given a
+    credential, and every audit reads the class.
+    """
+    with override_settings(**{GITHUB_TOKEN_SETTING: A_TOKEN}):
+        collector = SourceReleaseCollector(clock=_stopped_clock())
+
+    try:
+        assert dict(collector.headers) == {**SOURCE_RELEASE_HEADERS, AUTHORIZATION_HEADER: f"{BEARER_SCHEME} {A_TOKEN}"}
+        assert collector.rate_limit == AUTHENTICATED_CORE_ALLOWANCE
+        assert collector.rate_limit.calls >= collector.request_cost
+    finally:
+        collector.close()
+
+    assert SourceReleaseCollector.headers == SOURCE_RELEASE_HEADERS
+    assert SourceReleaseCollector.rate_limit == SOURCE_RELEASE_RATE_LIMIT
+
+
+def test_a_malformed_token_refuses_construction_without_echoing_it() -> None:
+    """The base never sees a header built from a value the fault rule refuses."""
+    with (
+        override_settings(**{GITHUB_TOKEN_SETTING: f"{A_TOKEN}\nX-Injected: yes"}),
+        pytest.raises(ImproperlyConfigured) as refused,
+    ):
+        SourceReleaseCollector(clock=_stopped_clock())
+
+    assert GITHUB_TOKEN_SETTING in str(refused.value)
+    assert A_TOKEN[:8] not in str(refused.value)
 
 
 def test_the_task_name_routes_to_the_collect_queue() -> None:

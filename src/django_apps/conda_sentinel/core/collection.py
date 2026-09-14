@@ -205,6 +205,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from http import HTTPStatus
 from math import isfinite
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -218,6 +219,10 @@ from django.db import models
 from django.db import transaction
 
 from conda_sentinel.core.clock import is_aware
+from conda_sentinel.core.credentials import AUTHORIZATION_HEADER
+from conda_sentinel.core.credentials import carries_credential
+from conda_sentinel.core.credentials import credentialed_headers
+from conda_sentinel.core.credentials import host_of
 from conda_sentinel.core.freshness import UNOBSERVED_STATUS
 from conda_sentinel.core.freshness import FreshnessReport
 from conda_sentinel.core.freshness import freshness_of
@@ -252,6 +257,7 @@ if TYPE_CHECKING:
     from conda_sentinel.core.transport import Transport
 
 __all__ = [
+    "COLLECTION_CREDENTIAL_REFUSED_EVENT",
     "COLLECTION_FAILED_EVENT",
     "COLLECTION_NOT_APPLICABLE_EVENT",
     "COLLECTION_NOT_MODIFIED_EVENT",
@@ -265,6 +271,7 @@ __all__ = [
     "NO_CADENCE",
     "NO_FRESHNESS",
     "NO_WINDOW",
+    "REFUSED_CREDENTIAL_STATUS",
     "STATE_FIELD",
     "SUPPRESSING_STATES",
     "CollectionResult",
@@ -272,6 +279,7 @@ __all__ = [
     "Collector",
     "CollectorConfigurationError",
     "SweepOutcome",
+    "failure_detail",
     "freshness_target_fault",
     "has_recent_success",
     "request_headers",
@@ -300,6 +308,15 @@ COLLECTION_REFUSED_EVENT: Final[str] = "collection.refused_by_rate_limit"
 #: nothing -- and every one of them carries the same keys, so a log query does
 #: not have to know which.
 COLLECTION_FAILED_EVENT: Final[str] = "collection.failed"
+
+#: The event a collection refused *before any call* because the source
+#: already refused the declared credential earlier in this window
+#: (`CPM-OPERATE-S05`). Distinct from `COLLECTION_FAILED_EVENT`, which is the
+#: run that met the `401`, and from `COLLECTION_REFUSED_EVENT`, which is an
+#: allowance spent: this one is an operator's setting known to be wrong, and
+#: it is logged so that a sweep failing fast ten thousand times in an hour
+#: reads as one cause rather than ten thousand.
+COLLECTION_CREDENTIAL_REFUSED_EVENT: Final[str] = "collection.credential_refused_this_window"
 
 #: The event a confirmed-unchanged answer is logged under. Distinct from a
 #: success and from a skip, because it is neither: the source was asked and
@@ -408,6 +425,17 @@ CONDITIONAL_HEADERS: Final[frozenset[str]] = frozenset({IF_NONE_MATCH_HEADER, IF
 #: on the wire, so the refusal has to be, and computing the comparison set per
 #: declared header would be rebuilding a constant inside a loop.
 _LOWERED_CONDITIONAL_HEADERS: Final[frozenset[str]] = frozenset(header.lower() for header in CONDITIONAL_HEADERS)
+
+#: The status a source answers when it refuses the credential a request carried
+#: (`CPM-OPERATE-S05`). Named here rather than in `core/transport.py` because
+#: the transport records every non-success status the same way and this base
+#: is where one of them is worded differently: a `401` is not the source being
+#: broken, it is the source saying the declared credential is wrong, and an
+#: operator reading the ledger needs that told apart from a `500` without the
+#: header that earned it being repeated anywhere. It is deliberately **not** in
+#: `DEFAULT_RETRY_STATUSES`: a refused credential answers identically however
+#: many times it is asked.
+REFUSED_CREDENTIAL_STATUS: Final[int] = int(HTTPStatus.UNAUTHORIZED)
 
 
 class CollectorConfigurationError(ValueError):
@@ -649,6 +677,43 @@ def request_headers(*, declared: Mapping[str, str], entry: CachedResponse | None
     return {**declared} if entry is None else {**declared, **conditional_headers(entry)}
 
 
+def failure_detail(failure: TransportError, *, credentialed: bool) -> str:
+    """Return what the ledger, the evidence row and the log say about one failed fetch.
+
+    One sentence shape for every failure but one. A transport failure is
+    recorded as the exception's type and message -- the message already names
+    the locator and the status, and never a header. The exception is a `401`
+    to a request that *carried the declared credential*: the source did
+    answer, and what it said is that the credential is not one it accepts.
+    That is an operator's problem with a setting rather than a source's
+    problem with itself, so the sentence says so and names the host that
+    refused -- and only the host. A `401` to a request that carried no
+    credential is not that: it is a source demanding one this collector never
+    declared, and is worded as any other failure. The credential, its prefix
+    and the header it travelled in appear in no message on any path
+    (`CPM-OPERATE-S05`); this base never had them in a string to begin with,
+    and this function does not start.
+
+    Args:
+        failure: What the transport raised.
+        credentialed: Whether the request that failed carried `Authorization`
+            -- read off the headers actually sent, so a request the base
+            stripped the credential from is not reported as a refused one.
+
+    Returns:
+        `"<Type>: <message>"` for every failure, except that a
+        `REFUSED_CREDENTIAL_STATUS` answer to a credentialed request reads
+        `"the declared credential was refused by <host>: <message>"`. The host
+        is read from the failure's own `source`; a locator with no readable
+        host falls back to the locator itself, which the transport built and
+        which carries no credential.
+
+    """
+    if credentialed and failure.status_code == REFUSED_CREDENTIAL_STATUS:
+        return f"the declared credential was refused by {host_of(failure.source) or failure.source}: {failure}"
+    return f"{type(failure).__name__}: {failure}"
+
+
 #: The column every evidence model carries its outcome in, verbatim
 #: (`CPM-AD-5`, `CPM-AD-24`). Named here because this base *reads* it: a sentinel
 #: row is checked against the state it was asked for, and the check has to know
@@ -755,6 +820,17 @@ class Collector(ABC):
     #: usable default; what is *refused* is a conditional header, which belongs
     #: to the base and to the entry it is composed from.
     headers: ClassVar[Mapping[str, str]] = MappingProxyType({})
+
+    #: The one host the `Authorization` header in `headers` belongs to, or
+    #: `None` for a collector that declares no credential (`CPM-OPERATE-S05`).
+    #: This base composes the headers for every primary fetch, and it is here
+    #: that the credential is kept to its host: a locator on any other host,
+    #: or on this host over plain `http`, is sent the declaration *without*
+    #: `Authorization` -- so a rewritten `source_for` cannot carry a bearer to
+    #: a stranger. A collector that declares `Authorization` and no host is
+    #: refused at construction, because a credential with nowhere it belongs
+    #: is a credential that goes everywhere.
+    credential_host: ClassVar[str | None] = None
 
     #: How long evidence this collector wrote may be read as current
     #: (`CPM-AD-28`). Required, and with no sentinel for "never goes stale": an
@@ -886,6 +962,7 @@ class Collector(ABC):
         self._retries = _require_retries(self.retries, label=label)
         self._rate_limit = _require_rate_limit(self.rate_limit, label=label)
         self._headers = _require_headers(self.headers, label=label)
+        self._credential_host = _require_credential_host(self.credential_host, headers=self._headers, label=label)
         self._cache_ttl = _require_cache_ttl(self.response_cache_ttl, label=label)
         self._clock: Clock = clock
         # Ownership is tracked so `close()` releases only what this object
@@ -1262,37 +1339,19 @@ class Collector(ABC):
             if reason:
                 return self._not_applicable(reason=reason, package_id=package_id, observed_at=observed_at, run=run)
 
-            if not self._limiter.acquire(
-                collector=self._name,
-                limit=self._rate_limit,
-                now=observed_at,
-                cost=self.request_cost,
-            ):
-                detail = (
-                    f"{self._name} has spent its allowance of {self._rate_limit.calls} requests per "
-                    f"{self._rate_limit.per}; the call was refused rather than issued unlimited (CPM-AD-20)."
-                )
-                logger.warning(
-                    COLLECTION_REFUSED_EVENT,
-                    collector=self._name,
-                    package_id=package_id,
-                    source=source,
-                    detail=detail,
-                    cost=self.request_cost,
-                )
-                return self._failed(run_detail=detail, package_id=package_id, observed_at=observed_at, run=run)
+            refusal = self._call_refusal(source=source, package_id=package_id, now=observed_at)
+            if refusal:
+                return self._failed(run_detail=refusal, package_id=package_id, observed_at=observed_at, run=run)
 
             # Read after the allowance is granted rather than before it: a
             # collection that is not going to happen has no use for an entry,
             # and the cache is a shared resource like the counter beside it.
             remembered = self._remembered(source)
+            sent = request_headers(declared=self.headers_for(source), entry=remembered)
             try:
-                payload = self._transport.fetch(
-                    source,
-                    headers=request_headers(declared=self._headers, entry=remembered),
-                )
+                payload = self._transport.fetch(source, headers=sent)
             except TransportError as failure:
-                detail = f"{type(failure).__name__}: {failure}"
+                detail = self._failure_detail(failure, sent=sent, now=observed_at)
                 logger.warning(
                     COLLECTION_FAILED_EVENT,
                     collector=self._name,
@@ -1549,35 +1608,17 @@ class Collector(ABC):
                 run.skipped(detail=detail)
                 return CollectionResult(state=RunState.SKIPPED, evidence_rows=0, detail=detail)
 
-            if not self._limiter.acquire(
-                collector=self._name,
-                limit=self._rate_limit,
-                now=observed_at,
-                cost=self.request_cost,
-            ):
-                detail = (
-                    f"{self._name} has spent its allowance of {self._rate_limit.calls} requests per "
-                    f"{self._rate_limit.per}; the call was refused rather than issued unlimited (CPM-AD-20)."
-                )
-                logger.warning(
-                    COLLECTION_REFUSED_EVENT,
-                    collector=self._name,
-                    package_id=None,
-                    source=source,
-                    detail=detail,
-                    cost=self.request_cost,
-                )
-                return self._failed_sweep(detail=detail, run=run)
+            refusal = self._call_refusal(source=source, package_id=None, now=observed_at)
+            if refusal:
+                return self._failed_sweep(detail=refusal, run=run)
 
+            # `entry=None`: the sweep sends no conditional request. See the
+            # module docstring for why a run-scoped read remembers nothing.
+            sent = request_headers(declared=self.headers_for(source), entry=None)
             try:
-                # `entry=None`: the sweep sends no conditional request. See the
-                # module docstring for why a run-scoped read remembers nothing.
-                payload = self._transport.fetch(
-                    source,
-                    headers=request_headers(declared=self._headers, entry=None),
-                )
+                payload = self._transport.fetch(source, headers=sent)
             except TransportError as failure:
-                detail = f"{type(failure).__name__}: {failure}"
+                detail = self._failure_detail(failure, sent=sent, now=observed_at)
                 logger.warning(
                     COLLECTION_FAILED_EVENT,
                     collector=self._name,
@@ -1712,6 +1753,119 @@ class Collector(ABC):
                 f"reported count is not a written row."
             )
             raise CollectorConfigurationError(message)
+
+    def headers_for(self, locator: str) -> dict[str, str]:
+        """Return the declared headers one call to this locator may carry: the credential only for its own host.
+
+        The one place a credential is kept to its host for the primary fetch
+        (`CPM-OPERATE-S05`), and the rule a collector's bounded second calls
+        apply to themselves: `Authorization` travels only to `credential_host`
+        over `https`, and every other locator is sent the declaration without
+        it. Public so a collector making a second call from `translate` can
+        ask the base rather than restating the rule.
+
+        Args:
+            locator: The URL about to be fetched.
+
+        Returns:
+            A fresh dictionary of the declared headers, with `Authorization`
+            stripped unless the locator is the credential's own host over TLS.
+
+        """
+        return credentialed_headers(locator, declared=self._headers, credential_host=self._credential_host)
+
+    def _failure_detail(self, failure: TransportError, *, sent: Mapping[str, str], now: datetime) -> str:
+        """Word one failed fetch, and remember a refused credential for the rest of the window.
+
+        Args:
+            failure: What the transport raised.
+            sent: The headers the failed request carried, which is what decides
+                whether a `401` is a refused credential.
+            now: The instant of the run, which decides the window the refusal
+                is remembered for.
+
+        Returns:
+            The detail the ledger, the evidence row and the log all carry.
+
+        """
+        credentialed = carries_credential(sent)
+        detail = failure_detail(failure, credentialed=credentialed)
+        if credentialed and failure.status_code == REFUSED_CREDENTIAL_STATUS:
+            # Remembered under the collector's name for the current allowance
+            # window, so a sweep meets one refused call per window rather than
+            # one per package; the next window tries the credential once more.
+            self._limiter.remember_refusal(collector=self._name, limit=self._rate_limit, now=now, detail=detail)
+        return detail
+
+    def _call_refusal(self, *, source: str, package_id: int | None, now: datetime) -> str:
+        """Return why no call is issued, logging the reason, or `""` when the call may go.
+
+        Two reasons, asked in this order: the declared credential was refused
+        earlier in this allowance window (`CPM-OPERATE-S05`), which costs no
+        allowance to know; and the allowance itself is spent (`CPM-AD-20`),
+        which is asked of the limiter and charged whether or not it fits.
+
+        Args:
+            source: The locator the collection would read, for the messages.
+            package_id: The package, or `None` for a run-scoped sweep.
+            now: The instant the window is decided from.
+
+        Returns:
+            The detail for a `failed` run, or the empty string.
+
+        """
+        refused_earlier = self._credential_refused_earlier(source=source, now=now)
+        if refused_earlier:
+            logger.warning(
+                COLLECTION_CREDENTIAL_REFUSED_EVENT,
+                collector=self._name,
+                package_id=package_id,
+                source=source,
+                detail=refused_earlier,
+            )
+            return refused_earlier
+        if not self._limiter.acquire(collector=self._name, limit=self._rate_limit, now=now, cost=self.request_cost):
+            detail = (
+                f"{self._name} has spent its allowance of {self._rate_limit.calls} requests per "
+                f"{self._rate_limit.per}; the call was refused rather than issued unlimited (CPM-AD-20)."
+            )
+            logger.warning(
+                COLLECTION_REFUSED_EVENT,
+                collector=self._name,
+                package_id=package_id,
+                source=source,
+                detail=detail,
+                cost=self.request_cost,
+            )
+            return detail
+        return ""
+
+    def _credential_refused_earlier(self, *, source: str, now: datetime) -> str:
+        """Return why no call is issued, when the credential was refused earlier this window.
+
+        Asked before the allowance is charged and before any fetch, and only
+        for a collector that would send a credential -- a collector sending
+        none has nothing to have been refused, and is spared the cache read.
+
+        Args:
+            source: The locator the collection would have read, for the message.
+            now: The instant the window is decided from.
+
+        Returns:
+            The detail for a fail-fast `failed` run, or `""` when the call may
+            be issued.
+
+        """
+        if not carries_credential(self._headers):
+            return ""
+        refused = self._limiter.refusal(collector=self._name, limit=self._rate_limit, now=now)
+        if refused is None:
+            return ""
+        return (
+            f"the declared credential was refused earlier in this allowance window, so no call to {source} was "
+            f"issued; it is tried again when the window turns at {refused.until.isoformat()} (CPM-OPERATE-S05). "
+            f"The refusal recorded: {refused.detail}"
+        )
 
     def _failed_sweep(self, *, detail: str, run: RunHandle) -> CollectionResult:
         """Declare a run-scoped run failed, with no evidence row to write.
@@ -2678,8 +2832,9 @@ def _require_headers(headers: Mapping[str, str], *, label: str) -> Mapping[str, 
         reason `RateLimit` is frozen.
 
     Raises:
-        CollectorConfigurationError: When the declaration is not a mapping of
-            strings to strings; when a name or a value carries a carriage return
+        CollectorConfigurationError: When the declaration is not a mapping, or
+            names a header whose name or value is not a string -- listed by
+            name, never by value; when a name or a value carries a carriage return
             or a line feed; when two names differ only in case; or when it names
             one of `CONDITIONAL_HEADERS`.
 
@@ -2704,13 +2859,25 @@ def _require_headers(headers: Mapping[str, str], *, label: str) -> Mapping[str, 
             run.
 
     """
-    if not isinstance(headers, Mapping) or any(
-        not isinstance(name, str) or not isinstance(value, str) for name, value in headers.items()
-    ):
+    if not isinstance(headers, Mapping):
         message = (
-            f"{label} declares headers={headers!r}, which is not a mapping of header names to values. Headers "
-            f"reach the socket through this base and nowhere else (CPM-AD-27); declare an empty mapping to "
-            f"send none."
+            f"{label} declares headers of type {type(headers).__name__}, which is not a mapping of header names "
+            f"to values. Headers reach the socket through this base and nowhere else (CPM-AD-27); declare an "
+            f"empty mapping to send none."
+        )
+        raise CollectorConfigurationError(message)
+    # The *names* are listed and the values never are: a declared header is
+    # assembled from configuration, and the one this refusal is most likely to
+    # meet is `Authorization` carrying something that is not a string -- whose
+    # repr would put a credential into a boot log (CPM-OPERATE-S05).
+    unusable = sorted(
+        repr(name) for name, value in headers.items() if not isinstance(name, str) or not isinstance(value, str)
+    )
+    if unusable:
+        message = (
+            f"{label} declares the header(s) {', '.join(unusable)} with a name or a value that is not a string. "
+            f"Headers reach the socket through this base and nowhere else (CPM-AD-27), and only a string reaches "
+            f"a socket; the values are not repeated here."
         )
         raise CollectorConfigurationError(message)
     broken = sorted(name for name, value in headers.items() if _has_line_break(name) or _has_line_break(value))
@@ -2739,6 +2906,50 @@ def _require_headers(headers: Mapping[str, str], *, label: str) -> Mapping[str, 
         )
         raise CollectorConfigurationError(message)
     return MappingProxyType(dict(headers))
+
+
+def _require_credential_host(host: str | None, *, headers: Mapping[str, str], label: str) -> str | None:
+    """Refuse a credential host that is unusable, or a declared credential with no host to belong to.
+
+    Args:
+        host: The declared `credential_host`.
+        headers: The already-checked declared headers, read for `Authorization`.
+        label: The class's own name, for the message.
+
+    Returns:
+        The host, lower-cased, or `None` when none is declared and no
+        credential is either.
+
+    Raises:
+        CollectorConfigurationError: When the host is declared and is not a
+            non-empty string naming a bare host -- no scheme, no path, no
+            whitespace -- or when the headers carry `Authorization` and no host
+            is declared. The second refusal names the header and never its
+            value (`CPM-OPERATE-S05`).
+
+    """
+    if host is None:
+        if carries_credential(headers):
+            message = (
+                f"{label} declares an {AUTHORIZATION_HEADER} header and no credential_host, so this base cannot "
+                f"tell which host the credential belongs to and would have to send it everywhere the collector "
+                f"reads. Declare the one host it is for (CPM-OPERATE-S05); the value is not repeated here."
+            )
+            raise CollectorConfigurationError(message)
+        return None
+    if (
+        not isinstance(host, str)
+        or not host
+        or any(character.isspace() for character in host)
+        or host_of(f"https://{host}/") != host.lower()
+    ):
+        message = (
+            f"{label} declares credential_host={host!r}, which is not a bare host name. It is compared against "
+            f"the host of every locator this collector fetches, so it is a host and nothing else: no scheme, no "
+            f"path, no port, no whitespace."
+        )
+        raise CollectorConfigurationError(message)
+    return host.lower()
 
 
 def _has_line_break(text: str) -> bool:

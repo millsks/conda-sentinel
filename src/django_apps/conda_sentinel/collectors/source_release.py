@@ -51,12 +51,23 @@ so.** `core/transport.py` maps `404` and `410` to "the source says this does not
 exist", which is right in general and is *ambiguous* against GitHub in
 particular: it answers `404` identically for a repository that is absent, one
 that is private, one that has moved, and one that is blocked -- deliberately, so
-that an unauthenticated reader cannot enumerate private repositories. This
-collector sends no credential, so it cannot tell those apart, and the honest
-response is not to invent a state it cannot justify: the row still carries
-`not_found`, and its `detail` records that an unauthenticated `404` may mean
-either. Resolving the ambiguity needs a credential, which is deferred with the
-allowance it belongs to.
+that an unauthenticated reader cannot enumerate private repositories. Without
+`CPM_GITHUB_TOKEN` this collector sends no credential, so it cannot tell those
+apart, and the honest response is not to invent a state it cannot justify: the
+row still carries `not_found`, and its `detail` records that a `404` may mean
+either. With a token (`CPM-OPERATE-S05`) the same row is written -- the
+credential buys the allowance, and a `404` still says nothing about *why* -- and
+it is the credential's own reach, not this module, that decides which private
+repositories stop answering `404`.
+
+**The credential, when there is one, is one setting and one header.**
+`collectors/github.py` reads `CPM_GITHUB_TOKEN`, and `__init__` sets this
+instance's `headers` and `rate_limit` from it before the base validates
+either: `Authorization: Bearer` to `api.github.com`, and GitHub's authenticated
+core allowance in place of the unauthenticated one the class declares. The
+token reaches no log line, ledger row, evidence row or `detail`; a credential
+GitHub refuses is a `failed` run whose `detail` names the host and nothing
+else, worded by the base.
 
 **The `error` and `not_found` rows the base writes go through
 `sentinel_evidence`, and this module invents neither.** The base decides which
@@ -106,11 +117,17 @@ from conda_sentinel.collectors.agent import PROJECT_URL
 from conda_sentinel.collectors.agent import UNKNOWN_VERSION
 from conda_sentinel.collectors.agent import USER_AGENT
 from conda_sentinel.collectors.agent import distribution_version
+from conda_sentinel.collectors.github import AUTHENTICATED_CORE_ALLOWANCE
+from conda_sentinel.collectors.github import GITHUB_API_HOST
+from conda_sentinel.collectors.github import authenticated_headers
+from conda_sentinel.collectors.github import github_token
 from conda_sentinel.collectors.models import SourceReleaseSnapshot
 from conda_sentinel.core.clock import is_aware
 from conda_sentinel.core.collection import Collector
 from conda_sentinel.core.collection import CollectorConfigurationError
+from conda_sentinel.core.collection import failure_detail
 from conda_sentinel.core.collection import request_headers
+from conda_sentinel.core.credentials import carries_credential
 from conda_sentinel.core.ledger import current_trace_id
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.core.rate_limit import RateLimit
@@ -125,8 +142,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from collections.abc import Sequence
 
+    from conda_sentinel.core.clock import Clock
     from conda_sentinel.core.models import AppendOnlyModel
+    from conda_sentinel.core.rate_limit import RateLimiter
+    from conda_sentinel.core.response_cache import ResponseCache
     from conda_sentinel.core.transport import Payload
+    from conda_sentinel.core.transport import Transport
 
 __all__ = [
     "ABSENT_CAVEAT",
@@ -253,16 +274,23 @@ SOURCE_RELEASE_RETRIES: Final[int] = DEFAULT_RETRIES
 #: repeated here.
 SOURCE_RELEASE_TIMEOUT: Final[float] = 5.0
 
-#: How hard this collector may push its source (`CPM-AD-20`).
+#: How hard this collector may push its source **with no credential declared**
+#: (`CPM-AD-20`).
 #:
 #: Sixty requests an hour, which is GitHub's documented allowance for
 #: unauthenticated requests and therefore the honest declaration for a collector
 #: that sends no credential. The base charges `1 + retries` per collection, so
 #: this is fifteen packages an hour -- which is **not** enough to sweep
-#: `CPM-NFR-1`'s ten thousand packages, and is recorded as such rather than
-#: inflated to a number nobody measured. Authenticating raises the real allowance
-#: to five thousand an hour; the credential, the setting that carries it and the
-#: sweep that needs it belong together, and none of the three is this story's.
+#: `CPM-NFR-1`'s ten thousand packages inside their two-day target, and is
+#: recorded as such rather than inflated to a number nobody measured.
+#:
+#: This is the class's declaration and it stays the unauthenticated number,
+#: because it is what every audit and every declaration test reads. With
+#: `CPM_GITHUB_TOKEN` set (`CPM-OPERATE-S05`) the *instance* declares
+#: `collectors/github.py`'s `AUTHENTICATED_CORE_ALLOWANCE` instead -- five
+#: thousand an hour, 1,250 collections an hour, a ten-thousand-package inventory
+#: in about eight hours -- and sends the credential to the API host. The number
+#: and the credential are one decision, made once in `__init__`.
 SOURCE_RELEASE_RATE_LIMIT: Final[RateLimit] = RateLimit(calls=60, per=timedelta(hours=1))
 
 #: What this collector's source expects on every request (`CPM-AD-20`,
@@ -274,7 +302,10 @@ SOURCE_RELEASE_RATE_LIMIT: Final[RateLimit] = RateLimit(calls=60, per=timedelta(
 #: collector shares (`collectors/agent.py`): GitHub requires one and asks that it
 #: identify the caller. Nothing conditional is declared -- `If-None-Match` and
 #: `If-Modified-Since` are the base's, composed from what the response cache
-#: holds, and a collector declaring one is refused at construction.
+#: holds, and a collector declaring one is refused at construction. Nothing
+#: *credential* is declared here either: `Authorization` is added per instance
+#: by `collectors/github.py`'s `authenticated_headers` when `CPM_GITHUB_TOKEN`
+#: is set, so this mapping is exactly what an unauthenticated request carries.
 SOURCE_RELEASE_HEADERS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "Accept": "application/vnd.github+json",
@@ -295,8 +326,11 @@ SOURCE_RELEASE_CACHE_TTL: Final[timedelta] = timedelta(days=7)
 
 #: The API host this collector reads, and the web hosts it recognises a repository
 #: URL by. Separate constants because they are separate facts: one is where the
-#: question is asked and the other is what a resolution may have stored.
-GITHUB_API_HOST: Final[str] = "api.github.com"
+#: question is asked and the other is what a resolution may have stored. The API
+#: host is `collectors/github.py`'s spelling, re-exported here so every existing
+#: importer is untouched: it is the one host the credential is sent to, and the
+#: comparison that decides that has to read the same string this module builds
+#: its locators from.
 GITHUB_WEB_HOSTS: Final[frozenset[str]] = frozenset({"github.com", "www.github.com"})
 
 #: How many path segments a repository URL's path must have: the owner and the
@@ -387,12 +421,15 @@ TAGGED_DETAIL: Final[str] = (
 #: exist", which is right in general and ambiguous against this source in
 #: particular: GitHub answers `404` identically for an absent repository, a
 #: private one, one that has moved and one that is blocked, precisely so an
-#: unauthenticated reader cannot enumerate private repositories. This collector
-#: sends no credential, so the row says what it can actually support rather than
-#: claiming the stronger fact.
+#: unauthenticated reader cannot enumerate private repositories. The row says
+#: what it can actually support rather than claiming the stronger fact -- and it
+#: says it the same way with or without `CPM_GITHUB_TOKEN` (`CPM-OPERATE-S05`),
+#: because a credential changes *which* repositories answer `404` and nothing
+#: about what a `404` means; a row that named the credential's presence would be
+#: a permanent statement about a setting that rotates.
 ABSENT_CAVEAT: Final[str] = (
-    "an unauthenticated read cannot tell an absent repository from a private, moved or blocked one: this "
-    "source answers 404 to all four, and no credential is configured"
+    "a 404 from this source cannot tell an absent repository from a private, moved or blocked one: it "
+    "answers 404 to all four, and this row records only that it did"
 )
 
 
@@ -1064,6 +1101,11 @@ class SourceReleaseCollector(Collector):
 
     headers: ClassVar[Mapping[str, str]] = SOURCE_RELEASE_HEADERS
 
+    #: The one host the credential in `headers` belongs to (`CPM-OPERATE-S05`).
+    #: The base strips `Authorization` from any fetch aimed elsewhere, and the
+    #: tag fallback below asks the base for its headers on the same terms.
+    credential_host: ClassVar[str | None] = GITHUB_API_HOST
+
     freshness_target: ClassVar[timedelta | None] = SOURCE_RELEASE_FRESHNESS_TARGET
 
     response_cache_ttl: ClassVar[timedelta | None] = SOURCE_RELEASE_CACHE_TTL
@@ -1091,6 +1133,49 @@ class SourceReleaseCollector(Collector):
     #: row records if a caller ever invokes the hook on its own -- blank means
     #: missing, and inventing a locator would be worse.
     _locator: str = ""
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        transport: Transport | None = None,
+        limiter: RateLimiter | None = None,
+        response_cache: ResponseCache | None = None,
+    ) -> None:
+        """Declare the headers and the allowance this instance sends, from the credential setting.
+
+        The base reads `headers` and `rate_limit` once, at construction, and
+        validates both; so the credential is read here, once, and the two
+        declarations are set on the *instance* before the base looks. The class
+        attributes above stay the unauthenticated declarations -- what every
+        audit and declaration test reads, and what this instance sends when no
+        token is set. The setting is evaluated once per process, so a token
+        rotated in the environment reaches the next worker restart, and the
+        first collection after it is the first to send it (`CPM-OPERATE-S05`).
+
+        Args:
+            clock: The clock every instant in this run is read from.
+            transport: The seam `CPM-AD-27` opens, or `None` for the real one.
+            limiter: The rate limiter, or `None` for the shared cache-backed one.
+            response_cache: The response cache, or `None` for the shared one.
+
+        Raises:
+            ImproperlyConfigured: When `CPM_GITHUB_TOKEN` holds a value that can
+                never become a header -- refused at boot already, and refused
+                again here so nothing that bypassed the hook can send it.
+            CollectorConfigurationError: The base's own refusals, unchanged;
+                `_require_headers` still validates the assembled mapping.
+
+        """
+        token = github_token()
+        # Instance attributes shadowing the two ClassVars, which is the one
+        # arrangement that keeps the class's declarations honest *and* lets the
+        # base's constructor read what this instance actually sends. mypy reads
+        # an assignment to a ClassVar through `self` as a mistake, and here it
+        # is the point.
+        self.headers = authenticated_headers(SOURCE_RELEASE_HEADERS, token)  # type: ignore[misc]
+        self.rate_limit = AUTHENTICATED_CORE_ALLOWANCE if token else SOURCE_RELEASE_RATE_LIMIT  # type: ignore[misc]
+        super().__init__(clock=clock, transport=transport, limiter=limiter, response_cache=response_cache)
 
     @classmethod
     def selectable_packages(cls) -> Iterable[int]:
@@ -1206,6 +1291,13 @@ class SourceReleaseCollector(Collector):
         orchestration into the limiter, and the arithmetic belongs with the story
         that first sweeps at volume.
 
+        Its headers come from the base's `headers_for`, which keeps the
+        credential for this locator because the tags endpoint is the declared
+        credential host -- the same call the recipe read in
+        `collectors/feedstock.py` makes, where the answer is to strip it. A
+        failure of it is worded by the base's `failure_detail`, so a `401` to
+        a credentialed request says so inside the succeeded row's detail.
+
         Args:
             releases: What the release document said, which is the answer this
                 falls back from and returns to on any failure.
@@ -1223,10 +1315,12 @@ class SourceReleaseCollector(Collector):
 
         """
         locator = tags_locator(self._repository_url(package_id))
+        sent = request_headers(declared=self.headers_for(locator), entry=None)
         try:
-            payload = self._transport.fetch(locator, headers=request_headers(declared=self._headers, entry=None))
+            payload = self._transport.fetch(locator, headers=sent)
         except TransportError as failure:
-            return replace(releases, detail=f"{releases.detail}; its tags could not be read: {failure}")
+            detail = failure_detail(failure, credentialed=carries_credential(sent))
+            return replace(releases, detail=f"{releases.detail}; its tags could not be read: {detail}")
         if not payload.found:
             return replace(releases, detail=f"{releases.detail}; {locator} reports that it lists no tags")
         if payload.not_modified:

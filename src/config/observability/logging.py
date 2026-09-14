@@ -122,11 +122,19 @@ def _renderer(log_format: str) -> list[Processor]:
 
     """
     if log_format == JSON:
-        # dict_tracebacks renders exceptions as structured data rather than an
-        # embedded multi-line string, which keeps a JSON line machine-readable.
+        # Exceptions are rendered as structured data rather than an embedded
+        # multi-line string, which keeps a JSON line machine-readable. This is
+        # what `structlog.processors.dict_tracebacks` does -- with one
+        # difference that is the whole reason it is spelled out: the default
+        # transformer prints every frame's *locals*, and a frame on the
+        # collector path holds the GitHub credential as a local (`token`,
+        # `declared`, `headers`) from `github_token()` down to the transport's
+        # `fetch`. An exception raised through any of them -- a soft time limit,
+        # a refused construction -- would print the bearer into the log
+        # (`CPM-OPERATE-S05`). So locals are off; frames, lines and names stay.
         return [
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.processors.dict_tracebacks,
+            structlog.processors.ExceptionRenderer(structlog.tracebacks.ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ]
     return [

@@ -65,11 +65,13 @@ from conda_sentinel.core.clock import FixedClock
 from conda_sentinel.core.collection import CONDITIONAL_HEADERS
 from conda_sentinel.core.collection import NO_CACHE
 from conda_sentinel.core.collection import NO_WINDOW
+from conda_sentinel.core.collection import REFUSED_CREDENTIAL_STATUS
 from conda_sentinel.core.collection import STATE_FIELD
 from conda_sentinel.core.collection import SUPPRESSING_STATES
 from conda_sentinel.core.collection import CollectionResult
 from conda_sentinel.core.collection import Collector
 from conda_sentinel.core.collection import CollectorConfigurationError
+from conda_sentinel.core.collection import failure_detail
 from conda_sentinel.core.collection import request_headers
 from conda_sentinel.core.collection import window_query
 from conda_sentinel.core.models import CollectionRun
@@ -78,8 +80,12 @@ from conda_sentinel.core.rate_limit import RateLimit
 from conda_sentinel.core.rate_limit import RateLimitError
 from conda_sentinel.core.runs import RunState
 from conda_sentinel.core.transport import DEFAULT_RETRIES
+from conda_sentinel.core.transport import DEFAULT_RETRY_STATUSES
 from conda_sentinel.core.transport import RequestsTransport
+from conda_sentinel.core.transport import TransportError
 from tests.clocks import FIXED_INSTANT
+from tests.collectors import A_GITHUB_TOKEN
+from tests.collectors import A_GITHUB_TOKEN_PREFIX
 from tests.collectors import A_LAST_MODIFIED
 from tests.collectors import AN_ETAG
 from tests.collectors import DETERMINATE_VALUE
@@ -90,6 +96,7 @@ from tests.collectors import FIXTURE_HEADERS
 from tests.collectors import FIXTURE_REQUEST_COST
 from tests.collectors import FIXTURE_TABLE
 from tests.collectors import FIXTURE_TIMEOUT
+from tests.collectors import FIXTURE_USER_AGENT
 from tests.collectors import FIXTURE_WINDOW
 from tests.collectors import SEVERAL_SENTINEL_ROWS
 from tests.collectors import RecordedTransport
@@ -688,8 +695,30 @@ def test_headers_that_are_not_a_mapping_of_strings_are_refused(declared: object)
     """
     built = collector_class(declared_model=fixture_evidence_model(), declared_headers=declared)  # type: ignore[arg-type]
 
-    with pytest.raises(CollectorConfigurationError, match="headers="):
+    with pytest.raises(CollectorConfigurationError, match="header"):
         built(clock=_clock())
+
+
+def test_a_header_whose_value_is_not_a_string_is_refused_by_name_and_never_by_value() -> None:
+    """`CPM-OPERATE-S05`: the refusal that is likeliest to meet a credential does not repr it.
+
+    A declared `Authorization` is assembled from configuration, so the value in
+    the wrong type is the credential in the wrong type -- and a refusal that
+    repr'd the whole mapping would put it into a boot log. The message names
+    the header and says nothing about what it held.
+    """
+    credential = A_GITHUB_TOKEN.encode()
+    built = collector_class(
+        declared_model=fixture_evidence_model(),
+        declared_headers={"User-Agent": FIXTURE_USER_AGENT, "Authorization": credential},  # type: ignore[dict-item]
+    )
+
+    with pytest.raises(CollectorConfigurationError, match="'Authorization'") as refused:
+        built(clock=_clock())
+
+    assert A_GITHUB_TOKEN not in str(refused.value)
+    assert A_GITHUB_TOKEN_PREFIX not in str(refused.value)
+    assert "User-Agent" not in str(refused.value)
 
 
 @pytest.mark.parametrize(
@@ -814,6 +843,131 @@ def test_the_conditional_request_is_composed_over_the_declared_headers() -> None
     composed = request_headers(declared={"If-None-Match": "forged"}, entry=cached_response(etag=AN_ETAG))
 
     assert composed == {"If-None-Match": AN_ETAG}
+
+
+# ---------------------------------------------------------------------------
+# The wording of a failed fetch (`CPM-OPERATE-S05`).
+# ---------------------------------------------------------------------------
+
+
+def test_a_refused_credential_is_worded_as_the_operators_problem_and_names_only_the_host() -> None:
+    """The matrix's `Refused` row: `401` reads as a refused credential, by host, with the transport's message after it.
+
+    The transport's message carries the locator and the status and nothing
+    else, and the sentence in front of it carries the host and nothing else; so
+    the whole `detail` carries no header, however the failure was raised.
+    """
+    locator = "https://api.github.com/repos/an-owner/a-repository/releases?per_page=30"
+    failure = TransportError(
+        f"{locator} answered 401, which is neither a success nor an absence.",
+        source=locator,
+        status_code=REFUSED_CREDENTIAL_STATUS,
+    )
+
+    detail = failure_detail(failure, credentialed=True)
+
+    assert detail.startswith("the declared credential was refused by api.github.com: ")
+    assert detail.endswith(str(failure))
+    assert "Authorization" not in detail
+    assert "Bearer" not in detail
+
+
+def test_a_401_to_a_request_that_carried_no_credential_is_worded_as_any_other_failure() -> None:
+    """A source demanding a credential this collector never declared is not a refused credential."""
+    failure = TransportError("answered 401", source="https://example.invalid/x", status_code=REFUSED_CREDENTIAL_STATUS)
+
+    assert failure_detail(failure, credentialed=False) == f"TransportError: {failure}"
+
+
+def test_every_other_failure_is_worded_as_it_always_was() -> None:
+    """`<Type>: <message>` for a timeout, a `403`, a `500` -- the shape every existing case and log query reads."""
+    for status in (None, 403, 404, 500):
+        failure = TransportError("the source did not cooperate", source="https://example.invalid/x", status_code=status)
+
+        assert failure_detail(failure, credentialed=True) == f"TransportError: {failure}"
+        assert failure_detail(failure, credentialed=False) == f"TransportError: {failure}"
+
+
+def test_a_refusal_whose_locator_names_no_host_falls_back_to_the_locator() -> None:
+    """A substituted transport may raise for a locator that is not a URL; the sentence still says something true."""
+    for locator in ("not a url", "", "https://[::1"):
+        failure = TransportError("refused", source=locator, status_code=REFUSED_CREDENTIAL_STATUS)
+
+        assert (
+            failure_detail(failure, credentialed=True) == f"the declared credential was refused by {locator}: refused"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The credential host (`CPM-OPERATE-S05`).
+# ---------------------------------------------------------------------------
+
+
+def test_a_declared_credential_with_no_host_to_belong_to_is_refused_naming_the_header_only() -> None:
+    """A credential with nowhere it belongs is a credential that would go everywhere; refused at construction."""
+    built = collector_class(
+        declared_model=fixture_evidence_model(),
+        declared_headers={**FIXTURE_HEADERS, "Authorization": f"Bearer {A_GITHUB_TOKEN}"},
+    )
+
+    with pytest.raises(CollectorConfigurationError, match="credential_host") as refused:
+        built(clock=_clock())
+
+    assert A_GITHUB_TOKEN_PREFIX not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "declared",
+    ["", "  ", "https://api.example.test", "api.example.test/repos", "api.example.test:443", 7, "api example"],
+    ids=repr,
+)
+def test_a_credential_host_that_is_not_a_bare_host_is_refused(declared: object) -> None:
+    """It is compared against every locator's host, so it is a host and nothing else.
+
+    Args:
+        declared: The unusable declaration.
+
+    """
+    built = collector_class(
+        declared_model=fixture_evidence_model(),
+        declared_credential_host=declared,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CollectorConfigurationError, match="credential_host"):
+        built(clock=_clock())
+
+
+def test_the_base_keeps_the_credential_to_its_host_and_strips_it_everywhere_else() -> None:
+    """`headers_for` on a constructed collector: the declared host over TLS keeps the bearer; nothing else does."""
+    built = collector_class(
+        declared_model=fixture_evidence_model(),
+        declared_headers={**FIXTURE_HEADERS, "Authorization": f"Bearer {A_GITHUB_TOKEN}"},
+        declared_credential_host="API.Example.test",
+    )
+    collector = built(clock=_clock())
+
+    try:
+        kept = collector.headers_for("https://api.example.test/repos/x/y")
+        stripped = [
+            collector.headers_for(locator)
+            for locator in (
+                "http://api.example.test/repos/x/y",
+                "https://raw.example.test/x/y",
+                "https://api.example.test.evil.example/x",
+                "not a locator",
+            )
+        ]
+    finally:
+        collector.close()
+
+    assert kept == {**FIXTURE_HEADERS, "Authorization": f"Bearer {A_GITHUB_TOKEN}"}
+    assert stripped == [dict(FIXTURE_HEADERS)] * 4
+
+
+def test_a_refused_credential_is_never_retried() -> None:
+    """`401` answers identically however many times it is asked, so it is not a retry status and never becomes one."""
+    assert REFUSED_CREDENTIAL_STATUS == 401  # noqa: PLR2004 - the HTTP status the wording is about
+    assert REFUSED_CREDENTIAL_STATUS not in DEFAULT_RETRY_STATUSES
 
 
 def test_the_fixture_evidence_model_is_invisible_to_the_registry_sweeps() -> None:

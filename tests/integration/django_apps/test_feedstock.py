@@ -40,6 +40,7 @@ integration test; the marker is not re-applied by hand.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -49,8 +50,10 @@ from typing import ClassVar
 from typing import Final
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError
 from django.db import transaction
+from django.test import override_settings
 
 from conda_sentinel.collectors import feedstock as feedstock_module
 from conda_sentinel.collectors import tasks as collector_tasks
@@ -58,6 +61,7 @@ from conda_sentinel.collectors.feedstock import ABSENT_FEEDSTOCK_DETAIL
 from conda_sentinel.collectors.feedstock import COLLECTOR_NAME
 from conda_sentinel.collectors.feedstock import FEEDSTOCK_FRESHNESS_TARGET
 from conda_sentinel.collectors.feedstock import FEEDSTOCK_HEADERS
+from conda_sentinel.collectors.feedstock import FEEDSTOCK_RATE_LIMIT
 from conda_sentinel.collectors.feedstock import FEEDSTOCK_RETRIES
 from conda_sentinel.collectors.feedstock import NEITHER_DETAIL
 from conda_sentinel.collectors.feedstock import NO_STAGED_RECIPE_DETAIL
@@ -72,6 +76,9 @@ from conda_sentinel.collectors.feedstock import FeedstockLocatorError
 from conda_sentinel.collectors.feedstock import recipe_locator
 from conda_sentinel.collectors.feedstock import repository_locator
 from conda_sentinel.collectors.feedstock import staged_recipes_locator
+from conda_sentinel.collectors.github import AUTHENTICATED_SEARCH_ALLOWANCE
+from conda_sentinel.collectors.github import BEARER_SCHEME
+from conda_sentinel.collectors.github import GITHUB_TOKEN_SETTING
 from conda_sentinel.collectors.models import ESTABLISHED_ABSENCE_CONSTRAINT
 from conda_sentinel.collectors.models import FEEDSTOCK_FACTS_CONSTRAINT
 from conda_sentinel.collectors.models import STAGED_RECIPE_CONSTRAINT
@@ -79,6 +86,8 @@ from conda_sentinel.collectors.models import FeedstockSnapshot
 from conda_sentinel.collectors.tasks import collect_feedstock
 from conda_sentinel.core.clock import Clock
 from conda_sentinel.core.clock import FixedClock
+from conda_sentinel.core.collection import REFUSED_CREDENTIAL_STATUS
+from conda_sentinel.core.credentials import AUTHORIZATION_HEADER
 from conda_sentinel.core.freshness import UNOBSERVED_STATUS
 from conda_sentinel.core.models import CollectionRun
 from conda_sentinel.core.outcomes import OutcomeState
@@ -92,10 +101,12 @@ from conda_sentinel.identity.models import MappingKind
 from conda_sentinel.identity.models import Package
 from conda_sentinel.identity.models import PackageMapping
 from tests.clocks import FIXED_INSTANT
+from tests.collectors import A_GITHUB_TOKEN
 from tests.collectors import FixedLimiter
 from tests.collectors import RecordingResponseCache
 from tests.collectors import ScriptedTransport
 from tests.collectors import cached_response
+from tests.collectors import credential_sightings
 from tests.collectors import recorded_payload
 
 if TYPE_CHECKING:
@@ -129,6 +140,9 @@ ANOTHER_STAGED_URL: Final[str] = "https://github.com/conda-forge/staged-recipes/
 
 #: The entity tag a source hands back, for the caching cases.
 AN_ETAG: Final[str] = '"f33d"'
+
+#: The header the credential travels in, as the API host must receive it.
+THE_BEARER: Final[str] = f"{BEARER_SCHEME} {A_GITHUB_TOKEN}"
 
 #: The counts the cases assert against, one named constant per concept. Named
 #: because `PLR2004` is right about a bare number in an assertion, and kept apart
@@ -1580,3 +1594,342 @@ def test_an_absence_row_may_claim_to_have_established_one() -> None:
     )
 
     assert written.pk is not None
+
+
+# ---------------------------------------------------------------------------
+# The credential (`CPM-OPERATE-S05`): which host gets it, and where it never appears.
+# ---------------------------------------------------------------------------
+
+
+def _refusal(locator: str, status: int | None) -> TransportError:
+    """Return the failure the transport raises for a status that is neither success nor absence.
+
+    Args:
+        locator: What was being read.
+        status: The status the source answered, or `None` for no answer.
+
+    Returns:
+        The error, worded as `core/transport.py` words it: the locator and the
+        status, and no header.
+
+    """
+    message = f"{locator} answered {status}, which is neither a success nor an absence."
+    if status is None:
+        message = f"the call to {locator} produced no answer"
+    return TransportError(message, source=locator, status_code=status)
+
+
+def _collect_with_token(package: Package, *, transport: ScriptedTransport) -> tuple[CollectionResult, FixedLimiter]:
+    """Run one collection with the credential declared, and hand back what the limiter was asked.
+
+    Args:
+        package: The package to observe.
+        transport: The scripted transport.
+
+    Returns:
+        The result, and the limiter whose `asks` say which allowance the run
+        was charged against.
+
+    """
+    limiter = FixedLimiter(permitted=True)
+    with override_settings(**{GITHUB_TOKEN_SETTING: A_GITHUB_TOKEN}):
+        collector = FeedstockCollector(
+            clock=FixedClock(instant=FIXED_INSTANT),
+            transport=transport,
+            limiter=limiter,
+            response_cache=RecordingResponseCache(),
+        )
+    try:
+        return collector.collect(package_id=package.pk), limiter
+    finally:
+        collector.close()
+
+
+def _authorization_sent(transport: ScriptedTransport) -> dict[str, str | None]:
+    """Return what `Authorization` each locator was sent, by locator.
+
+    Args:
+        transport: The transport after a collection.
+
+    Returns:
+        The header's value per call, `None` where the call carried none.
+
+    """
+    return {
+        locator: dict(sent or {}).get(AUTHORIZATION_HEADER)
+        for locator, sent in zip(transport.calls, transport.sent_headers, strict=True)
+    }
+
+
+@pytest.mark.django_db
+def test_on_the_mapped_branch_the_api_host_receives_the_bearer_and_the_raw_host_does_not() -> None:
+    """The matrix's `Token, raw host` row: the repository read carries the credential, the recipe read does not.
+
+    The recipe lives on `raw.githubusercontent.com`, which GitHub does not count
+    against the API allowance and does not need the credential for; a
+    credential reaches exactly the host it is for. Everything else about the
+    recipe read is unchanged -- the declared headers still go.
+    """
+    package = _a_package()
+    transport = _answering(repository=_repository_document(), recipe=_recipe_document())
+
+    result, limiter = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    assert transport.calls == [THE_REPOSITORY_LOCATOR, THE_RECIPE_LOCATOR]
+    assert _authorization_sent(transport) == {THE_REPOSITORY_LOCATOR: THE_BEARER, THE_RECIPE_LOCATOR: None}
+    assert dict(FEEDSTOCK_HEADERS).items() <= dict(transport.sent_headers[1] or {}).items()
+    assert [limit for _, limit, _, _ in limiter.asks] == [AUTHENTICATED_SEARCH_ALLOWANCE]
+    assert FeedstockCollector.rate_limit == FEEDSTOCK_RATE_LIMIT
+    assert FeedstockCollector.headers == FEEDSTOCK_HEADERS
+
+
+@pytest.mark.django_db
+def test_on_the_absent_branch_both_api_calls_carry_the_bearer() -> None:
+    """The search and the conventional-repository read are both the API host, so both carry the credential."""
+    package = _a_package(feedstocks=())
+    transport = _answering(search=_search_document(), repository=_repository_document())
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    assert transport.calls == [THE_SEARCH_LOCATOR, THE_REPOSITORY_LOCATOR]
+    assert _authorization_sent(transport) == {THE_SEARCH_LOCATOR: THE_BEARER, THE_REPOSITORY_LOCATOR: THE_BEARER}
+
+
+@pytest.mark.django_db
+def test_without_a_token_no_call_carries_a_credential() -> None:
+    """The matrix's `No token` row, on the wire: exactly the declared headers on both calls."""
+    package = _a_package()
+    transport = _answering(repository=_repository_document(), recipe=_recipe_document())
+
+    with override_settings(**{GITHUB_TOKEN_SETTING: ""}):
+        result = _collect(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    assert [dict(sent or {}) for sent in transport.sent_headers] == [dict(FEEDSTOCK_HEADERS), dict(FEEDSTOCK_HEADERS)]
+
+
+@pytest.mark.django_db
+def test_a_refused_credential_is_a_failed_run_whose_detail_names_the_host_and_never_the_header(
+    captured_collection_logs: list[dict[str, Any]],
+) -> None:
+    """The matrix's `Refused` row: `401` from the API host, worded by the base; nothing retried, nothing leaked."""
+    package = _a_package()
+    transport = _answering(recipe=_recipe_document())
+    transport.failures[THE_REPOSITORY_LOCATOR] = _refusal(THE_REPOSITORY_LOCATOR, REFUSED_CREDENTIAL_STATUS)
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.FAILED
+    assert result.detail.startswith("the declared credential was refused by api.github.com: ")
+    assert transport.calls == [THE_REPOSITORY_LOCATOR]
+    row = _rows(package)[0]
+    run = _run(package)
+    assert row.state == OutcomeState.ERROR.value
+    assert row.detail == result.detail
+    assert run.status == RunState.FAILED.value
+    assert run.detail == result.detail
+    assert credential_sightings(rows=[row, run], events=captured_collection_logs, details=[result.detail]) == []
+    assert [event["detail"] for event in captured_collection_logs] == [result.detail]
+
+
+@dataclass(frozen=True, slots=True)
+class _Expected:
+    """What one hygiene path is expected to produce: the run's end, the row's claim, and how `detail` opens."""
+
+    state: RunState
+    outcome: OutcomeState
+    detail_prefix: str = ""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("scripted", "failing", "expected"),
+    [
+        pytest.param(
+            {"repository": _repository_document(), "recipe": _recipe_document()},
+            None,
+            _Expected(RunState.SUCCEEDED, OutcomeState.OK),
+            id="success-mapped",
+        ),
+        pytest.param(
+            {"search": _search_document(), "repository": _repository_document()},
+            None,
+            _Expected(RunState.SUCCEEDED, OutcomeState.OK),
+            id="success-absent",
+        ),
+        pytest.param(
+            {"recipe": _recipe_document()},
+            REFUSED_CREDENTIAL_STATUS,
+            _Expected(RunState.FAILED, OutcomeState.ERROR, "the declared credential was refused by api.github.com: "),
+            id="401",
+        ),
+        pytest.param(
+            {"recipe": _recipe_document()},
+            403,
+            _Expected(RunState.FAILED, OutcomeState.ERROR, "TransportError: "),
+            id="403",
+        ),
+        pytest.param(
+            {"repository": recorded_payload(source=THE_REPOSITORY_LOCATOR, found=False, body="")},
+            None,
+            _Expected(RunState.SUCCEEDED, OutcomeState.NOT_FOUND),
+            id="404",
+        ),
+        pytest.param(
+            {"recipe": _recipe_document()},
+            -1,
+            _Expected(RunState.FAILED, OutcomeState.ERROR, "TransportError: "),
+            id="transport-failure",
+        ),
+        pytest.param(
+            {"repository": _repository_document()},
+            "recipe",
+            _Expected(RunState.SUCCEEDED, OutcomeState.OK),
+            id="recipe-401-on-the-raw-host",
+        ),
+    ],
+)
+def test_the_token_reaches_no_row_log_line_or_detail_on_any_path(
+    captured_collection_logs: list[dict[str, Any]],
+    scripted: dict[str, str | Payload],
+    failing: int | str | None,
+    expected: _Expected,
+) -> None:
+    """The matrix's `Hygiene` row, over every path a collection can take with the credential set.
+
+    Every evidence row, every ledger row and every captured event is rendered
+    whole and grepped for the token and for its first eight characters; the
+    only places the credential may be are the headers the API host received.
+    The recipe read on the raw host never carries it, on any path -- including
+    the one where that host answers `401`, which is then a sentence in
+    `detail` beside a feedstock the first call established, and still carries
+    no header.
+
+    Args:
+        scripted: What each named locator answers.
+        failing: The status the repository locator fails with, `-1` for a call
+            that gets no answer, `"recipe"` for a `401` on the recipe read, or
+            `None` for no failure.
+        expected: How the run ends, what the row claims, how `detail` opens.
+
+    """
+    package = _a_package(feedstocks=() if "search" in scripted else (THE_REPOSITORY,))
+    transport = _answering(**scripted)
+    if failing == "recipe":
+        transport.failures[THE_RECIPE_LOCATOR] = _refusal(THE_RECIPE_LOCATOR, REFUSED_CREDENTIAL_STATUS)
+    elif failing is not None:
+        transport.failures[THE_REPOSITORY_LOCATOR] = _refusal(
+            THE_REPOSITORY_LOCATOR, None if failing == -1 else failing
+        )
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == expected.state
+    assert result.detail.startswith(expected.detail_prefix)
+    rows = _rows(package)
+    run = _run(package)
+    assert [row.state for row in rows] == [expected.outcome.value]
+    assert run.status == expected.state.value
+    sent = _authorization_sent(transport)
+    assert sent
+    assert all(value == THE_BEARER for locator, value in sent.items() if locator != THE_RECIPE_LOCATOR)
+    assert sent.get(THE_RECIPE_LOCATOR, None) is None
+    assert credential_sightings(rows=[*rows, run], events=captured_collection_logs, details=[result.detail]) == []
+
+
+@pytest.mark.django_db
+def test_a_refused_credential_on_the_conventional_read_is_worded_inside_the_succeeded_rows_detail(
+    captured_collection_logs: list[dict[str, Any]],
+) -> None:
+    """The absent branch's second call is the API host, so a `401` to it is a refused credential -- in the row.
+
+    The search answer stands, the conventional repository is recorded as
+    unchecked, and the reason carries the base's own wording; the recipe read
+    on the raw host, by contrast, never carries the credential, so a `401`
+    there is worded as any other failure -- the hygiene matrix's
+    `recipe-401-on-the-raw-host` case.
+    """
+    package = _a_package(feedstocks=())
+    transport = _answering(search=_search_document())
+    transport.failures[THE_REPOSITORY_LOCATOR] = _refusal(THE_REPOSITORY_LOCATOR, REFUSED_CREDENTIAL_STATUS)
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    row = _rows(package)[0]
+    assert UNCHECKED_FEEDSTOCK_DETAIL in row.detail
+    assert f"{THE_REPOSITORY_LOCATOR} could not be read: the declared credential was refused by api.github.com: " in (
+        row.detail
+    )
+    assert _authorization_sent(transport) == {THE_SEARCH_LOCATOR: THE_BEARER, THE_REPOSITORY_LOCATOR: THE_BEARER}
+    assert (
+        credential_sightings(rows=[row, _run(package)], events=captured_collection_logs, details=[result.detail]) == []
+    )
+
+
+@pytest.mark.django_db
+def test_a_401_from_the_raw_host_is_not_a_refused_credential_because_none_was_sent() -> None:
+    """The recipe read carries no bearer, so its `401` keeps the transport's own words."""
+    package = _a_package()
+    transport = _answering(repository=_repository_document())
+    transport.failures[THE_RECIPE_LOCATOR] = _refusal(THE_RECIPE_LOCATOR, REFUSED_CREDENTIAL_STATUS)
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    row = _rows(package)[0]
+    assert f"{THE_RECIPE_LOCATOR} could not be read: TransportError: " in row.detail
+    assert "refused by" not in row.detail
+    assert _authorization_sent(transport)[THE_RECIPE_LOCATOR] is None
+
+
+# ---------------------------------------------------------------------------
+# The task path, with every first-party logger captured (`CPM-OPERATE-S05`).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_the_task_sends_the_bearer_to_the_api_host_only_and_prints_the_token_nowhere_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_every_structlog_logger: list[dict[str, Any]],
+) -> None:
+    """Through `collect_feedstock` with the setting declared: the API host gets the bearer, nothing else does."""
+    transport = _answering(repository=_repository_document(), recipe=_recipe_document())
+    monkeypatch.setattr(SubstitutedCollector, "fixed_clock", FixedClock(instant=FIXED_INSTANT))
+    monkeypatch.setattr(SubstitutedCollector, "fixed_transport", transport)
+    monkeypatch.setattr(collector_tasks, "FeedstockCollector", SubstitutedCollector)
+    package = _a_package()
+
+    with override_settings(**{GITHUB_TOKEN_SETTING: A_GITHUB_TOKEN}):
+        ended = collect_feedstock(package_id=package.pk)
+
+    assert ended == RunState.SUCCEEDED.value
+    assert _authorization_sent(transport) == {THE_REPOSITORY_LOCATOR: THE_BEARER, THE_RECIPE_LOCATOR: None}
+    assert (
+        credential_sightings(rows=[*_rows(package), _run(package)], events=captured_every_structlog_logger, details=[])
+        == []
+    )
+
+
+@pytest.mark.django_db
+def test_the_task_refuses_a_malformed_token_at_construction_and_prints_it_nowhere(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_every_structlog_logger: list[dict[str, Any]],
+) -> None:
+    """A malformed value raises `ImproperlyConfigured` out of the task before any ledger row, and names the setting."""
+    monkeypatch.setattr(collector_tasks, "FeedstockCollector", SubstitutedCollector)
+    package = _a_package()
+    malformed = f"{A_GITHUB_TOKEN}\n{A_GITHUB_TOKEN}"
+
+    with (
+        override_settings(**{GITHUB_TOKEN_SETTING: malformed}),
+        pytest.raises(ImproperlyConfigured) as refused,
+    ):
+        collect_feedstock(package_id=package.pk)
+
+    assert GITHUB_TOKEN_SETTING in str(refused.value)
+    assert credential_sightings(rows=[], events=captured_every_structlog_logger, details=[str(refused.value)]) == []
+    assert CollectionRun.objects.filter(collector=COLLECTOR_NAME, package=package).count() == 0
+    assert _rows(package) == []

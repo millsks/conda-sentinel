@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sys
+from typing import TYPE_CHECKING
+from typing import Any
+
 import structlog
 from opentelemetry.sdk.trace import TracerProvider
 
@@ -12,7 +16,12 @@ from config.observability.logging import add_otel_context
 from config.observability.logging import build_logging_config
 from config.observability.logging import resolve_log_format
 from config.observability.logging import shared_processors
+from tests.collectors import A_GITHUB_TOKEN
+from tests.collectors import A_GITHUB_TOKEN_PREFIX
 from tests.logging_config import assert_writes_no_files
+
+if TYPE_CHECKING:
+    from structlog.typing import Processor
 
 # Hex widths mandated by the OpenTelemetry spec.
 TRACE_ID_HEX_LEN = 32
@@ -169,3 +178,48 @@ class TestTheStreamIsJsonAndNothingIsWrittenToAFile:
     def test_json_is_what_a_non_debug_run_resolves_to(self):
         """The other half: nothing has to be configured to get the JSON stream."""
         assert resolve_log_format(debug=False) == JSON
+
+    def test_a_rendered_traceback_carries_no_frame_locals(self):
+        """`CPM-OPERATE-S05`: an exception raised through a frame holding the credential never prints it.
+
+        `structlog.processors.dict_tracebacks` renders every frame's locals by
+        default, and the collector path holds the GitHub token as a local from
+        `github_token()` down to the transport's `fetch` -- so a soft time limit
+        or a refused construction would print the bearer into the JSON log.
+        Rendered two ways over one exception: the stock transformer is the
+        control, proving the exception *does* carry the value where locals are
+        shown, and the configured chain is the assertion. The frames themselves
+        still render -- the function name is the second control -- so the fix is
+        "no locals" rather than "no traceback".
+        """
+        token = A_GITHUB_TOKEN
+
+        def a_frame_holding_the_credential(declared: str) -> None:
+            headers = {"Authorization": f"Bearer {declared}"}
+            message = f"raised through a frame holding {len(headers)} header"
+            raise RuntimeError(message)
+
+        try:
+            a_frame_holding_the_credential(token)
+        except RuntimeError:
+            exc_info = sys.exc_info()
+
+        def rendered(processors: list[Processor]) -> str:
+            event: dict[str, Any] = {"event": "boom", "exc_info": exc_info, "_record": None, "_from_structlog": True}
+            for processor in processors:
+                event = processor(None, "error", event)  # type: ignore[assignment]
+            return str(event)
+
+        control = rendered(
+            [
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.processors.dict_tracebacks,
+                structlog.processors.JSONRenderer(),
+            ],
+        )
+        line = rendered(_renderer(JSON))
+
+        assert token in control, "the control did not carry the credential, so the assertion would be vacuous"
+        assert "a_frame_holding_the_credential" in line
+        assert token not in line
+        assert A_GITHUB_TOKEN_PREFIX not in line

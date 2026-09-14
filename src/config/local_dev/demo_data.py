@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     from conda_sentinel.collectors.inventory import ImportOutcome
     from conda_sentinel.core.clock import Clock
     from conda_sentinel.core.collection import CollectionResult
+    from conda_sentinel.core.rate_limit import CredentialRefusal
     from conda_sentinel.core.rate_limit import RateLimit
     from conda_sentinel.core.transport import Transport
     from conda_sentinel.identity.models import Package
@@ -535,6 +536,37 @@ class _Unmetered:
 
         """
         return True
+
+    def remember_refusal(self, *, collector: str, limit: RateLimit, now: datetime, detail: str) -> datetime:
+        """Remember nothing: the seed is a one-off, and a refusal met once is met once.
+
+        Args:
+            collector: The collector's declared name. Unread.
+            limit: The allowance whose window the memo would live for.
+            now: The instant the refusal was met.
+            detail: What the run recorded. Unread.
+
+        Returns:
+            When the window would turn, which is what the base reports.
+
+        """
+        from conda_sentinel.core.rate_limit import window_end  # noqa: PLC0415 - after django.setup()
+
+        return window_end(limit=limit, now=now)
+
+    def refusal(self, *, collector: str, limit: RateLimit, now: datetime) -> CredentialRefusal | None:
+        """Answer that nothing was refused, whatever was asked.
+
+        Args:
+            collector: The collector's declared name. Unread.
+            limit: The allowance. Unread.
+            now: The instant. Unread.
+
+        Returns:
+            `None`, always.
+
+        """
+        return None
 
 
 def seed_demo_inventory(*, transport: Transport | None = None) -> dict[str, object]:

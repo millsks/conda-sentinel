@@ -50,10 +50,15 @@ from typing import ClassVar
 from typing import Final
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError
 from django.db import transaction
+from django.test import override_settings
 
 from conda_sentinel.collectors import tasks as collector_tasks
+from conda_sentinel.collectors.github import AUTHENTICATED_CORE_ALLOWANCE
+from conda_sentinel.collectors.github import BEARER_SCHEME
+from conda_sentinel.collectors.github import GITHUB_TOKEN_SETTING
 from conda_sentinel.collectors.models import RELEASE_FACTS_CONSTRAINT
 from conda_sentinel.collectors.models import SourceReleaseSnapshot
 from conda_sentinel.collectors.source_release import ABSENT_CAVEAT
@@ -61,6 +66,7 @@ from conda_sentinel.collectors.source_release import COLLECTOR_NAME
 from conda_sentinel.collectors.source_release import NO_RELEASES_DETAIL
 from conda_sentinel.collectors.source_release import NO_TAGS_DETAIL
 from conda_sentinel.collectors.source_release import SOURCE_RELEASE_HEADERS
+from conda_sentinel.collectors.source_release import SOURCE_RELEASE_RATE_LIMIT
 from conda_sentinel.collectors.source_release import TAGGED_DETAIL
 from conda_sentinel.collectors.source_release import SourceLocatorError
 from conda_sentinel.collectors.source_release import SourceReleaseCollector
@@ -70,6 +76,8 @@ from conda_sentinel.collectors.source_release import tags_locator
 from conda_sentinel.collectors.tasks import collect_source_release
 from conda_sentinel.core.clock import Clock
 from conda_sentinel.core.clock import FixedClock
+from conda_sentinel.core.collection import REFUSED_CREDENTIAL_STATUS
+from conda_sentinel.core.credentials import AUTHORIZATION_HEADER
 from conda_sentinel.core.freshness import UNOBSERVED_STATUS
 from conda_sentinel.core.models import CollectionRun
 from conda_sentinel.core.outcomes import OutcomeState
@@ -77,10 +85,12 @@ from conda_sentinel.core.runs import RunState
 from conda_sentinel.core.transport import TransportError
 from conda_sentinel.identity.models import Package
 from tests.clocks import FIXED_INSTANT
+from tests.collectors import A_GITHUB_TOKEN
 from tests.collectors import FixedLimiter
 from tests.collectors import RecordingResponseCache
 from tests.collectors import ScriptedTransport
 from tests.collectors import cached_response
+from tests.collectors import credential_sightings
 from tests.collectors import recorded_payload
 
 if TYPE_CHECKING:
@@ -120,6 +130,9 @@ TWO_CALLS: Final[int] = 2
 #: declared observation window, so the second collection is not suppressed and the
 #: case is about re-observation rather than about the window.
 A_DAY: Final[timedelta] = timedelta(days=1)
+
+#: The header the credential travels in, as the API host must receive it.
+THE_BEARER: Final[str] = f"{BEARER_SCHEME} {A_GITHUB_TOKEN}"
 
 #: A primary key no row in this module holds. Every case rolls back, so nothing
 #: reaches it by accident, and it is large rather than merely unused so that a
@@ -934,3 +947,314 @@ def test_re_observation_inserts_rather_than_updating() -> None:
     rows = _rows(package)
     assert [row.latest_version for row in rows] == [A_TAG, A_LATER_TAG]
     assert [row.observed_at for row in rows] == [FIXED_INSTANT, later]
+
+
+# ---------------------------------------------------------------------------
+# The credential (`CPM-OPERATE-S05`): where it goes, and where it never appears.
+# ---------------------------------------------------------------------------
+
+
+def _refusal(status: int | None) -> TransportError:
+    """Return the failure the transport raises for a status that is neither success nor absence.
+
+    Args:
+        status: The status the source answered, or `None` for a call that got
+            no answer at all.
+
+    Returns:
+        The error, worded the way `core/transport.py` words it: the locator and
+        the status, and no header.
+
+    """
+    message = f"{THE_LOCATOR} answered {status}, which is neither a success nor an absence."
+    if status is None:
+        message = f"the call to {THE_LOCATOR} produced no answer"
+    return TransportError(message, source=THE_LOCATOR, status_code=status)
+
+
+def _collect_with_token(package: Package, *, transport: ScriptedTransport) -> tuple[CollectionResult, FixedLimiter]:
+    """Run one collection with the credential declared, and hand back what the limiter was asked.
+
+    Args:
+        package: The package to observe.
+        transport: The scripted transport.
+
+    Returns:
+        The result, and the limiter whose `asks` say which allowance the run
+        was charged against.
+
+    """
+    limiter = FixedLimiter(permitted=True)
+    with override_settings(**{GITHUB_TOKEN_SETTING: A_GITHUB_TOKEN}):
+        collector = SourceReleaseCollector(
+            clock=FixedClock(instant=FIXED_INSTANT),
+            transport=transport,
+            limiter=limiter,
+            response_cache=RecordingResponseCache(),
+        )
+    try:
+        return collector.collect(package_id=package.pk), limiter
+    finally:
+        collector.close()
+
+
+@pytest.mark.django_db
+def test_with_a_token_both_api_calls_carry_the_bearer_and_the_run_is_charged_the_authenticated_allowance() -> None:
+    """The matrix's `Token, API` row: the releases call and the tag fallback both reach the API host with the bearer.
+
+    The allowance the limiter is asked about is the authenticated one, which is
+    the whole reason the setting exists -- and the class's own declaration is
+    untouched, so every declaration test still reads the unauthenticated
+    number.
+    """
+    package = _a_package()
+    transport = ScriptedTransport(
+        answers={
+            THE_LOCATOR: recorded_payload(source=THE_LOCATOR, body=_document()),
+            THE_TAGS_LOCATOR: recorded_payload(source=THE_TAGS_LOCATOR, body=_document(_a_tag())),
+        },
+    )
+
+    result, limiter = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    assert transport.calls == [THE_LOCATOR, THE_TAGS_LOCATOR]
+    assert [dict(sent or {})[AUTHORIZATION_HEADER] for sent in transport.sent_headers] == [THE_BEARER, THE_BEARER]
+    assert [dict(SOURCE_RELEASE_HEADERS).items() <= dict(sent or {}).items() for sent in transport.sent_headers] == [
+        True,
+        True,
+    ]
+    assert [limit for _, limit, _, _ in limiter.asks] == [AUTHENTICATED_CORE_ALLOWANCE]
+    assert SourceReleaseCollector.rate_limit == SOURCE_RELEASE_RATE_LIMIT
+    assert SourceReleaseCollector.headers == SOURCE_RELEASE_HEADERS
+
+
+@pytest.mark.django_db
+def test_without_a_token_no_call_carries_a_credential() -> None:
+    """The matrix's `No token` row, on the wire: exactly the declared headers, and no `Authorization`."""
+    package = _a_package()
+    transport = _releases(_a_release())
+
+    with override_settings(**{GITHUB_TOKEN_SETTING: ""}):
+        result = _collect(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    assert dict(transport.sent_headers[0] or {}) == dict(SOURCE_RELEASE_HEADERS)
+
+
+@pytest.mark.django_db
+def test_a_refused_credential_is_a_failed_run_whose_detail_names_the_host_and_never_the_header(
+    captured_collection_logs: list[dict[str, Any]],
+) -> None:
+    """The matrix's `Refused` row: `401` from the API host, worded by the base; nothing retried, nothing leaked."""
+    package = _a_package()
+    transport = ScriptedTransport(failures={THE_LOCATOR: _refusal(REFUSED_CREDENTIAL_STATUS)})
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.FAILED
+    assert result.detail.startswith("the declared credential was refused by api.github.com: ")
+    assert transport.calls == [THE_LOCATOR]
+    row = _rows(package)[0]
+    run = _run(package)
+    assert row.state == OutcomeState.ERROR.value
+    assert row.detail == result.detail
+    assert run.status == RunState.FAILED.value
+    assert run.detail == result.detail
+    assert credential_sightings(rows=[row, run], events=captured_collection_logs, details=[result.detail]) == []
+    assert [event["detail"] for event in captured_collection_logs] == [result.detail]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("transport", "state", "outcome", "detail_prefix"),
+    [
+        pytest.param(
+            ScriptedTransport(
+                answers={THE_LOCATOR: recorded_payload(source=THE_LOCATOR, body=_document(_a_release()))},
+            ),
+            RunState.SUCCEEDED,
+            OutcomeState.OK,
+            "",
+            id="success",
+        ),
+        pytest.param(
+            ScriptedTransport(
+                answers={
+                    THE_LOCATOR: recorded_payload(source=THE_LOCATOR, body=_document()),
+                    THE_TAGS_LOCATOR: recorded_payload(source=THE_TAGS_LOCATOR, body=_document(_a_tag())),
+                },
+            ),
+            RunState.SUCCEEDED,
+            OutcomeState.OK,
+            "",
+            id="tag-fallback",
+        ),
+        pytest.param(
+            ScriptedTransport(failures={THE_LOCATOR: _refusal(REFUSED_CREDENTIAL_STATUS)}),
+            RunState.FAILED,
+            OutcomeState.ERROR,
+            "the declared credential was refused by api.github.com: ",
+            id="401",
+        ),
+        pytest.param(
+            ScriptedTransport(failures={THE_LOCATOR: _refusal(403)}),
+            RunState.FAILED,
+            OutcomeState.ERROR,
+            "TransportError: ",
+            id="403",
+        ),
+        pytest.param(
+            ScriptedTransport(answers={THE_LOCATOR: recorded_payload(source=THE_LOCATOR, found=False, body="")}),
+            RunState.SUCCEEDED,
+            OutcomeState.NOT_FOUND,
+            "",
+            id="404",
+        ),
+        pytest.param(
+            ScriptedTransport(failures={THE_LOCATOR: _refusal(None)}),
+            RunState.FAILED,
+            OutcomeState.ERROR,
+            "TransportError: ",
+            id="transport-failure",
+        ),
+    ],
+)
+def test_the_token_reaches_no_row_log_line_or_detail_on_any_path(
+    captured_collection_logs: list[dict[str, Any]],
+    transport: ScriptedTransport,
+    state: RunState,
+    outcome: OutcomeState,
+    detail_prefix: str,
+) -> None:
+    """The matrix's `Hygiene` row, over every path a collection can take with the credential set.
+
+    Every evidence row, every ledger row and every captured event is rendered
+    whole and grepped for the token and for its first eight characters; the
+    only place the credential may be is the header the API host received,
+    which `sent_headers` shows it did. A `403` is as today -- the transport's
+    own wording -- because a quota refusal looks like any other `403` to this
+    product.
+
+    Args:
+        transport: The scripted transport for this path.
+        state: How the run is expected to end.
+        outcome: What the one row is expected to claim.
+        detail_prefix: How the run's `detail` is expected to open.
+
+    """
+    package = _a_package()
+    transport.calls.clear()
+    transport.sent_headers.clear()
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == state
+    assert result.detail.startswith(detail_prefix)
+    rows = _rows(package)
+    run = _run(package)
+    assert [row.state for row in rows] == [outcome.value]
+    assert run.status == state.value
+    assert transport.sent_headers
+    assert all(dict(sent or {}).get(AUTHORIZATION_HEADER) == THE_BEARER for sent in transport.sent_headers)
+    assert credential_sightings(rows=[*rows, run], events=captured_collection_logs, details=[result.detail]) == []
+
+
+@pytest.mark.django_db
+def test_a_refused_credential_on_the_tag_fallback_is_worded_inside_the_succeeded_rows_detail(
+    captured_collection_logs: list[dict[str, Any]],
+) -> None:
+    """The second call is the API host, so a `401` to it is a refused credential -- said in the row, not the run.
+
+    The release answer stands (`succeeded`, `not_found` for the releases the
+    source listed none of), and the tag fallback's failure is appended to the
+    detail through the base's own wording, so an operator reading the row sees
+    the same sentence the primary path would have written.
+    """
+    package = _a_package()
+    transport = ScriptedTransport(
+        answers={THE_LOCATOR: recorded_payload(source=THE_LOCATOR, body=_document())},
+        failures={
+            THE_TAGS_LOCATOR: TransportError(
+                f"{THE_TAGS_LOCATOR} answered 401",
+                source=THE_TAGS_LOCATOR,
+                status_code=REFUSED_CREDENTIAL_STATUS,
+            ),
+        },
+    )
+
+    result, _ = _collect_with_token(package, transport=transport)
+
+    assert result.state == RunState.SUCCEEDED
+    row = _rows(package)[0]
+    assert "its tags could not be read: the declared credential was refused by api.github.com: " in row.detail
+    assert _authorization_of(transport) == {THE_LOCATOR: THE_BEARER, THE_TAGS_LOCATOR: THE_BEARER}
+    assert (
+        credential_sightings(rows=[row, _run(package)], events=captured_collection_logs, details=[result.detail]) == []
+    )
+
+
+def _authorization_of(transport: ScriptedTransport) -> dict[str, str | None]:
+    """Return what `Authorization` each locator was sent, by locator.
+
+    Args:
+        transport: The transport after a collection.
+
+    Returns:
+        The header's value per call, `None` where the call carried none.
+
+    """
+    return {
+        locator: dict(sent or {}).get(AUTHORIZATION_HEADER)
+        for locator, sent in zip(transport.calls, transport.sent_headers, strict=True)
+    }
+
+
+# ---------------------------------------------------------------------------
+# The task path, with every first-party logger captured (`CPM-OPERATE-S05`).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_the_task_sends_the_bearer_and_prints_the_token_nowhere_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_every_structlog_logger: list[dict[str, Any]],
+) -> None:
+    """Through `collect_source_release` with the setting declared: the API host gets the bearer, no logger the token."""
+    transport = _releases(_a_release())
+    monkeypatch.setattr(SubstitutedCollector, "fixed_clock", FixedClock(instant=FIXED_INSTANT))
+    monkeypatch.setattr(SubstitutedCollector, "fixed_transport", transport)
+    monkeypatch.setattr(collector_tasks, "SourceReleaseCollector", SubstitutedCollector)
+    package = _a_package()
+
+    with override_settings(**{GITHUB_TOKEN_SETTING: A_GITHUB_TOKEN}):
+        ended = collect_source_release(package_id=package.pk)
+
+    assert ended == RunState.SUCCEEDED.value
+    assert _authorization_of(transport) == {THE_LOCATOR: THE_BEARER}
+    assert (
+        credential_sightings(rows=[*_rows(package), _run(package)], events=captured_every_structlog_logger, details=[])
+        == []
+    )
+
+
+@pytest.mark.django_db
+def test_the_task_refuses_a_malformed_token_at_construction_and_prints_it_nowhere(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_every_structlog_logger: list[dict[str, Any]],
+) -> None:
+    """A malformed value raises `ImproperlyConfigured` out of the task before any ledger row, and names the setting."""
+    monkeypatch.setattr(collector_tasks, "SourceReleaseCollector", SubstitutedCollector)
+    package = _a_package()
+    malformed = f"{A_GITHUB_TOKEN} {A_GITHUB_TOKEN}"
+
+    with (
+        override_settings(**{GITHUB_TOKEN_SETTING: malformed}),
+        pytest.raises(ImproperlyConfigured) as refused,
+    ):
+        collect_source_release(package_id=package.pk)
+
+    assert GITHUB_TOKEN_SETTING in str(refused.value)
+    assert credential_sightings(rows=[], events=captured_every_structlog_logger, details=[str(refused.value)]) == []
+    assert CollectionRun.objects.filter(collector=COLLECTOR_NAME, package=package).count() == 0
+    assert _rows(package) == []

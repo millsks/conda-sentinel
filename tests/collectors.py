@@ -105,7 +105,10 @@ from conda_sentinel.core.collection import CollectorConfigurationError
 from conda_sentinel.core.collection import SweepOutcome
 from conda_sentinel.core.models import AppendOnlyModel
 from conda_sentinel.core.outcomes import OutcomeState
+from conda_sentinel.core.rate_limit import CredentialRefusal
 from conda_sentinel.core.rate_limit import RateLimit
+from conda_sentinel.core.rate_limit import refusal_key
+from conda_sentinel.core.rate_limit import window_end
 from conda_sentinel.core.registry import CollectorRegistryError
 from conda_sentinel.core.registry import register
 from conda_sentinel.core.registry import unregister
@@ -135,6 +138,16 @@ FIXTURE_COLLECTOR: Final[str] = "cpm-fixture-collector"
 #: A second name, for the matrix row where a recent run belongs to a *different*
 #: collector and must not suppress this one.
 OTHER_FIXTURE_COLLECTOR: Final[str] = "cpm-fixture-other-collector"
+
+#: The GitHub credential every `CPM-OPERATE-S05` case declares, in one spelling
+#: for both tiers. It carries the classic-token prefix, because `token_fault`
+#: refuses a value without one, and is otherwise a phrase -- hyphens, words --
+#: that no real token could be, so nothing in this repository resembles a
+#: credential a scanner or a person would mistake for one. Its first eight
+#: characters are what the hygiene assertions grep for, because a redaction
+#: that kept a "helpful" prefix would pass a whole-value grep.
+A_GITHUB_TOKEN: Final[str] = "ghp_token-for-tests"  # noqa: S105 - a phrase standing in for a credential, not one
+A_GITHUB_TOKEN_PREFIX: Final[str] = A_GITHUB_TOKEN[:8]
 
 #: The table the fixture evidence model is given, rather than the
 #: `core_collectedfact` Django would derive. Load-bearing for the same reason
@@ -498,6 +511,53 @@ class ScriptedTransport:
         return self.answers[source]
 
 
+def credential_sightings(
+    *,
+    rows: Iterable[models.Model],
+    events: Iterable[Mapping[str, object]],
+    details: Iterable[str],
+    token: str = A_GITHUB_TOKEN,
+) -> list[str]:
+    """Return every place the credential, or its first eight characters, was found.
+
+    The `CPM-OPERATE-S05` hygiene grep, in one place for both GitHub-reading
+    collectors' integration cases. Every concrete field of every row handed in
+    is rendered -- the evidence row's `detail` is the obvious column, and the
+    obvious column is not the only one a careless `source` or `body` could
+    carry a header into -- and every captured log event is rendered whole, so a
+    credential bound as a *field* rather than interpolated into the message is
+    found too.
+
+    Args:
+        rows: Saved model instances: the evidence rows and the ledger rows.
+        events: What `captured_collection_logs` captured.
+        details: Any other strings the run produced -- `CollectionResult.detail`.
+        token: The credential to look for.
+
+    Returns:
+        One entry per sighting, naming where it was seen. Empty is the
+        assertion.
+
+    """
+    prefix = token[:8]
+    rendered: list[tuple[str, str]] = []
+    for row in rows:
+        fields = row._meta.concrete_fields  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
+        rendered.append(
+            (
+                f"{type(row).__name__} pk={row.pk}",
+                " ".join(f"{field.name}={getattr(row, field.attname)!r}" for field in fields),
+            )
+        )
+    rendered.extend((f"event {event.get('event')!r}", repr(dict(event))) for event in events)
+    rendered.extend((f"detail #{index}", detail) for index, detail in enumerate(details))
+    return [
+        f"{where}: {'the token' if token in text else 'its prefix'}"
+        for where, text in rendered
+        if token in text or prefix in text
+    ]
+
+
 def recorded_payload(  # noqa: PLR0913 - one parameter per `Payload` field; a bundle would hide the field under test
     *,
     source: str = A_SOURCE,
@@ -636,16 +696,25 @@ class FixedLimiter:
     reconciliation of retry against the allowance (`CPM-AD-20`) is exactly what
     lives in that argument.
 
+    The credential-refusal memo (`CPM-OPERATE-S05`) is kept in memory under the
+    same key the cache-backed limiter would use, so a case about "the second
+    collection in the window makes no fetch" reads the real key arithmetic
+    while arranging no cache state.
+
     Attributes:
         permitted: What `acquire` answers. `False` is the rate-limit-reached row
             of the matrix.
         asks: Every `(collector, limit, now, cost)` the base asked about, in
             order, the way `RecordedTransport` records its calls.
+        refusals: Every remembered refusal, by the key the cache would hold it
+            under; a case reads it to see what the base remembered, or seeds it
+            to place a refusal earlier in the window.
 
     """
 
     permitted: bool
     asks: list[tuple[str, RateLimit, datetime, int]] = field(default_factory=list)
+    refusals: dict[str, CredentialRefusal] = field(default_factory=dict)
 
     def acquire(self, *, collector: str, limit: RateLimit, now: datetime, cost: int = 1) -> bool:
         """Record what was asked and answer the scripted verdict.
@@ -663,6 +732,40 @@ class FixedLimiter:
         self.asks.append((collector, limit, now, cost))
         return self.permitted
 
+    def remember_refusal(self, *, collector: str, limit: RateLimit, now: datetime, detail: str) -> datetime:
+        """Keep the refusal under the window's key, as the cache-backed limiter would.
+
+        Args:
+            collector: The collector's declared name.
+            limit: Its declared allowance.
+            now: The instant the refusal was met.
+            detail: What the run recorded.
+
+        Returns:
+            When the window turns.
+
+        """
+        until = window_end(limit=limit, now=now)
+        self.refusals[refusal_key(collector=collector, limit=limit, now=now)] = CredentialRefusal(
+            detail=detail,
+            until=until,
+        )
+        return until
+
+    def refusal(self, *, collector: str, limit: RateLimit, now: datetime) -> CredentialRefusal | None:
+        """Answer the refusal kept for this window, if any.
+
+        Args:
+            collector: The collector's declared name.
+            limit: Its declared allowance.
+            now: The instant the window is decided from.
+
+        Returns:
+            The remembered refusal, or `None`.
+
+        """
+        return self.refusals.get(refusal_key(collector=collector, limit=limit, now=now))
+
 
 def collector_class(  # noqa: PLR0913 - one parameter per declaration; see below
     *,
@@ -675,6 +778,7 @@ def collector_class(  # noqa: PLR0913 - one parameter per declaration; see below
     declared_rate_limit: RateLimit | None = FIXTURE_RATE_LIMIT,
     declared_headers: Mapping[str, str] = FIXTURE_HEADERS,
     declared_cache_ttl: timedelta | None = FIXTURE_CACHE_TTL,
+    declared_credential_host: str | None = None,
 ) -> type[Collector]:
     """Build a collector subclass with exactly the declarations a case wants.
 
@@ -709,6 +813,8 @@ def collector_class(  # noqa: PLR0913 - one parameter per declaration; see below
         declared_headers: What the collector says its source expects. Defaults to
             one `User-Agent`, so every case exercises the composition with the
             base's conditional headers rather than only the case about it.
+        declared_credential_host: The one host an `Authorization` header in the
+            declaration belongs to (`CPM-OPERATE-S05`), or `None`.
         declared_cache_ttl: How long a remembered response may be replayed, or
             `NO_CACHE` for a collector that caches nothing, or `None` for the
             case that declares none at all.
@@ -731,6 +837,7 @@ def collector_class(  # noqa: PLR0913 - one parameter per declaration; see below
         retries: ClassVar[int] = declared_retries
         rate_limit: ClassVar[RateLimit | None] = declared_rate_limit
         headers: ClassVar[Mapping[str, str]] = declared_headers
+        credential_host: ClassVar[str | None] = declared_credential_host
         response_cache_ttl: ClassVar[timedelta | None] = declared_cache_ttl
 
         def source_for(self, *, package_id: int) -> str:
@@ -1456,7 +1563,12 @@ def refusing_inapplicable_collector_class(*, declared_model: type[AppendOnlyMode
     return _RefusingInapplicableCollector
 
 
-def sweeping_collector_class(*, declared_model: type[AppendOnlyModel]) -> type[Collector]:
+def sweeping_collector_class(
+    *,
+    declared_model: type[AppendOnlyModel],
+    declared_headers: Mapping[str, str] = FIXTURE_HEADERS,
+    declared_credential_host: str | None = None,
+) -> type[Collector]:
     """Build a fixture collector that reads one run-scoped document.
 
     The base's `sweep()` path needs a subject that is not the inventory
@@ -1477,13 +1589,20 @@ def sweeping_collector_class(*, declared_model: type[AppendOnlyModel]) -> type[C
             the row is *built* from -- the two must be the same or the base
             refuses, which is what `foreign_model_sweep_collector_class` below
             exists to show.
+        declared_headers: What the collector says its source expects, for the
+            `CPM-OPERATE-S05` cases that sweep with a credential declared.
+        declared_credential_host: The host that credential belongs to, or `None`.
 
     Returns:
         A concrete `Collector` subclass with a run-scoped source and run-scoped
         persistence, and every other declaration the ordinary fixture's.
 
     """
-    ordinary = collector_class(declared_model=declared_model)
+    ordinary = collector_class(
+        declared_model=declared_model,
+        declared_headers=declared_headers,
+        declared_credential_host=declared_credential_host,
+    )
 
     class _SweepingCollector(ordinary):  # type: ignore[valid-type, misc]
         """A collector that reads one document naming one package."""

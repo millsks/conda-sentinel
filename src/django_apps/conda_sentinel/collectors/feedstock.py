@@ -48,7 +48,11 @@ of the two.** The absent branch reads `/search/issues`, which GitHub limits far
 below its core API, and the base charges one allowance per collection without
 knowing which branch a package will take. Declaring the tighter number is the
 only honest option; what it costs at `CPM-NFR-1` volume is recorded as deferred
-rather than hidden.
+rather than hidden. With `CPM_GITHUB_TOKEN` set (`CPM-OPERATE-S05`) the instance
+declares the authenticated search allowance instead and sends the credential
+to `api.github.com` -- and to that host only: the recipe read against
+`raw.githubusercontent.com` carries no `Authorization`, because that host
+neither needs it nor counts against the allowance it buys.
 
 **Recipe activity is the feedstock repository's last push.** PRD Open Question 10
 asks what counts; this module answers "a push to the feedstock" and records the
@@ -96,11 +100,17 @@ from urllib.parse import quote
 from django.db import models
 
 from conda_sentinel.collectors.agent import USER_AGENT
+from conda_sentinel.collectors.github import AUTHENTICATED_SEARCH_ALLOWANCE
+from conda_sentinel.collectors.github import GITHUB_API_HOST
+from conda_sentinel.collectors.github import authenticated_headers
+from conda_sentinel.collectors.github import github_token
 from conda_sentinel.collectors.models import FeedstockSnapshot
 from conda_sentinel.core.clock import is_aware
 from conda_sentinel.core.collection import Collector
 from conda_sentinel.core.collection import CollectorConfigurationError
+from conda_sentinel.core.collection import failure_detail
 from conda_sentinel.core.collection import request_headers
+from conda_sentinel.core.credentials import carries_credential
 from conda_sentinel.core.ledger import current_trace_id
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.core.rate_limit import RateLimit
@@ -116,8 +126,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from collections.abc import Sequence
 
+    from conda_sentinel.core.clock import Clock
     from conda_sentinel.core.models import AppendOnlyModel
+    from conda_sentinel.core.rate_limit import RateLimiter
+    from conda_sentinel.core.response_cache import ResponseCache
     from conda_sentinel.core.transport import Payload
+    from conda_sentinel.core.transport import Transport
 
 __all__ = [
     "ABSENT_BRANCH",
@@ -240,9 +254,19 @@ FEEDSTOCK_TIMEOUT: Final[float] = 4.0
 #: than per hour. The base charges one allowance per collection before it knows
 #: which branch a package will take, so a single number has to cover both, and
 #: the tighter of the two is the only one that cannot be exceeded by accident.
-#: At `1 + retries` per collection that is two packages a minute, which is not a
-#: rate that sweeps `CPM-NFR-1`'s ten thousand and is recorded as deferred rather
-#: than inflated.
+#: At `1 + retries` per collection that is two and a half packages a minute:
+#: about 67 hours for `CPM-NFR-1`'s ten thousand, which a weekly cadence and a
+#: fourteen-day target absorb, slowly.
+#:
+#: This is the class's declaration and it stays the unauthenticated number,
+#: because it is what every audit and every declaration test reads. With
+#: `CPM_GITHUB_TOKEN` set (`CPM-OPERATE-S05`) the *instance* declares
+#: `collectors/github.py`'s `AUTHENTICATED_SEARCH_ALLOWANCE` instead -- thirty a
+#: minute, still the search pool's number and still the tighter of the two, so
+#: about 450 collections an hour and ten thousand packages in about 22 hours --
+#: and sends the credential to the API host and to no other. The number and the
+#: credential are one decision, made once in `__init__`; and the setting is
+#: read once per process, so a rotated token reaches the next worker restart.
 FEEDSTOCK_RATE_LIMIT: Final[RateLimit] = RateLimit(calls=10, per=timedelta(minutes=1))
 
 #: What this collector's source expects on every request (`CPM-AD-20`,
@@ -253,7 +277,12 @@ FEEDSTOCK_RATE_LIMIT: Final[RateLimit] = RateLimit(calls=10, per=timedelta(minut
 #: collector reads recipes from ignores both and serves the file, which is why a
 #: single declaration serves all three locators. The `User-Agent` is the one
 #: identity every collector shares (`collectors/agent.py`); GitHub requires one.
-#: Nothing conditional is declared -- the validators are the base's.
+#: Nothing conditional is declared -- the validators are the base's. Nothing
+#: *credential* is declared here either: `Authorization` is added per instance
+#: by `collectors/github.py`'s `authenticated_headers` when `CPM_GITHUB_TOKEN`
+#: is set, and stripped again by the base for the one locator on the raw host
+#: (`credential_host`), so this mapping is exactly what an unauthenticated
+#: request carries.
 FEEDSTOCK_HEADERS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "Accept": "application/vnd.github+json",
@@ -271,8 +300,11 @@ FEEDSTOCK_CACHE_TTL: Final[timedelta] = timedelta(days=30)
 
 #: The two hosts this collector reads. Separate constants because they are
 #: separate facts: one answers questions about a repository, the other serves a
-#: file out of one.
-GITHUB_API_HOST: Final[str] = "api.github.com"
+#: file out of one -- and only the first is sent the credential
+#: (`CPM-OPERATE-S05`). The API host is `collectors/github.py`'s spelling,
+#: re-exported here so every existing importer is untouched: the comparison
+#: that decides which locator carries `Authorization` has to read the same
+#: string this module builds its locators from.
 GITHUB_RAW_HOST: Final[str] = "raw.githubusercontent.com"
 
 #: The organisation every conda-forge feedstock and the staged-recipes queue live
@@ -1363,6 +1395,12 @@ class FeedstockCollector(Collector):
 
     headers: ClassVar[Mapping[str, str]] = FEEDSTOCK_HEADERS
 
+    #: The one host the credential in `headers` belongs to (`CPM-OPERATE-S05`).
+    #: The base strips `Authorization` from any fetch aimed elsewhere -- which
+    #: is what keeps it off `raw.githubusercontent.com` -- and both second
+    #: calls below ask the base for their headers on the same terms.
+    credential_host: ClassVar[str | None] = GITHUB_API_HOST
+
     freshness_target: ClassVar[timedelta | None] = FEEDSTOCK_FRESHNESS_TARGET
 
     response_cache_ttl: ClassVar[timedelta | None] = FEEDSTOCK_CACHE_TTL
@@ -1387,6 +1425,48 @@ class FeedstockCollector(Collector):
     #: the last.
     _identity: FeedstockIdentity | None = None
     _identity_package: int | None = None
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        transport: Transport | None = None,
+        limiter: RateLimiter | None = None,
+        response_cache: ResponseCache | None = None,
+    ) -> None:
+        """Declare the headers and the allowance this instance sends, from the credential setting.
+
+        The shape `SourceReleaseCollector.__init__` gives and for the same
+        reasons: the base reads and validates `headers` and `rate_limit` once,
+        at construction, so the credential is read once, here, and both are set
+        on the instance before the base looks. The class attributes stay the
+        unauthenticated declarations. The setting itself is evaluated once per
+        process, so a rotated token reaches the next worker restart, not the
+        next task. With a token the allowance is still the
+        *search* pool's number -- the tighter of GitHub's two authenticated
+        pools, for the reason the class-level declaration gives -- and the
+        credential reaches the API host only: `credential_host` names it, and
+        the base strips the header from `_recipe_facts`' read of the raw host.
+
+        Args:
+            clock: The clock every instant in this run is read from.
+            transport: The seam `CPM-AD-27` opens, or `None` for the real one.
+            limiter: The rate limiter, or `None` for the shared cache-backed one.
+            response_cache: The response cache, or `None` for the shared one.
+
+        Raises:
+            ImproperlyConfigured: When `CPM_GITHUB_TOKEN` holds a value that can
+                never become a header -- refused at boot already, and refused
+                again here so nothing that bypassed the hook can send it.
+            CollectorConfigurationError: The base's own refusals, unchanged.
+
+        """
+        token = github_token()
+        # Instance attributes shadowing the two ClassVars; see the same lines in
+        # `SourceReleaseCollector.__init__` for why mypy's objection is the point.
+        self.headers = authenticated_headers(FEEDSTOCK_HEADERS, token)  # type: ignore[misc]
+        self.rate_limit = AUTHENTICATED_SEARCH_ALLOWANCE if token else FEEDSTOCK_RATE_LIMIT  # type: ignore[misc]
+        super().__init__(clock=clock, transport=transport, limiter=limiter, response_cache=response_cache)
 
     #: The locator this run asked for, remembered when `source_for` answered, for
     #: the reason `SourceReleaseCollector._locator` gives: `sentinel_evidence`
@@ -1740,14 +1820,18 @@ class FeedstockCollector(Collector):
 
         """
         locator = recipe_locator(name)
+        # The raw host: the base's `headers_for` strips the credential, because
+        # this host neither needs it nor counts against the allowance it buys.
+        sent = request_headers(declared=self.headers_for(locator), entry=None)
         try:
-            payload = self._transport.fetch(locator, headers=request_headers(declared=self._headers, entry=None))
+            payload = self._transport.fetch(locator, headers=sent)
         except TransportError as failure:
+            detail = failure_detail(failure, credentialed=carries_credential(sent))
             return RecipeFacts(
                 version="",
                 build_number=None,
                 metadata_url="",
-                detail=f"{UNREADABLE_RECIPE_DETAIL}: {locator} could not be read: {failure}",
+                detail=f"{UNREADABLE_RECIPE_DETAIL}: {locator} could not be read: {detail}",
             )
         if not payload.found:
             return RecipeFacts(
@@ -1812,13 +1896,17 @@ class FeedstockCollector(Collector):
                 source="",
                 detail=f"{UNCHECKED_FEEDSTOCK_DETAIL}: {unnameable}",
             )
+        # The API host: the base's `headers_for` keeps the credential for this
+        # locator, and a `401` to it is worded as a refused credential.
+        sent = request_headers(declared=self.headers_for(locator), entry=None)
         try:
-            payload = self._transport.fetch(locator, headers=request_headers(declared=self._headers, entry=None))
+            payload = self._transport.fetch(locator, headers=sent)
         except TransportError as failure:
+            detail = failure_detail(failure, credentialed=carries_credential(sent))
             return ConventionalAnswer(
                 facts=None,
                 source=locator,
-                detail=f"{UNCHECKED_FEEDSTOCK_DETAIL}: {locator} could not be read: {failure}",
+                detail=f"{UNCHECKED_FEEDSTOCK_DETAIL}: {locator} could not be read: {detail}",
             )
         if payload.not_modified:
             # This request carried no validator, so a `304` is the source
