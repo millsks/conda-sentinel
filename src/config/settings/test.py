@@ -140,6 +140,19 @@ CELERY_TASK_EAGER_PROPAGATES = True
 # empty even with the variable exported.
 CPM_GITHUB_TOKEN = ""
 
+# DIGEST DELIVERY
+# ------------------------------------------------------------------------------
+# Emptied, whatever the developer's shell holds (CPM-OPERATE-S09), on the
+# credential's terms: a developer who exported a webhook URL or an address for
+# the local stack would otherwise have every digest the suite composes posted
+# to a real hook or mailed through whatever backend the case left in place. The
+# cases that need a channel declare `tests/collectors.py`'s literals through
+# `override_settings`, against the locmem mail backend below and a recorded
+# webhook deliverer; tests/unit/test_settings.py pins that this module reads
+# both empty even with the variables exported.
+CPM_DIGEST_WEBHOOK_URL = ""
+CPM_DIGEST_EMAIL = ""
+
 # EMAIL
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#email-backend

@@ -19,6 +19,7 @@ from __future__ import annotations
 from django.urls import path
 
 from conda_sentinel.surface.views import CoverageView
+from conda_sentinel.surface.views import DigestView
 from conda_sentinel.surface.views import ExportJobDownloadView
 from conda_sentinel.surface.views import ExportJobView
 from conda_sentinel.surface.views import HomeView
@@ -49,6 +50,9 @@ urlpatterns = [
     # the one in the nav are the same address.
     path("", HomeView.as_view(), name="home"),
     path("coverage/", CoverageView.as_view(), name="coverage"),
+    # `CPM-OPERATE-S09`'s digest: the newest operator digest and a month of
+    # history, read-only, every product role.
+    path("digests/", DigestView.as_view(), name="digest"),
     path("packages/", PackageHealthView.as_view(), name="package-health"),
     # Keyed on the canonical name so a link pasted into a ticket says which package
     # it is about. `<str:>` rather than `<slug:>`: a canonical name may carry a dot

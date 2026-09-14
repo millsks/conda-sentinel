@@ -103,6 +103,7 @@ from django.test.utils import isolate_apps
 from conda_sentinel.core.collection import Collector
 from conda_sentinel.core.collection import CollectorConfigurationError
 from conda_sentinel.core.collection import SweepOutcome
+from conda_sentinel.core.delivery import DeliveryOutcome
 from conda_sentinel.core.models import AppendOnlyModel
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.core.rate_limit import CredentialRefusal
@@ -148,6 +149,17 @@ OTHER_FIXTURE_COLLECTOR: Final[str] = "cpm-fixture-other-collector"
 #: that kept a "helpful" prefix would pass a whole-value grep.
 A_GITHUB_TOKEN: Final[str] = "ghp_token-for-tests"  # noqa: S105 - a phrase standing in for a credential, not one
 A_GITHUB_TOKEN_PREFIX: Final[str] = A_GITHUB_TOKEN[:8]
+
+#: Where every `CPM-OPERATE-S09` case delivers the digest, in one spelling for
+#: both tiers: a webhook on a reserved test domain, the same URL carrying a
+#: credential -- the shape the hygiene assertions prove never reaches a row or
+#: a log line -- and one address. `A_WEBHOOK_SECRET` is the substring those
+#: assertions grep for.
+A_DIGEST_WEBHOOK_URL: Final[str] = "https://hooks.example.test/digest"
+A_WEBHOOK_SECRET: Final[str] = "webhook-secret-for-tests"  # noqa: S105 - a phrase standing in for a credential, not one
+A_CREDENTIALED_WEBHOOK_URL: Final[str] = f"https://operator:{A_WEBHOOK_SECRET}@hooks.example.test/x"
+A_DIGEST_WEBHOOK_HOST: Final[str] = "hooks.example.test"
+A_DIGEST_EMAIL: Final[str] = "ops@example.test"
 
 #: The table the fixture evidence model is given, rather than the
 #: `core_collectedfact` Django would derive. Load-bearing for the same reason
@@ -389,6 +401,49 @@ def other_fixture_evidence_model() -> type[AppendOnlyModel]:
                 db_table = FIXTURE_OTHER_TABLE
 
     return OtherCollectedFact
+
+
+@dataclass(slots=True)
+class RecordedWebhookDeliverer:
+    """A webhook deliverer that answers from a script and remembers what it was handed.
+
+    `core/delivery.py`'s seam, substituted on `RecordedTransport`'s terms: the
+    digest's whole delivery path is exercisable with no socket, because the
+    only thing it needs from the outside world is a `DeliveryOutcome`.
+
+    Attributes:
+        outcome: What `post` returns. Delivered by default.
+        failure: An exception to raise instead, for the row of the matrix in
+            which a substituted deliverer raises rather than answers.
+        calls: Every `(url, body, timeout)` `post` was handed, in order. The
+            URL is recorded so a case can assert the *deliverer* was given the
+            credentialed URL while nothing else was.
+
+    """
+
+    outcome: DeliveryOutcome = field(default_factory=lambda: DeliveryOutcome(delivered=True, status_code=200))
+    failure: Exception | None = None
+    calls: list[tuple[str, dict[str, object], float]] = field(default_factory=list)
+
+    def post(self, url: str, *, body: Mapping[str, object], timeout: float) -> DeliveryOutcome:
+        """Record the call and answer from the script.
+
+        Args:
+            url: Where the digest was to be posted.
+            body: The document.
+            timeout: The timeout the caller stated.
+
+        Returns:
+            The scripted outcome.
+
+        Raises:
+            Exception: Whatever was scripted as `failure`.
+
+        """
+        self.calls.append((url, dict(body), timeout))
+        if self.failure is not None:
+            raise self.failure
+        return self.outcome
 
 
 @dataclass(slots=True)

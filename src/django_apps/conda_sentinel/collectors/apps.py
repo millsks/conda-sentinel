@@ -316,7 +316,35 @@ class CollectorsConfig(AppConfig):
             raise ImproperlyConfigured(unusable_token)
 
         _require_retention(settings)
+        _require_digest_declarations(settings)
         _declare_inventory_source(settings)
+
+
+def _require_digest_declarations(settings: Any) -> None:
+    """Refuse a digest destination that can never be delivered to (`CPM-OPERATE-S09`).
+
+    On the credential's posture: absent from the settings module is a dropped
+    assignment and refused by name; empty is the shipped state and boots,
+    storing the digest only; a webhook URL that is not `https://` or names no
+    host, or an address with no `@`, is refused here rather than on the first
+    nightly digest, and the sentence never carries the value -- a webhook URL
+    may carry a credential. `declaration_fault` is `collectors/digest.py`'s own
+    rule, so boot and delivery cannot come to disagree.
+
+    Args:
+        settings: The settings the hook read.
+
+    Raises:
+        ImproperlyConfigured: When either setting is undeclared or unusable.
+
+    """
+    from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415 - after django.setup()
+
+    from conda_sentinel.collectors.digest import declaration_fault  # noqa: PLC0415 - see above
+
+    unusable = declaration_fault(settings)
+    if unusable:
+        raise ImproperlyConfigured(unusable)
 
 
 def _require_retention(settings: Any) -> None:

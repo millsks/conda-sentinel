@@ -54,6 +54,10 @@
          {% if request.resolver_match.url_name == 'coverage' %}class="on" aria-current="page"{% endif %}>
         {% translate "Coverage" %}
       </a>
+      <a href="{% url 'conda_sentinel:digest' %}"
+         {% if request.resolver_match.url_name == 'digest' %}class="on" aria-current="page"{% endif %}>
+        {% translate "Digests" %}
+      </a>
     </nav>
   {% else %}
     {% comment %}

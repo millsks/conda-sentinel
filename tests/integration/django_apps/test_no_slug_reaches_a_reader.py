@@ -29,21 +29,34 @@ from typing import Final
 import pytest
 from django.conf import settings
 from django.contrib.auth.models import Group
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 
+from conda_sentinel.collectors.digest import EMAIL_SETTING
+from conda_sentinel.collectors.digest import WEBHOOK_URL_SETTING
+from conda_sentinel.collectors.digest import compose_digest
+from conda_sentinel.collectors.source_release import COLLECTOR_NAME as SOURCE_RELEASE
+from conda_sentinel.core.clock import FixedClock
+from conda_sentinel.core.collection import ALLOWANCE_REFUSAL_MARKER
+from conda_sentinel.core.delivery import DeliveryOutcome
 from conda_sentinel.core.permissions import PRODUCT_ROLES
+from conda_sentinel.core.runs import RunState
 from conda_sentinel.identity.confidence import IdentityConfidence
 from conda_sentinel.surface.reports import REPORTS
 from conda_sentinel.workflow.models import WorkflowItem
 from conda_sentinel.workflow.states import ItemState
 from conda_sentinel.workflow.states import Queue
+from tests.collectors import A_DIGEST_EMAIL
+from tests.collectors import A_DIGEST_WEBHOOK_URL
+from tests.collectors import RecordedWebhookDeliverer
 from tests.factories import UserFactory
 
 from .test_coverage_view import NOW
 from .test_coverage_view import a_package
 from .test_coverage_view import a_rollup_row
 from .test_coverage_view import a_run
+from .test_digest import a_ledger_row
 
 pytestmark = pytest.mark.integration
 
@@ -55,6 +68,15 @@ A_SLUG: Final[re.Pattern[str]] = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b"
 #: Everything between tags, which is what a person actually sees.
 A_TAG: Final[re.Pattern[str]] = re.compile(r"<[^>]+>")
 A_SCRIPT: Final[re.Pattern[str]] = re.compile(r"<(script|style)\b.*?</\1>", re.DOTALL | re.IGNORECASE)
+
+#: A stored record reproduced verbatim, which is not a template printing a value.
+#: The Digests page shows the digest's text as the webhook and the mail carried
+#: it -- `CPM-OPERATE-S09` fixes that the page and the delivery are the same
+#: bytes, so an operator can hold one against the other -- and that text names
+#: collectors as the ledger spells them. It is the one block a `<pre
+#: class="record">` marks, and it is the only markup this sweep reads past;
+#: everything else on that page is labelled and swept like any other.
+A_RECORD: Final[re.Pattern[str]] = re.compile(r"<pre class=\"record\">.*?</pre>", re.DOTALL)
 
 #: Slugs that are allowed to reach a reader, and why each one is.
 #:
@@ -89,6 +111,7 @@ def every_view() -> list[str]:
         reverse("conda_sentinel:home"),
         reverse("conda_sentinel:package-health"),
         reverse("conda_sentinel:coverage"),
+        reverse("conda_sentinel:digest"),
         *(reverse("conda_sentinel:queue", kwargs={"queue": queue.value}) for queue in Queue),
         *(reverse("conda_sentinel:report", kwargs={"slug": report.slug}) for report in REPORTS),
     ]
@@ -119,7 +142,7 @@ def visible_text(body: str) -> str:
         The text between the tags.
 
     """
-    return A_TAG.sub(" ", A_SCRIPT.sub(" ", body))
+    return A_TAG.sub(" ", A_SCRIPT.sub(" ", A_RECORD.sub(" ", body)))
 
 
 @pytest.fixture
@@ -154,6 +177,16 @@ def _something_to_read() -> None:
     # `open` failed nothing.
     # `workflow_claimed_only_while_in_progress` requires one, and rightly: an item
     # nobody holds cannot be in progress.
+    # A digest whose text names collectors as values, with a failed delivery
+    # so the delivery chips and detail are exercised, and a stale figure so the
+    # per-collector table has every column filled.
+    a_ledger_row(SOURCE_RELEASE)
+    a_ledger_row(SOURCE_RELEASE, package=behind, status=RunState.FAILED, detail=ALLOWANCE_REFUSAL_MARKER)
+    with override_settings(**{WEBHOOK_URL_SETTING: A_DIGEST_WEBHOOK_URL, EMAIL_SETTING: A_DIGEST_EMAIL}):
+        compose_digest(
+            clock=FixedClock(instant=NOW),
+            deliverer=RecordedWebhookDeliverer(outcome=DeliveryOutcome(delivered=False, detail="HTTP 500")),
+        )
     holder = UserFactory.create()
     for queue in Queue:
         WorkflowItem.objects.create(
@@ -170,7 +203,7 @@ def _something_to_read() -> None:
 
 def test_the_sweep_covers_every_view() -> None:
     """Because an enumeration that returned nothing would pass every case below."""
-    expected = 3 + len(Queue) + len(REPORTS)
+    expected = 4 + len(Queue) + len(REPORTS)
 
     assert len(every_view()) == expected
     assert len(set(every_view())) == expected

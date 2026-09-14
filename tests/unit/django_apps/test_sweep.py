@@ -111,6 +111,7 @@ from conda_sentinel.core.collection import require_cadence
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.core.queues import Queue
 from conda_sentinel.core.queues import queue_for
+from conda_sentinel.core.registry import registered_collectors
 from conda_sentinel.core.runs import RunState
 from conda_sentinel.identity.models import ESTABLISHED
 from conda_sentinel.identity.models import MappingKind
@@ -1087,6 +1088,29 @@ def test_the_schedule_reads_as_the_nine_dispatches_with_their_three_offsets() ->
 
     assert scheduled_dispatches(settings.CELERY_BEAT_SCHEDULE) == THE_DECLARED_DISPATCHES
     assert len(THE_DECLARED_DISPATCHES) == len(PER_PACKAGE_COLLECTORS)
+
+
+def test_the_live_digest_entry_is_neither_a_dispatch_nor_a_cadence_disagreement() -> None:
+    """`CPM-OPERATE-S09`: the one shipped entry that is not a sweep is left alone by both readers.
+
+    The start dispatch enqueues only entries firing the dispatch task, and the
+    boot reconciliation compares only those against the registered collectors;
+    `cpm-digest` fires `cpm.policy.digest`, names no collector, and must
+    neither be enqueued as a sweep at start nor read as an entry naming a
+    collector nothing registered. Asserted against the live declaration, so an
+    edit to `_dispatch_entries` that started reading every entry fails here.
+    """
+    from django.conf import settings  # noqa: PLC0415 - the live declaration, read once
+
+    schedule = settings.CELERY_BEAT_SCHEDULE
+    digest_entry = schedule["cpm-digest"]
+
+    assert digest_entry["task"] != SWEEP_TASK_NAME
+    assert "kwargs" not in digest_entry
+    assert all(dispatch.collector != "cpm-digest" for dispatch in scheduled_dispatches(schedule))
+    assert len(scheduled_dispatches(schedule)) == len(schedule) - 1
+    assert cadence_reconciliation_fault(registered_collectors(), schedule) == ""
+    assert cadence_reconciliation_fault(registered_collectors(), {"cpm-digest": digest_entry}) != ""
 
 
 def test_an_entry_firing_another_task_is_not_a_scheduled_dispatch() -> None:

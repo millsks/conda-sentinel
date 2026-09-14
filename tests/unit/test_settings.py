@@ -10,6 +10,7 @@ materialised at startup and hold no reference to these fresh module objects.
 from __future__ import annotations
 
 import importlib
+from datetime import timedelta
 
 import pytest
 import yaml
@@ -23,6 +24,9 @@ from conda_sentinel.collectors.conda_package import PLATFORMS_SETTING
 from conda_sentinel.collectors.conda_package import CondaPackageCollector
 from conda_sentinel.collectors.conda_package import declaration_fault
 from conda_sentinel.collectors.conda_package import monitored
+from conda_sentinel.collectors.digest import DIGEST_SETTINGS
+from conda_sentinel.collectors.digest import EMAIL_SETTING
+from conda_sentinel.collectors.digest import WEBHOOK_URL_SETTING
 from conda_sentinel.collectors.feedstock import COLLECTOR_NAME as FEEDSTOCK_NAME
 from conda_sentinel.collectors.feedstock import FeedstockCollector
 from conda_sentinel.collectors.github import GITHUB_TOKEN_SETTING
@@ -48,6 +52,8 @@ from conda_sentinel.collectors.vulnerability import COLLECTOR_NAME as VULNERABIL
 from conda_sentinel.collectors.vulnerability import VulnerabilityCollector
 from conda_sentinel.core import queues
 from conda_sentinel.core import roles
+from conda_sentinel.core.queues import Queue
+from conda_sentinel.core.queues import task_name
 from conda_sentinel.core.retention import DEFAULT_RETENTION_DAYS
 from conda_sentinel.core.retention import RETENTION_SETTING
 from config.authorization import claims
@@ -56,6 +62,8 @@ from config.locality import LOCAL as LOCAL_RUNTIME
 from config.locality import PROCESS_ENV_VAR
 from config.locality import RUNTIME_ENV_VAR
 from config.startup.allowlist import CONTRIBUTABLE_KEYS
+from tests.collectors import A_DIGEST_EMAIL
+from tests.collectors import A_DIGEST_WEBHOOK_URL
 from tests.collectors import A_GITHUB_TOKEN
 from tests.dockerfile import DOCKERFILE
 from tests.dockerfile import instruction_lines
@@ -1324,6 +1332,35 @@ EXPECTED_SWEEP_ENTRIES = (
     "cpm-sweep-resolve-identity",
 )
 
+#: The one entry that is not a sweep (`CPM-OPERATE-S09`): the daily operator
+#: digest. Its task name is composed from `core/queues.py`'s parts below rather
+#: than written out, so the entry and the task cannot drift about the namespace
+#: that routes it; the interval and the countdown are literals, because the
+#: digest declares no cadence of its own to reconcile against -- the window it
+#: reads is a day whatever fires it.
+DIGEST_ENTRY = "cpm-digest"
+DIGEST_TASK_NAME = task_name(Queue.POLICY, "digest")
+DIGEST_INTERVAL = timedelta(days=1)
+DIGEST_COUNTDOWN_SECONDS = 3 * 60 * 60 + 30 * 60
+
+
+def sweep_entries(settings_module: object) -> dict[str, dict[str, object]]:
+    """Return the schedule's sweep entries, by key.
+
+    The cases below that reconcile the schedule against the nine per-package
+    collectors read these and nothing else: an entry firing another task --
+    the digest's -- declares no collector and is pinned by its own case.
+
+    Args:
+        settings_module: The imported settings module.
+
+    Returns:
+        Every entry whose `task` is the dispatch's.
+
+    """
+    schedule: dict[str, dict[str, object]] = settings_module.CELERY_BEAT_SCHEDULE  # type: ignore[attr-defined]
+    return {key: entry for key, entry in schedule.items() if entry["task"] == SWEEP_TASK_NAME}
+
 
 @pytest.mark.usefixtures("no_database_env")
 def test_the_celery_block_contributes_the_route_table_core_owns():
@@ -1402,7 +1439,8 @@ def test_cadence_lives_in_the_database_scheduler(module: str):
     settings_module = importlib.import_module(module)
 
     assert settings_module.CELERY_BEAT_SCHEDULER == DATABASE_SCHEDULER
-    assert set(settings_module.CELERY_BEAT_SCHEDULE) == set(EXPECTED_SWEEP_ENTRIES)
+    assert set(sweep_entries(settings_module)) == set(EXPECTED_SWEEP_ENTRIES)
+    assert set(settings_module.CELERY_BEAT_SCHEDULE) == {*EXPECTED_SWEEP_ENTRIES, DIGEST_ENTRY}
 
 
 @pytest.mark.usefixtures("any_settings_module")
@@ -1422,7 +1460,9 @@ def test_every_schedule_entry_fires_the_dispatch_task_by_the_name_it_declares(mo
     """
     settings_module = importlib.import_module(module)
 
-    for entry in settings_module.CELERY_BEAT_SCHEDULE.values():
+    dispatches = sweep_entries(settings_module)
+    assert dispatches, "no entry fires the dispatch, so the reconciliation below is vacuous"
+    for entry in dispatches.values():
         assert entry["task"] == SWEEP_TASK_NAME
         assert set(entry["kwargs"]) == {COLLECTOR_KWARG}
 
@@ -1445,7 +1485,7 @@ def test_the_schedule_dispatches_each_per_package_collector_exactly_once():
     """
     base = importlib.import_module(BASE)
 
-    dispatched = {entry["kwargs"][COLLECTOR_KWARG]: entry["schedule"] for entry in base.CELERY_BEAT_SCHEDULE.values()}
+    dispatched = {entry["kwargs"][COLLECTOR_KWARG]: entry["schedule"] for entry in sweep_entries(base).values()}
 
     assert dispatched == {
         SOURCE_RELEASE_NAME: SourceReleaseCollector.cadence,
@@ -1458,7 +1498,7 @@ def test_the_schedule_dispatches_each_per_package_collector_exactly_once():
         PYTHON_READINESS_NAME: PythonReadinessCollector.cadence,
         RESOLVE_IDENTITY_NAME: IdentityResolutionCollector.cadence,
     }
-    assert len(base.CELERY_BEAT_SCHEDULE) == len(dispatched)
+    assert len(sweep_entries(base)) == len(dispatched)
 
 
 @pytest.mark.usefixtures("any_settings_module")
@@ -1492,7 +1532,7 @@ def test_the_phased_dispatches_are_exactly_the_three_that_declare_an_offset():
 
     phased = {
         entry["kwargs"][COLLECTOR_KWARG]: entry["options"]["countdown"]
-        for entry in base.CELERY_BEAT_SCHEDULE.values()
+        for entry in sweep_entries(base).values()
         if "options" in entry
     }
 
@@ -1774,8 +1814,9 @@ def test_the_test_settings_empty_the_github_token_whatever_the_shell_holds(monke
     assert test_module.CPM_GITHUB_TOKEN == ""
 
 
-def test_no_checked_in_file_declares_the_github_token():
-    """The credential comes from a shell, the gitignored `.env`, or a deployment's secret -- never a checked-in file.
+@pytest.mark.parametrize("setting", [GITHUB_TOKEN_SETTING, *DIGEST_SETTINGS])
+def test_no_checked_in_file_declares_a_credential_bearing_setting(setting: str):
+    """A credential-bearing setting comes from a shell, the gitignored `.env` or a deployment's secret -- never a file.
 
     Six sites are scanned and none may name it: the unscoped `[activation.env]`;
     the `dev` feature's activation env (which *does* carry the two `CPM_`
@@ -1786,15 +1827,22 @@ def test_no_checked_in_file_declares_the_github_token():
     A value in any of them would be a credential in the repository; an empty
     declaration in any of them would override the developer's export with
     nothing, silently, on every `pixi run`.
+
+    Over the digest's two declarations as well (`CPM-OPERATE-S09`): a webhook
+    URL may carry a credential, and an address in a checked-in file is one the
+    suite would mail.
+
+    Args:
+        setting: The name that must appear in no checked-in file.
+
     """
     manifest = load_manifest()
 
-    assert GITHUB_TOKEN_SETTING not in manifest.get("activation", {}).get("env", {})
-    assert GITHUB_TOKEN_SETTING not in manifest["feature"]["dev"]["activation"]["env"]
+    assert setting not in manifest.get("activation", {}).get("env", {})
+    assert setting not in manifest["feature"]["dev"]["activation"]["env"]
+    assert variable_sites(manifest, (setting,)) == []
     offenders = sorted(
-        f"{name} in {table}"
-        for table, name, definition in tasks(manifest)
-        if GITHUB_TOKEN_SETTING in task_env(definition)
+        f"{name} in {table}" for table, name, definition in tasks(manifest) if setting in task_env(definition)
     )
     assert not offenders, offenders
 
@@ -1802,7 +1850,7 @@ def test_no_checked_in_file_declares_the_github_token():
     carrying = sorted(
         name
         for name, service in compose["services"].items()
-        if GITHUB_TOKEN_SETTING in _compose_environment_names(service.get("environment"))
+        if setting in _compose_environment_names(service.get("environment"))
     )
     assert not carrying, carrying
     env_files = sorted(
@@ -1815,14 +1863,79 @@ def test_no_checked_in_file_declares_the_github_token():
     declared_in_image = [
         (line, instruction, arguments)
         for line, instruction, arguments in instruction_lines(DOCKERFILE.read_text(encoding="utf-8"))
-        if instruction in {"ENV", "ARG"} and GITHUB_TOKEN_SETTING in arguments
+        if instruction in {"ENV", "ARG"} and setting in arguments
     ]
     assert not declared_in_image, declared_in_image
 
     workflows = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
     assert workflows, "no workflow found, so the scan of them would be vacuous"
-    naming_it = [path.name for path in workflows if GITHUB_TOKEN_SETTING in path.read_text(encoding="utf-8")]
+    naming_it = [path.name for path in workflows if setting in path.read_text(encoding="utf-8")]
     assert not naming_it, naming_it
+
+
+# ---------------------------------------------------------------------------
+# CPM-OPERATE-S09 -- where the digest goes, declared and empty.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_digest_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear both declarations so the module's *defaults* are what the case reads."""
+    for setting in DIGEST_SETTINGS:
+        monkeypatch.delenv(setting, raising=False)
+
+
+@pytest.mark.usefixtures("any_settings_module", "no_digest_env")
+@pytest.mark.parametrize("module", EVERY_SETTINGS_MODULE, ids=lambda name: name.rpartition(".")[2])
+@pytest.mark.parametrize("setting", DIGEST_SETTINGS)
+def test_the_digest_destinations_are_declared_and_empty_in_every_settings_module(module: str, setting: str):
+    """`CPM-OPERATE-S09`: both settings ship, and both ship empty.
+
+    *Declared*, over all four modules, because `CollectorsConfig.ready()` refuses
+    a settings module with no assignment as one that dropped the line. *Empty*,
+    because empty means the digest is stored only -- composed, on the page, and
+    delivered nowhere -- which is the honest shipped state: where an operator's
+    digest goes is the operator's declaration.
+
+    Args:
+        module: The settings module.
+        setting: The declaration.
+
+    """
+    settings_module = importlib.import_module(module)
+
+    assert getattr(settings_module, setting) == ""
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_digest_destinations_are_read_from_the_environment_and_stripped(monkeypatch: pytest.MonkeyPatch):
+    """The variables of the same names, with surrounding whitespace removed."""
+    monkeypatch.setenv(WEBHOOK_URL_SETTING, f"  {A_DIGEST_WEBHOOK_URL}\n")
+    monkeypatch.setenv(EMAIL_SETTING, f" {A_DIGEST_EMAIL} ")
+
+    base = importlib.import_module(BASE)
+
+    assert base.CPM_DIGEST_WEBHOOK_URL == A_DIGEST_WEBHOOK_URL
+    assert base.CPM_DIGEST_EMAIL == A_DIGEST_EMAIL
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_test_settings_empty_the_digest_destinations_whatever_the_shell_holds(monkeypatch: pytest.MonkeyPatch):
+    """A developer's exported webhook or address never has the suite's digests delivered to it.
+
+    Against `base`, which must still read the export, so the case cannot pass
+    because the variables were never seen.
+    """
+    monkeypatch.setenv(WEBHOOK_URL_SETTING, A_DIGEST_WEBHOOK_URL)
+    monkeypatch.setenv(EMAIL_SETTING, A_DIGEST_EMAIL)
+
+    base = importlib.import_module(BASE)
+    test_module = importlib.import_module(TEST)
+
+    assert base.CPM_DIGEST_WEBHOOK_URL == A_DIGEST_WEBHOOK_URL
+    assert base.CPM_DIGEST_EMAIL == A_DIGEST_EMAIL
+    assert test_module.CPM_DIGEST_WEBHOOK_URL == ""
+    assert test_module.CPM_DIGEST_EMAIL == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1924,7 +2037,7 @@ def test_the_only_option_a_schedule_entry_carries_is_a_countdown():
     """
     base = importlib.import_module(BASE)
 
-    option_keys = {key for entry in base.CELERY_BEAT_SCHEDULE.values() for key in entry.get("options", {})}
+    option_keys = {key for entry in sweep_entries(base).values() for key in entry.get("options", {})}
 
     assert option_keys == {"countdown"}
 
@@ -1949,10 +2062,46 @@ def test_the_broker_visibility_timeout_exceeds_every_declared_countdown(module: 
     timeout = settings_module.CELERY_BROKER_TRANSPORT_OPTIONS["visibility_timeout"]
     countdowns = {
         entry["kwargs"][COLLECTOR_KWARG]: entry["options"]["countdown"]
-        for entry in settings_module.CELERY_BEAT_SCHEDULE.values()
+        for entry in sweep_entries(settings_module).values()
         if "options" in entry
     }
 
     assert timeout == settings_module.BROKER_VISIBILITY_TIMEOUT_SECONDS
     assert countdowns, "no entry declares a countdown, so the comparison would be vacuous"
     assert all(timeout > countdown for countdown in countdowns.values()), (timeout, countdowns)
+
+
+@pytest.mark.usefixtures("any_settings_module")
+@pytest.mark.parametrize("module", EVERY_SETTINGS_MODULE, ids=lambda name: name.rpartition(".")[2])
+def test_the_digest_entry_fires_the_policy_digest_daily_after_the_last_sweep_offset(module: str):
+    """`CPM-OPERATE-S09`: one entry that is not a sweep, and everything about it is pinned.
+
+    The task name is composed from `core/queues.py`'s parts -- `cpm.policy.digest`
+    -- so the entry lands on the `policy` queue by the same rule every other task
+    is routed by. Daily, as an interval and never a crontab, because the
+    reconciliation reads intervals. No `kwargs`: the window ends when it runs
+    and the channels are settings. A countdown strictly greater than the largest
+    sweep offset -- a head start, not an ordering: the digest and the dispatches
+    are on different queues -- and under the visibility timeout for the reason
+    every countdown is. Over all four modules, because `production.py` is the
+    one a deployed component runs under.
+
+    Args:
+        module: The settings module.
+
+    """
+    settings_module = importlib.import_module(module)
+
+    entry = settings_module.CELERY_BEAT_SCHEDULE[DIGEST_ENTRY]
+
+    assert entry["task"] == DIGEST_TASK_NAME
+    assert DIGEST_TASK_NAME == "cpm.policy.digest"
+    assert entry["schedule"] == DIGEST_INTERVAL
+    assert isinstance(entry["schedule"], timedelta)
+    assert "kwargs" not in entry
+    assert entry["options"] == {"countdown": DIGEST_COUNTDOWN_SECONDS}
+    largest_sweep_offset = max(
+        sweep["options"]["countdown"] for sweep in sweep_entries(settings_module).values() if "options" in sweep
+    )
+    assert largest_sweep_offset < DIGEST_COUNTDOWN_SECONDS
+    assert settings_module.BROKER_VISIBILITY_TIMEOUT_SECONDS > DIGEST_COUNTDOWN_SECONDS

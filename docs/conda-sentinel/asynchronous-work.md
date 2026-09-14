@@ -78,7 +78,7 @@ captured.
 
 ## Every task
 
-Fourteen, and the name is the routing:
+Fifteen, and the name is the routing:
 
 | Task | Queue | What it does |
 |---|---|---|
@@ -95,6 +95,7 @@ Fourteen, and the name is the routing:
 | `cpm.collect.resolve_identity` | `collect` | Resolves one package's mappings from conda-forge's feedstock-outputs index and PyPI, and records them through `identity` |
 | `cpm.verify.py314_build` | `verify` | Actually builds one package against 3.14 |
 | `cpm.policy.run` | `policy` | One policy run over the whole inventory |
+| `cpm.policy.digest` | `policy` | **The operator digest.** Reads the last twenty-four hours of the run ledger, the inventory and the package table; stores one row; delivers it to the declared webhook and address |
 | `cpm.export.run` | `export` | Produces one report export a person asked for |
 
 Every per-package task takes `package_id` and a keyword-only `force`, which bypasses
@@ -110,7 +111,9 @@ worked.
 
 ## What beat actually fires
 
-Nine entries, one per **per-package** collector, each firing the one dispatcher:
+Ten entries. Nine are sweeps, one per **per-package** collector, each firing the
+one dispatcher; the tenth is the daily digest, which fires its own task and is
+[described below](#the-daily-digest):
 
 | Entry | Collector | Every | Offset |
 |---|---|---|---|
@@ -123,8 +126,9 @@ Nine entries, one per **per-package** collector, each firing the one dispatcher:
 | `cpm-sweep-license` | `license` | 1 day | +2 hours |
 | `cpm-sweep-feedstock` | `feedstock` | 7 days | — |
 | `cpm-sweep-python-readiness` | `python_readiness` | 7 days | +3 hours |
+| `cpm-digest` | — (fires `cpm.policy.digest`) | 1 day | +3.5 hours |
 
-The three offsets exist for different reasons — KEV reads what the vulnerability
+The three sweep offsets exist for different reasons — KEV reads what the vulnerability
 collector wrote, and the other two share a host with a sweep on the same tick.
 The identity resolver carries none, deliberately: the four sweeps that select on
 the mappings it records — `source_release`, `pypi_release` and `feedstock` on the
@@ -136,8 +140,9 @@ tasks drain, stated here rather than closed with a fourth offset.
 [The full argument, and what the offsets do not
 buy](operations.md#the-schedule-is-data-and-it-is-reconciled-against-the-collectors-at-start-up).
 
-Each entry's interval is reconciled at start-up against the cadence its collector
-declares, **in both directions**. A mismatch, an entry naming an unregistered
+Each sweep entry's interval is reconciled at start-up against the cadence its
+collector declares, **in both directions**; the digest entry names no collector
+and both the reconciliation and the start dispatch below pass over it. A mismatch, an entry naming an unregistered
 collector, or a freshness target that is not strictly greater than its cadence is an
 `ImproperlyConfigured` and the process does not start. Without that check, a weekly
 schedule against a daily-derived target would make the whole inventory read stale five
@@ -145,7 +150,7 @@ days out of seven with every gate green.
 
 ### A running beat does not mean anything has run
 
-The nine entries above are **intervals, not clock times**. `django_celery_beat` gives a
+The ten entries above are **intervals, not clock times**. `django_celery_beat` gives a
 new entry a `last_run_at` of "now" when it first registers it, so **the first fire is one
 whole interval later** — a day for the seven daily sweeps, a week for the two weekly ones.
 
@@ -160,9 +165,11 @@ cpm-sweep-vulnerability    enabled=True  interval=every 86400 seconds  last_run=
 Everything is healthy, and the entries have not ticked. **What fires at start is the
 `CPM_SWEEP_ON_BEAT_START` switch**, which the `dev` pixi environment turns on and
 nothing production-bound does: when beat starts with it on, a receiver on Celery's
-`beat_init` signal enqueues one `cpm.collect.sweep` per entry in the table above, in
-that order and with each entry's own options — so `kev` arrives one hour in,
-`license` two and `python_readiness` three, and the other six at once. The nine entries
+`beat_init` signal enqueues one `cpm.collect.sweep` per sweep entry in the table above,
+in that order and with each entry's own options — so `kev` arrives one hour in,
+`license` two and `python_readiness` three, and the other six at once. The digest
+entry is not a sweep and is not enqueued at start; the first digest is one
+interval away, or `pixi run stack-run compose_digest` now. The nine sweep entries
 themselves are untouched; their first tick is still one interval away. The receiver
 reads `CELERY_BEAT_SCHEDULE` rather than the scheduler's tables because the
 `DatabaseScheduler` rewrites those tables from settings on every beat start, so an
@@ -283,8 +290,8 @@ declared — and an evidence log in which every row names a source somebody can 
     happen — by scheduling `pixi run policy-run`, or by running it by hand.
 
 The reason it is like this rather than broken: cadence is data. `django_celery_beat`'s
-`DatabaseScheduler` rewrites the nine entries above from settings on every beat start
-— those nine are a *declaration*, and changing one is a pull request. But a schedule
+`DatabaseScheduler` rewrites the ten entries above from settings on every beat start
+— those ten are a *declaration*, and changing one is a pull request. But a schedule
 entry that settings does not declare lives in the database tables and survives. So the
 intended path is:
 
@@ -385,6 +392,48 @@ page offers, is on the
 
 ---
 
+## The daily digest
+
+`CPM-OPERATE-S09`. A sweep that fails for three days is otherwise found on the
+Coverage screen when a reviewer asks; nothing tells the operator, and silence and
+health look the same. So the tenth beat entry, `cpm-digest`, fires
+`cpm.policy.digest` once a day, three and a half hours after the tick — past the
+largest sweep offset, a head start rather than an ordering, since the digest is
+on `policy` and the dispatches on `collect` — and the task composes, delivers
+and stores one digest:
+
+```
+cpm-digest (beat, daily, +3.5 h)  ──or──  pixi run stack-run compose_digest
+   │  cpm.policy.digest, on the policy queue
+   ▼
+reads collection_runs since the previous digest, the inventory table, the package table
+   │  per collector: dispatches and collections by state, rate-limited refusals,
+   │  packages past the freshness target and never observed; overall: prune runs,
+   │  inventory ingested and absent, packages resolved and unresolved, the newest
+   │  finished policy run and its state
+   ▼
+delivers to CPM_DIGEST_WEBHOOK_URL and/or CPM_DIGEST_EMAIL — or to nothing
+   ▼
+stores one operator_digests row: figures, text, changed, deliveries, trace id
+   │
+   ▼
+/conda-sentinel/digests/ shows it, and the thirty before it
+```
+
+**It delivers even when nothing changed.** A day whose figures equal the previous
+digest's is stored and delivered as one line naming the last digest that did
+change and the problems still standing — a digest skipped for quiet, or one that
+said "nothing changed" over a sweep failing for the third day, would be silence
+again. **A delivery that fails does not
+fail the task**: a refused webhook or a mail backend that will not connect is a
+`failed` entry on the row, logged under `digest.delivery_failed`, and the row is
+the record. **The task is on the `policy` queue**, so it waits behind nothing on
+`collect` and spends no allowance. What it counts, where it goes and the
+credential rule are on the
+[operations page](operations.md#the-daily-digest).
+
+---
+
 ## When something goes wrong
 
 | Symptom | Look at |
@@ -394,6 +443,7 @@ page offers, is on the
 | The worker starts but consumes nothing | Its banner — see below |
 | A job is stuck `queued` | flower; is a worker draining `export`? |
 | A sweep ran but enqueued nothing | The dispatch's log — it names what it refused and why |
+| The digest stopped arriving | The Digests screen: a `failed` delivery names the host or address and the status; no row at all means beat is not firing `cpm-digest` |
 
 !!! bug "The worker banner is worth reading every time"
 

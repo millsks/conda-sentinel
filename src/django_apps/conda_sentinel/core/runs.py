@@ -41,14 +41,21 @@ carries the `CPM-` prefix.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from typing import Final
 
 from django.db import models
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 __all__ = [
+    "NO_RUNS",
     "TERMINAL_STATES",
     "RunLedgerError",
     "RunState",
+    "counts_by_state",
+    "states_as_words",
 ]
 
 
@@ -91,6 +98,48 @@ class RunState(models.TextChoices):
 #: total order in `core/outcomes.py` is over the outcome vocabulary and is not
 #: this one's to extend.
 TERMINAL_STATES: Final[frozenset[RunState]] = frozenset(state for state in RunState if state is not RunState.RUNNING)
+
+
+#: What a count per state reads as when every state is zero.
+NO_RUNS: Final[str] = "none"
+
+
+def counts_by_state(counted: Mapping[str, int]) -> dict[str, int]:
+    """Return a count per `RunState`, every state present and zero where nothing was counted.
+
+    The shape the operator digest stores (`CPM-OPERATE-S09`): every state
+    rather than the non-zero ones, so two days' figures compare by value and a
+    page renders one shape whatever the day held.
+
+    Args:
+        counted: What was tallied, by state value.
+
+    Returns:
+        The five states in declaration order.
+
+    """
+    return {state.value: int(counted.get(state.value, 0) or 0) for state in RunState}
+
+
+def states_as_words(counted: Mapping[str, object]) -> str:
+    """Return a count per state as a person reads it, non-zero states only.
+
+    One spelling for the digest's text and the Digests page, which may not
+    import each other: `330 succeeded, 10 failed`, or `none`.
+
+    Args:
+        counted: A count per state value; anything not a count reads as zero.
+
+    Returns:
+        The non-zero counts in declaration order, or `NO_RUNS`.
+
+    """
+    named = []
+    for state in RunState:
+        count = counted.get(state.value, 0)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            named.append(f"{count} {state.value}")
+    return ", ".join(named) if named else NO_RUNS
 
 
 class RunLedgerError(Exception):
