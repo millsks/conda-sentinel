@@ -48,13 +48,15 @@ restating, because a rule stated six times is a rule that holds in one of them.
 spelling one without re-deriving the comparison.
 
 **One conda verdict for a table with one row per `(channel, platform)`.** This
-pass reads the newest published-package observation at the cut-off, whichever
-pair it is about, and the row it writes references that exact observation -- so
-the channel and platform the verdict is about are readable from the finding
-rather than merged away. What that costs is real and is recorded here: a package
-current on one channel and behind on another gets the verdict of whichever pair
-was observed last. A verdict per pair is a bigger table than `CPM-AD-21`'s
-`(package, policy_run)` key describes and is not this story's to build.
+pass reads the newest published-package observation at the cut-off and, among
+the pairs one sweep wrote at that instant, prefers a pair that answered `ok`
+over one that did not (`CPM-OPERATE-S06`); the row it writes references that
+exact observation -- so the channel and platform the verdict is about are
+readable from the finding rather than merged away. What that costs is real and
+is recorded here: a package current on one pair and behind on another gets the
+verdict of whichever `ok` pair the ordering names first. A verdict per pair is a
+bigger table than `CPM-AD-21`'s `(package, policy_run)` key describes and is not
+this story's to build.
 
 **Nothing here reads the current time.** Every instant is the run's: the cut-off
 arrives as an argument (`CPM-AD-21`) and the run row carries the rest. That is
@@ -82,6 +84,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import ClassVar
 from typing import Final
+
+from django.db.models import Case
+from django.db.models import Value
+from django.db.models import When
 
 from conda_sentinel.collectors.models import CondaPackageSnapshot
 from conda_sentinel.collectors.models import FeedstockSnapshot
@@ -213,13 +219,13 @@ class SurfaceReader:
         reference_field: The column on `PackageCurrency` that stores the
             observation this reading came from.
         tie_break: The columns that decide between two observations sharing an
-            `observed_at`, applied ascending before the primary key. Empty for a
-            surface whose table holds one row per package per sweep, which is
-            three of the four; `conda_package_snapshots` holds one row per
-            `(channel, platform)` and every row of one sweep carries that run's
-            single instant (`CPM-AD-7`), so *every* row ties and something has to
-            decide. See `observed_surface` for which pair wins and what that
-            costs.
+            `observed_at` *and* a determinate-or-not state, applied ascending
+            before the primary key. Empty for a surface whose table holds one row
+            per package per sweep, which is three of the four;
+            `conda_package_snapshots` holds one row per `(channel, platform)` and
+            every row of one sweep carries that run's single instant
+            (`CPM-AD-7`), so *every* row ties and something has to decide. See
+            `observed_surface` for which pair wins and what that costs.
 
     """
 
@@ -255,6 +261,12 @@ class SurfaceReading:
     observation: SnapshotModel | None
     version: str
 
+
+#: The annotation `observed_surface` orders on before a reader's own tie-break:
+#: `0` for a row carrying `ok`, `1` for any sentinel. Named so the ordering key
+#: reads as the rule it is; `tests/integration/django_apps/test_currency_policy.py`
+#: pins it from both directions and across sweeps.
+DETERMINATE_RANK: Final[str] = "determinate_rank"
 
 #: How to read each of the four surfaces, in `VersionSurface`'s declared order.
 #:
@@ -346,18 +358,24 @@ def observed_surface(reader: SurfaceReader, *, package_id: int, cutoff: datetime
     Every row of one sweep ties on `observed_at`, so without a stated key the
     answer would be whichever row happened to be inserted last -- a verdict that
     changes when the collector's channel list is reordered, with nothing saying
-    so. The key is the channel then the platform, both ascending: the pair whose
-    channel sorts first alphabetically wins, then its first platform, then that
-    pair's newest row. Alphabetical is arbitrary and is chosen only because it is
-    *fixed*; what matters is that the same evidence produces the same verdict on
-    every replay, and that the row references the observation so a reader can see
-    which pair it was.
+    so. The key is, first, whether the row is determinate: among the pairs of
+    one instant an `ok` row is read before any sentinel, so a package published
+    only as `noarch` is judged by its `noarch` row and not by the `not_found`
+    the compiled platform beside it wrote (`CPM-OPERATE-S06`). A sentinel is the
+    verdict only when no pair of that instant answered `ok`. Then the channel,
+    then the platform, both ascending: among equals the pair whose channel sorts
+    first alphabetically wins, then its first platform, then that pair's newest
+    row. Alphabetical is arbitrary and is chosen only because it is *fixed*; what
+    matters is that the same evidence produces the same verdict on every replay,
+    and that the row references the observation so a reader can see which pair
+    it was.
 
-    A consequence worth knowing: a channel that simply does not carry the package
-    writes `not_found`, and if that channel sorts first its `not_found` becomes
-    the package's conda verdict even where a later-sorting channel publishes it.
-    The per-pair verdict that would fix this is a larger table than `CPM-AD-21`'s
-    `(package, policy_run)` key describes.
+    The preference is *within* one instant, never across sweeps: the newest
+    observation still comes first, so a package withdrawn from a channel reads
+    today's `not_found` rather than yesterday's `ok`. What remains a limitation is
+    that a package current on one pair and behind on another gets the verdict of
+    whichever `ok` pair sorts first. The per-pair verdict that would fix that is a
+    larger table than `CPM-AD-21`'s `(package, policy_run)` key describes.
 
     Args:
         reader: Which surface to read, and how.
@@ -390,7 +408,8 @@ def observed_surface(reader: SurfaceReader, *, package_id: int, cutoff: datetime
         raise CurrencyPolicyError(message)
     observation = (
         reader.model.objects.filter(package_id=package_id, observed_at__lte=cutoff)
-        .order_by("-observed_at", *reader.tie_break, "-pk")
+        .annotate(**{DETERMINATE_RANK: Case(When(state=OutcomeState.OK, then=Value(0)), default=Value(1))})
+        .order_by("-observed_at", DETERMINATE_RANK, *reader.tie_break, "-pk")
         .first()
     )
     version = "" if observation is None else str(getattr(observation, reader.version_field))

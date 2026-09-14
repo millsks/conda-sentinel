@@ -468,6 +468,13 @@ CPM_GITHUB_TOKEN = env.str("CPM_GITHUB_TOKEN", default="").strip()
 # conda subdir ("linux-64", "osx-arm64", "noarch"). An entry that is blank, not a
 # string, duplicated, or carries a path separator is refused rather than encoded.
 # See src/django_apps/conda_sentinel/collectors/conda_package.py.
+#
+# `config/settings/local.py` declares a local default (conda-forge, on noarch
+# and linux-64) so a local run observes something; `production.py` inherits
+# these empty values, and so does `test.py` -- deliberately, because
+# tests/integration/django_apps/test_conda_package.py asserts what an
+# undeclared component does end to end, and a suite that inherited the local
+# default would be asserting it against a declared one (CPM-OPERATE-S06).
 CPM_MONITORED_CHANNELS: tuple[str, ...] = ()
 CPM_MONITORED_PLATFORMS: tuple[str, ...] = ()
 

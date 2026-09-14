@@ -109,6 +109,9 @@ A_FEEDSTOCK_NAME: Final[str] = "numpy-feedstock"
 A_CHANNEL: Final[str] = "conda-forge"
 A_LATER_CHANNEL: Final[str] = "internal"
 A_PLATFORM: Final[str] = "linux-64"
+#: The subdir a pure-Python package is published under, and the one that sorts
+#: *after* `A_PLATFORM` -- which is the whole point of the cases that use it.
+A_NOARCH_PLATFORM: Final[str] = "noarch"
 
 #: The source's tagged spelling of `AN_AUTHORITY_VERSION`, and a version any
 #: ordering rule would call newer than it. The first is the one spelling
@@ -290,13 +293,14 @@ def a_feedstock_observation(
     )
 
 
-def a_published_package_observation(
+def a_published_package_observation(  # noqa: PLR0913 - one parameter per column a case may need to vary
     package: Package,
     *,
     version: str = AN_AUTHORITY_VERSION,
     state: str = OutcomeState.OK,
     observed_at: datetime = FIXED_INSTANT,
     channel: str = A_CHANNEL,
+    platform: str = A_PLATFORM,
 ) -> CondaPackageSnapshot:
     """Record one published-package observation, on the terms `a_source_observation` states.
 
@@ -308,6 +312,8 @@ def a_published_package_observation(
         channel: Which channel answered. Named because
             `conda_package_snapshots` holds one row per `(channel, platform)`,
             and the case about which of them a verdict is against needs two.
+        platform: Which subdir the row is about, for the cases that need one
+            channel observed on two.
 
     Returns:
         The saved row.
@@ -318,7 +324,7 @@ def a_published_package_observation(
         observed_at=observed_at,
         state=state,
         channel=channel,
-        platform=A_PLATFORM,
+        platform=platform,
         published_version=version if state == OutcomeState.OK else "",
     )
 
@@ -768,35 +774,33 @@ def test_one_row_per_package_per_run_and_one_row_per_package_in_the_inventory() 
 
 
 @pytest.mark.django_db
-def test_the_conda_verdict_can_be_about_a_channel_that_simply_does_not_carry_the_package() -> None:
-    """The cost of one conda verdict, made executable rather than left in a docstring.
+def test_a_channel_that_does_not_carry_the_package_does_not_mask_one_that_does() -> None:
+    """A first-sorting channel's `not_found` no longer becomes the verdict over a later channel's `ok`.
 
     `conda_package_snapshots` holds one row per `(channel, platform)` and this
-    pass produces one verdict, from the pair its stated key names -- the channel
-    that sorts first. So a channel that answers `not_found` because it does not
-    carry the package at all becomes the package's conda verdict even where a
-    later-sorting channel publishes the authority's exact version.
-
-    That is a real limitation and this is what stops it being a surprise: the row
-    references the observation, so the channel the verdict came from is readable
-    rather than inferred, and a reader who sees `not_found` can see it is about
-    `conda-forge` rather than about the package. The fix -- a verdict per
-    `(channel, platform)` -- is a larger table than `CPM-AD-21`'s `(package,
-    policy_run)` key describes and is not built here.
+    pass produces one verdict. Before `CPM-OPERATE-S06` the pair was chosen on
+    channel then platform alone, so a channel that answered `not_found` because
+    it does not carry the package at all became the package's conda verdict even
+    where a later-sorting channel published the authority's exact version -- a
+    limitation this case used to pin. The selection now prefers a determinate
+    row among one instant's pairs, and the row still references the observation
+    so the channel the verdict came from is readable rather than inferred. What
+    remains unbuilt is a verdict per pair, which is a larger table than
+    `CPM-AD-21`'s `(package, policy_run)` key describes.
     """
     an_ended_collection_run()
     package = a_package()
     a_source_observation(package, version=AN_AUTHORITY_VERSION)
-    absent = a_published_package_observation(package, state=OutcomeState.NOT_FOUND, channel=A_CHANNEL)
-    a_published_package_observation(package, version=AN_AUTHORITY_VERSION, channel=A_LATER_CHANNEL)
+    a_published_package_observation(package, state=OutcomeState.NOT_FOUND, channel=A_CHANNEL)
+    published = a_published_package_observation(package, version=AN_AUTHORITY_VERSION, channel=A_LATER_CHANNEL)
 
     a_policy_run()
 
+    assert A_CHANNEL < A_LATER_CHANNEL, "the absent channel must sort first, or this case proves nothing"
     finding = the_finding(package)
-    assert finding.conda_package_snapshot_id == absent.pk
-    assert finding.conda_package_snapshot.channel == A_CHANNEL
-    assert finding.conda_package_status == NOT_FOUND
-    assert finding.overall_status != CURRENT
+    assert finding.conda_package_snapshot_id == published.pk
+    assert finding.conda_package_snapshot.channel == A_LATER_CHANNEL
+    assert finding.conda_package_status == CURRENT
 
 
 @pytest.mark.django_db
@@ -933,6 +937,101 @@ def test_a_surface_ahead_of_the_authority_is_behind_through_the_pass_too() -> No
     assert finding.feedstock_status == BEHIND
     assert A_LATER_VERSION in finding.detail
     assert AN_AUTHORITY_VERSION in finding.detail
+
+
+@pytest.mark.django_db
+def test_a_noarch_only_package_is_current_when_the_compiled_platform_has_no_file() -> None:
+    """`CPM-OPERATE-S06`: among one sweep's pairs, a determinate row wins over `not_found`.
+
+    Most pure-Python packages on conda-forge publish only `noarch`. With
+    `("noarch", "linux-64")` declared, one sweep writes two rows for such a
+    package: `noarch` `ok` at the upstream version and `linux-64` `not_found`.
+    Both carry the run's instant, so the tie-break decides -- and on channel then
+    platform alone `linux-64` sorts first, and the package would be judged
+    `not_found` while its own `noarch` row said it was current. That is a false
+    verdict any two-platform declaration would produce, so the selection prefers
+    an `ok` row across the declared pairs before it falls back to the ordering.
+    """
+    an_ended_collection_run()
+    package = a_package()
+    a_source_observation(package, version=AN_AUTHORITY_VERSION)
+    a_published_package_observation(package, state=OutcomeState.NOT_FOUND, platform=A_PLATFORM)
+    published = a_published_package_observation(package, version=AN_AUTHORITY_VERSION, platform=A_NOARCH_PLATFORM)
+
+    a_policy_run()
+
+    assert A_PLATFORM < A_NOARCH_PLATFORM, "the compiled subdir must sort first, or this case proves nothing"
+    finding = the_finding(package)
+    assert finding.conda_package_snapshot_id == published.pk
+    assert finding.conda_package_snapshot.platform == A_NOARCH_PLATFORM
+    assert finding.conda_package_status == CURRENT
+
+
+@pytest.mark.django_db
+def test_a_compiled_package_is_current_when_noarch_has_no_file() -> None:
+    """The reverse arrangement: `linux-64` `ok`, `noarch` `not_found`, the same answer.
+
+    Here the ordering alone would already have chosen the right row, so this is
+    the case that shows the preference is for the *determinate* row and not for
+    `noarch`: a compiled package that publishes no `noarch` file is current on the
+    platform it does publish.
+    """
+    an_ended_collection_run()
+    package = a_package()
+    a_source_observation(package, version=AN_AUTHORITY_VERSION)
+    a_published_package_observation(package, state=OutcomeState.NOT_FOUND, platform=A_NOARCH_PLATFORM)
+    published = a_published_package_observation(package, version=AN_AUTHORITY_VERSION, platform=A_PLATFORM)
+
+    a_policy_run()
+
+    finding = the_finding(package)
+    assert finding.conda_package_snapshot_id == published.pk
+    assert finding.conda_package_snapshot.platform == A_PLATFORM
+    assert finding.conda_package_status == CURRENT
+
+
+@pytest.mark.django_db
+def test_the_published_package_verdict_is_not_found_only_when_every_pair_is() -> None:
+    """`not_found` survives as the verdict when no declared pair carries the package.
+
+    The preference for a determinate row must not manufacture one: with both
+    platforms `not_found` there is nothing to prefer, the ordering decides which
+    row the verdict references, and the verdict is `not_found`.
+    """
+    an_ended_collection_run()
+    package = a_package()
+    a_source_observation(package, version=AN_AUTHORITY_VERSION)
+    a_published_package_observation(package, state=OutcomeState.NOT_FOUND, platform=A_NOARCH_PLATFORM)
+    first = a_published_package_observation(package, state=OutcomeState.NOT_FOUND, platform=A_PLATFORM)
+
+    a_policy_run()
+
+    finding = the_finding(package)
+    assert finding.conda_package_snapshot_id == first.pk
+    assert finding.conda_package_status == NOT_FOUND
+
+
+@pytest.mark.django_db
+def test_a_newer_not_found_still_beats_an_older_ok_row() -> None:
+    """The preference is among rows of one instant only; the newest observation still comes first.
+
+    A package that was published and has since been withdrawn from a channel
+    reads `not_found` today and `ok` yesterday, and today's row is the verdict --
+    the cut-off reads the newest evidence, and an `ok` preference that reached
+    across sweeps would keep a package current for ever on the strength of one
+    old observation.
+    """
+    an_ended_collection_run(finished_at=LATER_INSTANT)
+    package = a_package()
+    a_source_observation(package, version=AN_AUTHORITY_VERSION)
+    a_published_package_observation(package, version=AN_AUTHORITY_VERSION, observed_at=FIXED_INSTANT)
+    withdrawn = a_published_package_observation(package, state=OutcomeState.NOT_FOUND, observed_at=LATER_INSTANT)
+
+    a_policy_run()
+
+    finding = the_finding(package)
+    assert finding.conda_package_snapshot_id == withdrawn.pk
+    assert finding.conda_package_status == NOT_FOUND
 
 
 @pytest.mark.django_db

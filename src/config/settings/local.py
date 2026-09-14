@@ -295,6 +295,47 @@ OIDC_AUDIENCE = OIDC_AUDIENCE.strip() or "local-dev-component-api"
 if not _CONFIGURED_ISSUER:
     LOGIN_URL = reverse_lazy(f"{LOCAL_SIGNIN_URL_NAME}_index")
 
+# THE MONITORED CONDA SURFACE
+# ------------------------------------------------------------------------------
+# The published-conda surface a *local* run observes (`CPM-OPERATE-S06`). `base.py`
+# declares both settings empty, and deployed they stay empty: which channels this
+# product records evidence about is PRD Open Question 4, and answering it there
+# would answer it for every deployment. Locally the question has a plain answer --
+# the demo inventory is resolved against conda-forge's own index, so conda-forge
+# is the one channel every local package is already known on -- and without it
+# `conda_package` and `license` select nothing, for ever, on every developer's
+# machine.
+#
+# Declared here rather than read from the environment, and that is a deliberate
+# departure from where `CPM-OPERATE-S03` and `-S04` put their switches. Those were
+# switches; this is a statement of what the product observes, and `base.py`'s
+# rule for such a statement is that it is a reviewed code literal worth a pull
+# request, never an unreviewed export. This module is reviewed code that only
+# local runs load: `manage.py`, `config/asgi.py` and `config/celery_app.py` all
+# default `DJANGO_SETTINGS_MODULE` to it, `config/wsgi.py` defaults to
+# `production`, and `seed-demo` loads it too but runs neither collector -- its
+# inline pass is `resolve_identity`. What guarantees the declaration cannot reach
+# a deployment is stage 1 of the refusal contract (FR-12): a deployed process that
+# loaded this module is refused at start-up by
+# `config/startup/stage_one.py`'s `_refuse_the_local_settings_module`, the last
+# statement of this file. `pixi.toml` carries neither name;
+# `tests/unit/test_settings.py` pins that.
+#
+# The two values are what the local stack observes and nothing else: one
+# channel, and `noarch` beside `linux-64` because a pure-Python package publishes
+# only `noarch` and a compiled one publishes no `noarch` at all, so either alone
+# would read half the inventory `not_found`. The currency pass reads the pair
+# that answered `ok` before one that did not (`policies/currency.py`,
+# `observed_surface`), which is what makes two platforms an honest declaration
+# rather than a coin toss. The shape rules `declaration_fault` enforces at boot
+# and `monitored` at run time apply unchanged, as does `MAX_MONITORED_CHANNELS`.
+#
+# Annotated so the literal is checked against the type `base.py` declares; the
+# ignore is for the re-declaration of a star-imported name, which strict mypy
+# reports as `no-redef` whatever the annotation says.
+CPM_MONITORED_CHANNELS: tuple[str, ...] = ("conda-forge",)  # type: ignore[no-redef]
+CPM_MONITORED_PLATFORMS: tuple[str, ...] = ("noarch", "linux-64")  # type: ignore[no-redef]
+
 # Stage 1 of the refusal contract (AD-26, FR-12). The last statement of this
 # module, deliberately: it runs after the AD-8 composition step by construction,
 # so every value a condition inspects is the composed one. `base.py` makes no

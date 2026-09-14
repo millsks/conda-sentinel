@@ -3524,6 +3524,8 @@ the default is reconciled against `MAX_MONITORED_CHANNELS`
 
 **Satisfies:** `CPM-FR-10` on the local stack.
 **Governed by:** `CPM-AD-29`'s fail-closed locality; `CPM-AD-20`.
+**Constrained:** built as a local settings declaration in `config/settings/local.py` instead of
+the `dev` feature's activation env; see the story.
 
 ### CPM-OPERATE-S07: Ninety days of evidence, purged nightly
 
