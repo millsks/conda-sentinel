@@ -48,6 +48,7 @@ from conda_sentinel.surface.api.serializers import HealthRowSerializer
 from conda_sentinel.surface.api.serializers import PackageDetailSerializer
 from conda_sentinel.surface.api.serializers import ReportPageSerializer
 from conda_sentinel.surface.api.serializers import ReportSerializer
+from conda_sentinel.surface.api.serializers import report_exclusion
 from conda_sentinel.surface.detail import identity_of
 from conda_sentinel.surface.detail import traces_for
 from conda_sentinel.surface.detail import work_on
@@ -195,6 +196,8 @@ class PackageDetailAPIView(RetrieveAPIView):  # type: ignore[type-arg]
                     "computed_at": row.computed_at,
                     "evidence_cutoff": row.evidence_cutoff,
                     "policy_versions": row.policy_versions,
+                    "inventory_absent_since": row.inventory_absent_since,
+                    "inventory_last_listed": row.inventory_last_listed,
                     "identity": identity_of(row.package),
                     "traces": traces_for(row),
                     "work": work_on(row.package),
@@ -326,6 +329,7 @@ class ReportAPIView(ListAPIView):  # type: ignore[type-arg]
                 "rows": [list(row) for row in produced.rows],
                 "evidence_cutoff": produced.evidence_cutoff,
                 "policy_versions": list(produced.policy_versions),
+                "excluded": report_exclusion(report),
             },
         ).data
         response = self.get_paginated_response(body["rows"])

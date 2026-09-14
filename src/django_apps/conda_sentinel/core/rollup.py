@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from conda_sentinel.core.models import PolicyRun
 
 __all__ = [
+    "AFTER_RUN_COLUMNS",
     "ROLLUP_MODEL",
     "ROLLUP_WRITE_FAILED_EVENT",
     "ROLLUP_WRITTEN_EVENT",
@@ -113,6 +114,19 @@ STAMP_COLUMNS: Final[frozenset[str]] = frozenset(
     },
 )
 
+#: The rollup columns an after-run step writes, which no pass may contribute.
+#:
+#: `CPM-OPERATE-S11`: `inventory_absent_since` and `inventory_last_listed` are
+#: stamped by `collectors/absence.py`'s `mark_inventory_absence` after the
+#: compose, because `core` may not read the inventory's evidence table. They are
+#: neither stamps -- the compose does not know their values -- nor contributions
+#: -- a pass returns statuses, and these are instants with no vocabulary -- so
+#: they are a third kind: written `NULL` by the compose, so a row is a full
+#: replacement, and filled in afterwards by the step that can read them.
+#: `contributable_columns()` subtracts them exactly as it subtracts the stamps,
+#: which is what keeps a pass from declaring one.
+AFTER_RUN_COLUMNS: Final[frozenset[str]] = frozenset({"inventory_absent_since", "inventory_last_listed"})
+
 #: The event one compose is logged under. Named so the case that asserts the log
 #: and the code that emits it cannot drift --
 #: `tests/integration/django_apps/test_rollup.py` reads it.
@@ -130,18 +144,21 @@ def contributable_columns() -> frozenset[str]:
     """Return every rollup column a pass may declare a contribution to.
 
     Returns:
-        The rollup's concrete field names, less the primary key and less
-        `STAMP_COLUMNS`. Exactly `{"currency_status", "feedstock_presence_status"}`
-        today, which `CPM-CURRENCY-S06` and `CPM-CURRENCY-S07` added with the
-        passes that own them. It is computed from the model's real fields rather
-        than listed, which is why each became contributable without an edit here
-        -- and why a column *removed* stops being contributable at the same
-        moment, which a hand-written list would not manage.
+        The rollup's concrete field names, less the primary key, less
+        `STAMP_COLUMNS` and less `AFTER_RUN_COLUMNS`. The first two were
+        `currency_status` and `feedstock_presence_status`, which
+        `CPM-CURRENCY-S06` and `CPM-CURRENCY-S07` added with the passes that own
+        them. It is computed from the model's real fields rather than listed,
+        which is why each became contributable without an edit here -- and why a
+        column *removed* stops being contributable at the same moment, which a
+        hand-written list would not manage.
 
     """
     meta = ROLLUP_MODEL._meta  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
     return frozenset(
-        field.name for field in meta.concrete_fields if field.name not in STAMP_COLUMNS and not field.primary_key
+        field.name
+        for field in meta.concrete_fields
+        if field.name not in STAMP_COLUMNS and field.name not in AFTER_RUN_COLUMNS and not field.primary_key
     )
 
 
@@ -358,6 +375,10 @@ def _replacement(  # noqa: PLR0913 - one keyword per stamp the row carries; a bu
         "confidence": confidence,
         "policy_versions": dict(policy_versions),
     }
+    # The after-run columns are written `NULL` here, so a compose is a full
+    # replacement of the row rather than a merge that leaves last run's absence
+    # behind; `collectors/absence.py` fills them in after every compose.
+    row.update(dict.fromkeys(AFTER_RUN_COLUMNS))
     meta = ROLLUP_MODEL._meta  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
     for column in sorted(contributable_columns()):
         verdict = contributed.get(column)

@@ -42,6 +42,7 @@ from django.db.models import Subquery
 from django.db.models import Value
 from django.db.models import When
 
+from conda_sentinel.collectors.selection import RESOLVED_CONFIDENCES
 from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.policies.models import PackagePriority
 from conda_sentinel.policies.outcomes import PRIORITY_BUCKETS
@@ -51,9 +52,11 @@ from conda_sentinel.workflow.states import TERMINAL_STATES
 from conda_sentinel.workflow.states import Queue
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from django.db.models import QuerySet
 
-__all__ = ["QUEUE_ORDER", "QueueRow", "queue_items", "queue_rows"]
+__all__ = ["QUEUE_ORDER", "QueueRow", "absent_unresolved_count", "queue_items", "queue_rows"]
 
 #: How a queue is ordered.
 #:
@@ -72,6 +75,10 @@ QUEUE_ORDER: Final[tuple[str, ...]] = ("bucket_rank", "-priority_score", "findin
 #: not.
 _UNSCORED: Final[int] = 0
 
+#: What a row reads off the rollup when the package has no rollup row yet: no
+#: bucket, and nothing said about the inventory either way.
+_NO_ROLLUP: Final[tuple[str, None, None]] = ("", None, None)
+
 
 @dataclass(frozen=True, slots=True)
 class QueueRow:
@@ -85,6 +92,13 @@ class QueueRow:
     #: the confidence gate blanked the verdicts a bucket is derived from.
     bucket: str
     score: int | None
+
+    #: What the inventory said about the package at the last run's cut-off
+    #: (`CPM-OPERATE-S11`), off the same rollup row as the bucket. An open item on
+    #: an absent package is unusual -- the run that stamps the row closes them --
+    #: but a run that failed between the two leaves one, and the row says so.
+    inventory_absent_since: datetime | None = None
+    inventory_last_listed: datetime | None = None
 
 
 def queue_items(queue: str, *, include_finished: bool = False, search: str = "") -> QuerySet[WorkflowItem]:
@@ -164,12 +178,12 @@ def queue_rows(queue: str, items: QuerySet[WorkflowItem] | None = None) -> tuple
     # rollup, which the queryset above already annotates for *ordering* -- but an
     # annotation used for ordering is not a value the template can read without
     # reaching through a join, so the display value is fetched once here.
-    buckets = dict(
-        PackageHealth.objects.filter(package_id__in={item.package_id for item in page}).values_list(
-            "package_id",
-            "priority_status",
-        ),
-    )
+    rollup = {
+        package_id: (bucket, absent_since, last_listed)
+        for package_id, bucket, absent_since, last_listed in PackageHealth.objects.filter(
+            package_id__in={item.package_id for item in page},
+        ).values_list("package_id", "priority_status", "inventory_absent_since", "inventory_last_listed")
+    }
     scores = dict(
         PackagePriority.objects.filter(package_id__in={item.package_id for item in page})
         .order_by("package_id", "-policy_run_id")
@@ -179,11 +193,13 @@ def queue_rows(queue: str, items: QuerySet[WorkflowItem] | None = None) -> tuple
         QueueRow(
             item=item,
             canonical_name=item.package.canonical_name,
-            bucket=buckets.get(item.package_id, ""),
+            bucket=rollup.get(item.package_id, _NO_ROLLUP)[0],
             # `None` rather than zero: zero is a score somebody could have been
             # given, and the absence of one is a different thing. The ordering uses
             # `_UNSCORED`; the display does not.
             score=scores.get(item.package_id),
+            inventory_absent_since=rollup.get(item.package_id, _NO_ROLLUP)[1],
+            inventory_last_listed=rollup.get(item.package_id, _NO_ROLLUP)[2],
         )
         for item in page
     )
@@ -192,3 +208,32 @@ def queue_rows(queue: str, items: QuerySet[WorkflowItem] | None = None) -> tuple
 #: The three queues, in the order a nav lists them. Read off the vocabulary rather
 #: than written out, so a fourth queue appears without an edit here.
 ALL_QUEUES: Final[tuple[str, ...]] = tuple(Queue.values)
+
+
+def absent_unresolved_count() -> int:
+    """Return how many unresolved packages the identity queue is not offering because they are absent.
+
+    The line the identity review page states (`CPM-OPERATE-S11`): "N packages
+    absent from the inventory are not offered, across all packages as of the
+    newest run". Read off the rollup rather than by running the selection again
+    -- the rollup is cut-off bound and one query -- and it is the same count the
+    selection logged for that run, read a different way: a package whose row the
+    newest run stamped absent, at a **current** `Package.confidence` outside
+    `RESOLVED_CONFIDENCES`, which is the confidence the selection reads. The
+    rollup's own `confidence` column is what gated the row's statuses at compute
+    time and can lag a resolution made since; the selection never reads it, so
+    neither does this. The complement in SQL, on the selection's own terms, so a
+    stored confidence the enum does not declare is counted rather than dropped.
+
+    Independent of the page's search: the search narrows the items shown, and
+    the line is about what the selection left out of the queue as a whole.
+
+    Returns:
+        The count. Zero is an ordinary answer and the page says it.
+
+    """
+    return (
+        PackageHealth.objects.filter(inventory_absent_since__isnull=False)
+        .exclude(package__confidence__in=RESOLVED_CONFIDENCES)
+        .count()
+    )

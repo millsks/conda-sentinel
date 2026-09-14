@@ -10,6 +10,14 @@
         {{ package.canonical_name }}
         <span class="pbucket {{ health.priority_status|tone }}">{{ health.priority_status }}</span>
         <span class="chip tone-plain sm">{% translate "work" %}: {{ health.work_type_status|label }}</span>
+        {% comment %}
+          CPM-OPERATE-S11, CPM-FR-38. The one text tag an absent package carries,
+          read off the rollup's two columns at the run's cut-off. Beside the
+          statuses rather than in place of any: absence gates nothing, and every
+          status on this page is computed exactly as it was.
+        {% endcomment %}
+        {% absence_tag health.inventory_absent_since health.inventory_last_listed as absent %}
+        {% if absent %}<span class="conf tone-notfound">{{ absent }}</span>{% endif %}
       </h2>
       <div class="sub">
         {% if package.display_name %}{{ package.display_name }} &middot; {% endif %}
@@ -250,7 +258,10 @@
                     {% for move in entry.history %}
                       <div class="ev">
                         {{ move.from_state }} &rarr; {{ move.to_state }} &middot;
-                        {{ move.actor.username }} &middot; {{ move.occurred_at|date:"Y-m-d H:i" }}Z
+                        {% comment %} CPM-OPERATE-S11: the product's own close names no actor;
+                           the row's origin says who, and it is printed as such. {% endcomment %}
+                        {% if move.actor %}{{ move.actor.username }}{% else %}{{ move.origin }}{% endif %}
+                        &middot; {{ move.occurred_at|date:"Y-m-d H:i" }}Z
                         {% if move.justification %}<br />{{ move.justification }}{% endif %}
                       </div>
                     {% empty %}

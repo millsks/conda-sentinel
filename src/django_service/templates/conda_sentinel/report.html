@@ -84,6 +84,18 @@
         <b>{% translate "this report matched no rows, so it was produced from nothing" %}</b>
       </div>
     {% endif %}
+    {% if page.report.excludes %}
+      {% comment %}
+        CPM-OPERATE-S11. The one report allowed to leave a package out states the
+        exclusion with its count and reason, from the same query the rows came
+        from -- stated even at zero, because a reader who cannot see the rule
+        cannot tell "none excluded" from "nothing says".
+      {% endcomment %}
+      <div class="excluded">
+        <span class="lbl">{% translate "excluded" %}</span>
+        <b>{{ page.exclusion }}</b>
+      </div>
+    {% endif %}
   </div>
 
   <div class="split">

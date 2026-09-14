@@ -112,8 +112,24 @@ That key is what makes a re-run safe: the same finding does not open a second it
 and an item somebody resolved stays resolved. Without it, every nightly run would
 reopen last night's work.
 
-`core` declares the seam and `workflow` fills it at `ready()` — the same inversion the
-pass registry uses, and for the same reason.
+`core` declares the seam and the domain applications fill it at `ready()` — the same
+inversion the pass registry uses, and for the same reason. Two steps are registered,
+and they run in this order because `INSTALLED_APPS` lists `collectors` before
+`workflow`:
+
+| Step | Registered by | What it does |
+|---|---|---|
+| `collectors.mark_inventory_absence` | `collectors` | Reads which packages the inventory no longer listed at the run's cut-off and stamps `inventory_absent_since` / `inventory_last_listed` on the run's rollup rows — `NULL` for a listed package |
+| `workflow.open_queue_items` | `workflow` | Opens an item for everything the run concluded is work, skipping absent packages; then closes every open item of every absent package as a `system` transition with a reason |
+
+The order matters: the rollup row has to carry absence before the queues and the
+surfaces read it. The absence step counts rows stamped; the opening step counts items
+opened plus items closed. A failing step fails the run.
+
+An absent package is decided by its newest inventory snapshot **at the cut-off**, so
+the same run replayed skips and closes the same packages, and a package that leaves
+the inventory *after* the cut-off is treated as listed for that run
+([managing the inventory](managing-the-inventory.md#what-absence-does)).
 
 ## 7 — Reading it back
 
@@ -133,6 +149,12 @@ evidence moved, or the rules did.
 Because a replay writes new rows rather than editing old ones, current health can
 legitimately hold rows from two runs at once. That is why freshness is per row, and
 why every screen shows it.
+
+The after-run steps replay too: inventory absence is read at the run's cut-off, so a
+replay stamps the same rollup rows, leaves the same packages out of the identity
+queue and closes the same items — and closes nothing twice, because an item already
+finished is skipped. `compare_runs` still compares the **derived tables only**; the
+absence columns on the rollup and the queue items are not part of what it diffs.
 
 A replay reaches exactly as far as the ledger. Evidence older than
 `CPM_EVIDENCE_RETENTION_DAYS` (ninety by default) is purged nightly, and the purge

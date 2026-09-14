@@ -262,3 +262,34 @@ def test_the_real_step_is_registered_by_adoption(adopted_steps: Mapping[str, obj
     from conda_sentinel.workflow.opening import OPENING_STEP_NAME  # noqa: PLC0415 - read beside the claim
 
     assert OPENING_STEP_NAME in adopted_steps
+
+
+def test_the_absence_step_is_registered_by_adoption_and_runs_before_the_opening_step(
+    adopted_steps: Mapping[str, object],
+) -> None:
+    """`CPM-OPERATE-S11`: two adopted steps, in the order the queues need.
+
+    `conda_sentinel.collectors` registers the step that stamps inventory absence
+    on the rollup, and it must run before `workflow`'s opening step reads the
+    rollup -- steps run in registration order, and registration order is
+    `INSTALLED_APPS` order. Both facts are pinned here: the adoption, and the
+    order it produced, so a reordering of the settings list fails a named case
+    rather than labelling every absent package one run late.
+
+    Args:
+        adopted_steps: What adoption had registered, from the autouse fixture,
+            in registration order.
+
+    """
+    from django.conf import settings  # noqa: PLC0415 - read beside the claim
+
+    from conda_sentinel.collectors.absence import ABSENCE_STEP_NAME  # noqa: PLC0415 - read beside the claim
+    from conda_sentinel.collectors.absence import mark_inventory_absence  # noqa: PLC0415 - read beside the claim
+    from conda_sentinel.workflow.opening import OPENING_STEP_NAME  # noqa: PLC0415 - read beside the claim
+
+    registered = list(adopted_steps)
+    installed = list(settings.INSTALLED_APPS)
+
+    assert adopted_steps[ABSENCE_STEP_NAME] is mark_inventory_absence
+    assert registered.index(ABSENCE_STEP_NAME) < registered.index(OPENING_STEP_NAME)
+    assert installed.index("conda_sentinel.collectors") < installed.index("conda_sentinel.workflow")

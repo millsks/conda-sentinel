@@ -20,7 +20,10 @@ from datetime import UTC
 from datetime import datetime
 from typing import Final
 
+from conda_sentinel.surface.labels import display_label
+from conda_sentinel.surface.reports import ABSENT_FROM_THE_INVENTORY
 from conda_sentinel.surface.reports import EMPTY
+from conda_sentinel.surface.reports import REPORTS
 from conda_sentinel.surface.reports import REPORTS_BY_SLUG
 from conda_sentinel.surface.reports import report_rows
 
@@ -40,11 +43,12 @@ def a_row(*values: object) -> tuple[object, ...]:
         *values: The column values, in `all_columns()` order.
 
     Returns:
-        The values with the row's version map appended, which is the shape
-        `report_values` selects.
+        The values with the row's version map and the two inventory-absence
+        instants appended -- `None` for a listed package -- which is the shape
+        `report_values` selects (`CPM-OPERATE-S11` added the pair).
 
     """
-    return (*values, A_VERSION_MAP)
+    return (*values, A_VERSION_MAP, None, None)
 
 
 def test_a_field_with_no_value_renders_blank() -> None:
@@ -98,8 +102,28 @@ def test_a_page_names_every_policy_version_its_rows_carry() -> None:
     the reader most likely to check it.
     """
     report = REPORTS_BY_SLUG[A_REPORT]
-    older = ("aiohttp", "verified", NOW, NOW, "advisories_matched", "critical", {"vulnerability": "2026.09.3"})
-    newer = ("cryptography", "verified", NOW, NOW, "advisories_matched", "high", {"vulnerability": "2026.09.4"})
+    older = (
+        "aiohttp",
+        "verified",
+        NOW,
+        NOW,
+        "advisories_matched",
+        "critical",
+        {"vulnerability": "2026.09.3"},
+        None,
+        None,
+    )
+    newer = (
+        "cryptography",
+        "verified",
+        NOW,
+        NOW,
+        "advisories_matched",
+        "high",
+        {"vulnerability": "2026.09.4"},
+        None,
+        None,
+    )
 
     produced = report_rows(report, [older, newer])
 
@@ -124,3 +148,45 @@ def test_the_cut_off_is_the_newest_the_rows_carry() -> None:
     )
 
     assert produced.evidence_cutoff == NOW
+
+
+def test_an_absent_package_is_tagged_in_the_name_cell_on_the_screen_and_not_in_the_values() -> None:
+    """`CPM-OPERATE-S11`: the report labels an absent package where a reader sees it.
+
+    The tag is built from the two instants the query carries after the version
+    map, appended to the name cell by `readable_rows` -- and *only* there. `rows`
+    is what the CSV and the API carry, and it is unchanged: the tag is a label,
+    not a column, on the terms `CPM-AD-24` keeps a status verbatim.
+    """
+    report = REPORTS_BY_SLUG[A_REPORT]
+    since = datetime(2026, 9, 6, 2, 0, tzinfo=UTC)
+    last_listed = datetime(2026, 9, 5, 2, 0, tzinfo=UTC)
+    row = ("aiohttp", "verified", NOW, NOW, "advisories_matched", "critical", A_VERSION_MAP, since, last_listed)
+
+    produced = report_rows(report, [row, a_row("cryptography", "verified", NOW, NOW, "advisories_matched", "high")])
+
+    assert produced.rows[0][0] == "aiohttp"
+    assert produced.absence_tags == (
+        "absent from the inventory since 2026-09-06 (last listed 2026-09-05)",
+        "",
+    )
+    readable = produced.readable_rows()
+    assert readable[0][0] == "aiohttp \u00b7 absent from the inventory since 2026-09-06 (last listed 2026-09-05)"
+    assert readable[1][0] == "cryptography"
+    assert readable[0][1:] == tuple(
+        display_label(cell) if col.is_status else cell
+        for cell, col in zip(produced.rows[0][1:], produced.columns[1:], strict=True)
+    )
+
+
+def test_only_the_feedstock_gap_report_declares_an_exclusion() -> None:
+    """The epic's rule as data: one surface may exclude a package, and it says so.
+
+    Every other report carries absent packages and labels them. A second report
+    growing an `excludes` is a decision this case makes somebody take on purpose.
+    """
+    excluding = [report.slug for report in REPORTS if report.excludes is not None]
+
+    assert excluding == ["feedstock-lag"]
+    assert REPORTS_BY_SLUG["feedstock-lag"].excludes is ABSENT_FROM_THE_INVENTORY
+    assert ABSENT_FROM_THE_INVENTORY.reason == "absent from the inventory at the run's cut-off"

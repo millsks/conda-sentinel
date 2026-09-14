@@ -103,6 +103,45 @@ It is also the only one restricted to a single role. The justification is requir
 the **declaration**, so the service refuses without one rather than each caller
 remembering to ask.
 
+### The product's own table: one move, one circumstance
+
+The table above is what a *person* may do. There is a second table, and it is the
+only way the product moves an item without a person: when the inventory **no longer
+lists the package** the item is about, the policy run closes the item. Declared as
+`SYSTEM_TRANSITIONS`, separately, because the product holds no role and a row for it
+in the human table would either invent one or read as "nobody":
+
+| From | To | Recorded as |
+|---|---|---|
+| `open` | `resolved` | `origin=system`, a justification naming the absence and the last-listed date |
+| `triaged` | `resolved` | the same |
+| `routed` | `resolved` | the same |
+| `in_progress` | `resolved` | the same; the claim is released |
+
+Nothing else the product does moves an item, and this move is made only over a package
+whose newest inventory snapshot at the run's evidence cut-off is `not_found` — never
+over the inventory table's `retired_at`, which is not cut-off bound. An item already
+`resolved` or `accepted` is left alone, which is what makes a replayed run close
+nothing twice. The audit row names the product in place of an actor: `actor` is empty
+and `origin` is `system`, and the database refuses a row that names neither or both.
+
+A person still cannot make this move by hand: `apply_transition` reads only the human
+table, so the product's move is not one a person can be granted.
+
+**The package comes back the same way.** A later ingestion that lists the package
+again is the whole of re-listing: the next run offers it to the identity queue again
+and opens *fresh* items in every queue with work for it — each key carries the
+instant the new listing began, which is what lets a remediation item keyed on the
+same advisory open again — while the items the product closed stay closed. Nothing
+is reopened, a package never holds two open identity items, and no manual step is
+involved.
+
+**The identity queue says what it is not offering.** A package absent at the cut-off
+is left out of the identity review selection rather than ranked last, and the page
+states "N packages absent from the inventory are not offered", read from the rollup.
+Every other surface labels the package rather than dropping it —
+[managing the inventory](managing-the-inventory.md#what-absence-does).
+
 ---
 
 ## Moving an item
@@ -159,7 +198,7 @@ order:
 | Ask | Because |
 |---|---|
 | Is the policy run happening at all? | If it is not, no new items open and the old ones are stale |
-| Are items being *closed*? | Nothing in the product closes an item; a person must |
+| Are items being *closed*? | The product closes an item in one circumstance only — the package left the inventory — and a person must close everything else |
 | Did a collector start failing? | An `error` verdict is still a verdict, and it opens work |
 | Did a rule set change? | A new policy version can open work the old one did not |
 
@@ -202,8 +241,9 @@ move:
 |---|---|
 | `item`, `from_state`, `to_state` | The move |
 | `queue` | The queue it was in *at the time* — an item can be routed |
-| `actor` | Who did it |
-| `justification` | The reason, required on `accepted` |
+| `actor` | Who did it — empty for the product's own close |
+| `origin` | `system` when the product made the move; blank on a person's. Exactly one of `actor` and `origin` is set, by constraint |
+| `justification` | The reason, required on `accepted` and on the product's close |
 | `occurred_at` | When |
 
 That split is the point. Asking "what state is this in" is a read of one row; asking

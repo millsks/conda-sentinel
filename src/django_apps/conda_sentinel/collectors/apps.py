@@ -215,6 +215,9 @@ class CollectorsConfig(AppConfig):
                 when `CPM_EVIDENCE_RETENTION_DAYS` is undeclared, not a whole
                 number of days, or below one (`CPM-OPERATE-S07`).
 
+        Also adopts the after-run step that stamps inventory absence on the
+        rollup (`CPM-OPERATE-S11`), before `workflow`'s opening step.
+
         """
         # Imported here rather than at module scope: `AppConfig` classes are
         # imported during `django.setup()` *before* the app registry is
@@ -318,6 +321,34 @@ class CollectorsConfig(AppConfig):
         _require_retention(settings)
         _require_digest_declarations(settings)
         _declare_inventory_source(settings)
+        _register_absence_step()
+
+
+def _register_absence_step() -> None:
+    """Adopt the after-run step that stamps inventory absence on the rollup (`CPM-OPERATE-S11`).
+
+    Registered on the seam `core/after_run.py` declares, exactly as
+    `workflow/apps.py` registers the step that opens queue items -- and **before**
+    it, which is not an accident of import order but a property
+    `tests/unit/startup/test_installed_apps_ordering.py` and
+    `tests/unit/django_apps/test_after_run_seam.py` pin: `INSTALLED_APPS` lists
+    `collectors` ahead of `workflow`, steps run in registration order, and the
+    rollup row has to carry absence by the time the queues are read.
+
+    Guarded against a second `ready()` on the terms the collector adoptions above
+    are: `register_after_run_step` refuses a second registration under one name
+    so that two things cannot quietly answer to it, and a `ready()` that runs
+    twice in one process would otherwise abort boot over an adoption that had
+    already succeeded.
+
+    """
+    from conda_sentinel.collectors.absence import ABSENCE_STEP_NAME  # noqa: PLC0415 - after django.setup()
+    from conda_sentinel.collectors.absence import mark_inventory_absence  # noqa: PLC0415 - see above
+    from conda_sentinel.core.after_run import register_after_run_step  # noqa: PLC0415 - see above
+    from conda_sentinel.core.after_run import step_registrations  # noqa: PLC0415 - see above
+
+    if step_registrations().get(ABSENCE_STEP_NAME) is not mark_inventory_absence:
+        register_after_run_step(ABSENCE_STEP_NAME, mark_inventory_absence)
 
 
 def _require_digest_declarations(settings: Any) -> None:

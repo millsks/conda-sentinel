@@ -248,6 +248,15 @@ class HealthRow:
     #: `tests/unit/django_apps/test_health_projection.py`.
     cells: tuple[Cell, ...]
 
+    #: What the inventory said about this package at the run's cut-off
+    #: (`CPM-OPERATE-S11`): when it stopped listing it, and when it last did. Both
+    #: `None` for a listed package. Read off the rollup row, so a list of ten
+    #: thousand rows labels its absent packages at no extra query; the template
+    #: prints `surface/labels.py`'s tag from the pair and nothing else changes --
+    #: every status on the row is computed exactly as it was.
+    inventory_absent_since: datetime | None = None
+    inventory_last_listed: datetime | None = None
+
 
 def health_rows(page: Sequence[PackageHealth]) -> tuple[HealthRow, ...]:
     """Return the rows a page of the health table renders, evidence included.
@@ -294,6 +303,8 @@ def health_rows(page: Sequence[PackageHealth]) -> tuple[HealthRow, ...]:
                 _readiness_cell(row, readiness.get(key)),
                 _feedstock_cell(row, feedstock.get(key)),
             ),
+            inventory_absent_since=row.inventory_absent_since,
+            inventory_last_listed=row.inventory_last_listed,
         )
         for row, key in zip(page, keys, strict=True)
     )

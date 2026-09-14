@@ -65,12 +65,15 @@ from conda_sentinel.core.roles import SECURITY_REVIEWER
 from conda_sentinel.workflow.states import Queue
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from django.utils.functional import _StrPromise
 
 __all__ = [
     "COLLECTOR_STATUS_LABELS",
     "ROLE_LABELS",
     "SPELLED_OUT",
+    "absence_tag",
     "collector_status_label",
     "display_label",
     "labelled_queues",
@@ -239,3 +242,35 @@ def display_label(value: object) -> str:
     # underscore is always this product's separator standing in for a space.
     words = value.replace("_", " ").strip()
     return words[:1].upper() + words[1:]
+
+
+def absence_tag(since: datetime | None, last_listed: datetime | None) -> str:
+    """Return the text tag an absent package carries on every surface, or nothing.
+
+    `CPM-FR-38` and `CPM-OPERATE-S11`: a package the inventory no longer lists is
+    *labelled* wherever it appears -- the package page header, the health list's
+    name cell, a queue row, a report row -- and never silently dropped. The tag is
+    text rather than a status chip: absence is an observation the inventory
+    collector made, not a verdict a pass reached, and a chip would put it in the
+    vocabulary `surface/tone.py` audits. Read from the rollup's two columns only,
+    which are cut-off bound and one query away on every list.
+
+    Args:
+        since: `PackageHealth.inventory_absent_since`, or `None` for a listed
+            package.
+        last_listed: `PackageHealth.inventory_last_listed`, which the after-run
+            step sets beside `since`; `None` is tolerated and simply not said.
+
+    Returns:
+        `"absent from the inventory since YYYY-MM-DD (last listed YYYY-MM-DD)"`, the
+        parenthesis omitted when no listing is recorded, or `""` for a package the
+        inventory lists -- the one place a blank is right, because there is no tag
+        to print rather than a value to hide.
+
+    """
+    if since is None:
+        return ""
+    tag = _("absent from the inventory since %(since)s") % {"since": since.date().isoformat()}
+    if last_listed is None:
+        return str(tag)
+    return str(_("%(tag)s (last listed %(last_listed)s)") % {"tag": tag, "last_listed": last_listed.date().isoformat()})

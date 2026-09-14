@@ -19,10 +19,18 @@ differentially, by calling both.
 
 **The cut-off is an argument.** `CPM-AD-25`: a policy reads the latest snapshot
 at or before *its run's* cut-off, and `core/policy_run.py` derives one per run and
-hands it down. Nothing here derives one or reads a clock (`CPM-AD-26`). That
-contract has **no production caller yet** -- `CPM-APP-S05` builds the first one --
-so it has never been exercised against a real `core/policy_run.py` cut-off, only
-against instants the suite supplies.
+hands it down. Nothing here derives one or reads a clock (`CPM-AD-26`). The first
+production caller is `workflow/opening.py` (`CPM-OPERATE-S11`), which selects at
+`run.evidence_cutoff` when it opens identity review items -- so the opening is
+cut-off bound and a replayed run opens for the same packages.
+
+**An absent package is not offered** (`CPM-OPERATE-S11`). A package whose newest
+inventory snapshot at the cut-off is `not_found` is one the organisation no
+longer runs, and a queue that offered it would be asking a person to establish
+the identity of something nobody uses. `collectors/absence.py` is the reader;
+this module leaves such packages out and reports how many, rather than ranking
+them last for want of breadth as it did before. A package that departs *after*
+the cut-off keeps its place, because at this cut-off it has not departed.
 
 **NULL ordering is decided in Python, and that is the point rather than a
 detail.** SQLite and PostgreSQL disagree about where a NULL sorts, in opposite
@@ -54,7 +62,6 @@ in `identity`, and why the three no-breadth states are not zero.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING
 from typing import Final
 
@@ -62,21 +69,25 @@ import structlog
 from django.db import transaction
 from django.db.models import Prefetch
 
-from conda_sentinel.collectors.models import InventoryReadError
-from conda_sentinel.collectors.models import InventorySnapshot
-from conda_sentinel.core.clock import is_aware
+from conda_sentinel.collectors.absence import histories_at
+from conda_sentinel.collectors.absence import require_usable_cutoff
 from conda_sentinel.identity.models import IdentityConfidence
 from conda_sentinel.identity.models import Package
 from conda_sentinel.identity.models import PackageMapping
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Mapping
+    from datetime import datetime
+
+    from conda_sentinel.collectors.absence import PackageHistory
 
 __all__ = [
     "QUEUE_SELECTED_EVENT",
     "RESOLVED_CONFIDENCES",
     "UNRESOLVED_CONFIDENCES",
+    "IdentityReviewSelection",
     "UnresolvedPackage",
+    "select_unresolved",
     "unresolved_packages",
 ]
 
@@ -117,16 +128,6 @@ RESOLVED_CONFIDENCES: Final[frozenset[str]] = frozenset({IdentityConfidence.VERI
 #: a fourth confidence added without a decision about which half it belongs to
 #: fails there rather than changing the queue quietly.
 UNRESOLVED_CONFIDENCES: Final[frozenset[str]] = frozenset(IdentityConfidence.values) - RESOLVED_CONFIDENCES
-
-#: How many snapshot rows are held in memory at once while the fold runs.
-#:
-#: `InventorySnapshot` is append-only and kept for the declared retention
-#: (`CPM-OPERATE-S07`, ninety days by default), so the rows at or before a
-#: cut-off grow with the *history* as well as with the inventory -- see
-#: `_breadth_at`, which says what that costs. Streaming in chunks is what keeps the
-#: fold's memory proportional to the number of packages rather than to the number
-#: of observations ever made of them.
-_SNAPSHOT_CHUNK: Final[int] = 2000
 
 #: What the fold answers for a package it found no snapshot for at the cut-off.
 #:
@@ -212,156 +213,48 @@ def _breadth_ordering_key(
     )
 
 
-def _require_usable_cutoff(cutoff: datetime) -> None:
-    """Refuse a cut-off this read cannot be answered in terms of.
+@dataclass(frozen=True, slots=True)
+class IdentityReviewSelection:
+    """The identity review queue at one cut-off, with what it left out.
 
-    Two refusals rather than one, because they are two different mistakes and a
-    caller fixes them differently. Both are `InventoryReadError`, which is the
-    documented failure of every inventory read -- without the first, a `None` or a
-    `date` reaches `is_aware` and comes back as an `AttributeError` naming
-    `utcoffset`, which tells the caller nothing about which argument was wrong.
-
-    Args:
-        cutoff: The value the caller supplied.
-
-    Raises:
-        InventoryReadError: When it is not a `datetime` at all, or when it is a
-            naive one. A naive instant is refused rather than converted on the
-            terms `snapshot_as_of` refuses one: there is no offset to convert
-            from, `USE_TZ` is on so Django would read it as if it were UTC, and a
-            cut-off silently shifted by the reader's offset selects a different
-            queue on every replay -- the opposite of what `CPM-FR-22` promises.
-
+    The count travels with the queue rather than being logged alone, because the
+    queue page states it (`CPM-FR-38`: an absent package is labelled, never
+    silently dropped) and a surface reading the log to find it would be reading
+    the wrong thing.
     """
-    # `datetime` first: a `date` is not a `datetime`, but a `datetime` *is* a
-    # `date`, so the narrower test has to be the one that runs.
-    if not isinstance(cutoff, datetime):
-        message = (
-            f"the unresolved package queue is selected as of an instant, and {cutoff!r} is not one. The "
-            f"cut-off comes from the run being served (CPM-AD-25) and is an aware datetime; a date has no "
-            f"time of day to bound the evidence at and None is not a cut-off at all."
-        )
-        raise InventoryReadError(message)
-    if not is_aware(cutoff):
-        message = (
-            f"the unresolved package queue cannot be selected as of the naive cutoff {cutoff!r}. Every "
-            f"instant comes from a Clock, which always answers in UTC (CPM-AD-26); a naive value has no "
-            f"offset to interpret, so the selection would be silently shifted by whichever offset the "
-            f"reader happened to be in and the replay CPM-FR-22 promises would return a different queue "
-            f"each time."
-        )
-        raise InventoryReadError(message)
+
+    #: The queue, ranked by `_breadth_ordering_key`.
+    packages: tuple[UnresolvedPackage, ...]
+
+    #: How many unresolved packages were absent from the inventory at the cut-off
+    #: and therefore not offered.
+    left_out_for_absence: int
 
 
-def _breadth_at(*, cutoff: datetime, package_ids: Collection[int]) -> dict[int, tuple[int | None, int | None]]:
-    """Return the breadth each named package's latest snapshot at the cut-off recorded.
-
-    One query, streamed, folded to latest-per-package in Python. `distinct(*fields)`
-    would do the fold in the database in one row per package and is PostgreSQL-only,
-    which is the reason `collectors/tasks.py` folds its own latest-state-per-package
-    here rather than there; a window function or a `FILTER` clause would be the same
-    bet with a different name.
-
-    **Which row wins is compared in Python, not inferred from the order the rows
-    arrived in.** The surviving entry for a package is the one with the greatest
-    `(observed_at, pk)`, decided by the `>` below. That tie is the normal case
-    rather than an exotic one -- one sweep stamps every row it writes with the run's
-    single instant (`CPM-AD-7`), so two observations of one package really do share
-    an `observed_at` -- and it is the same row `snapshot_as_of` returns for the same
-    `(package, cutoff)` pair, which is what makes this a set-based spelling of that
-    read rather than a second answer to its question.
-
-    A "last row wins over an ordered stream" fold would give the same answer while
-    resting on the database's tie-breaking rather than on this module's, which is
-    the arrangement this story exists to avoid: SQLite returns tied rows in rowid
-    order, so such a fold produces the right answer there whether or not it asked
-    for one, and a dropped `"pk"` would be invisible until PostgreSQL sorted the tie
-    the other way. The `order_by` is still asked for, because a totally ordered
-    stream is what makes the comparison's own failure modes reproducible on both
-    backends -- but it is an aid, not the rule.
-
-    **Membership comes from `package_ids` and from nothing else.** An earlier
-    spelling narrowed this query with a join on `Package.confidence`, which made the
-    queue depend on two reads agreeing: a package whose confidence changed between
-    them would be selected and then found to have no snapshots, and would be ranked
-    as though it had no breadth. `core/rollup.py` names that defect in as many words
-    -- "two reads inside one run is the defect that shape exists to prevent" -- so
-    the set of packages is decided once, by the caller, and this query only answers
-    what was observed.
-
-    **What this costs, stated rather than implied.** It reads every snapshot at or
-    before the cut-off, filtering to the named packages in Python. `InventorySnapshot`
-    is append-only and kept for the declared retention (`CPM-OPERATE-S07`), so that
-    is one row per package per sweep for the whole retained history -- ninety days
-    of daily sweeps over ten thousand packages is close to a million rows, and the
-    number grows with the retention even when the inventory does not. It is a
-    fixed number of *queries*, which is not the same claim as a fixed amount of
-    work. `.iterator()` bounds the memory to
-    `_SNAPSHOT_CHUNK` rows plus one entry per named package. The rows themselves
-    are bounded by the pruning policy `CPM-OPERATE-S07` declared -- the nightly
-    purge keeps the retention's worth per `(package, source_package_key)` and
-    the newest row per key beyond it -- so what is left to bound the *read* is a
-    materialised latest-per-package projection, which no story has claimed.
-
-    Args:
-        cutoff: The instant to read as of, aware. Checked by the caller.
-        package_ids: The packages to answer for. Rows for anything else are
-            discarded, so this read cannot disagree with the read that chose them.
-
-    Returns:
-        Breadth by package primary key, holding an entry only for packages with at
-        least one snapshot at or before the cut-off. A package with none is absent
-        rather than present with `None`, and the caller supplies `_NO_BREADTH` for
-        it: "no row" and "a row observing nothing" are different facts and only one
-        of them is in this mapping.
-
-    """
-    # A set rather than the caller's sequence: the membership test runs once per
-    # snapshot row, which is the one thing here that grows without bound.
-    wanted = frozenset(package_ids)
-    latest: dict[int, tuple[int | None, int | None]] = {}
-    # How new the surviving row for each package is, as the `(observed_at, pk)` pair
-    # the comparison is over. Kept beside the answer rather than folded into it
-    # because the caller wants the counts and nothing else.
-    newest: dict[int, tuple[datetime, int]] = {}
-    rows = (
-        InventorySnapshot.objects.filter(observed_at__lte=cutoff)
-        .order_by("observed_at", "pk")
-        .values_list("package_id", "observed_at", "pk", "internal_component_count", "internal_lob_count")
-        .iterator(chunk_size=_SNAPSHOT_CHUNK)
-    )
-    for package_id, observed_at, snapshot_id, component_count, lob_count in rows:
-        if package_id not in wanted:
-            continue
-        stamp = (observed_at, snapshot_id)
-        # Written as "take it when it is strictly newer" rather than "skip it when
-        # it is not", and the two are not interchangeable. `pk` is unique, so two
-        # stamps for one package are never equal and both spellings behave
-        # identically while the code is right. They differ when it is *wrong*: a
-        # stamp narrowed to `observed_at` alone makes ties compare equal, and this
-        # spelling then keeps the first row of the ascending stream -- the lowest
-        # primary key, on every backend, which is the wrong answer and one a test
-        # can fail on. The inverted spelling would keep the last, which is the
-        # right answer reached by a route nothing checks.
-        if package_id not in newest or newest[package_id] < stamp:
-            newest[package_id] = stamp
-            latest[package_id] = (component_count, lob_count)
-    return latest
-
-
-def unresolved_packages(*, cutoff: datetime) -> list[UnresolvedPackage]:
-    """Return every package needing identity review at a cut-off, most used first.
+def select_unresolved(
+    *,
+    cutoff: datetime,
+    histories: Mapping[int, PackageHistory] | None = None,
+) -> IdentityReviewSelection:
+    """Select every package needing identity review at a cut-off, most used first.
 
     `CPM-FR-4`'s queue as a read. See the module docstring for why the ranking is
     an ordering rather than a score, and why the NULL handling is Python's rather
     than the database's.
+
+    **One fold per run.** A caller that has already folded the inventory at this
+    cut-off -- `workflow/opening.py` reads the histories once for every package
+    the run touches and hands them to the selection and to the closer -- passes
+    them in, and nothing is read twice. Without them the selection folds for the
+    packages it selects, `collectors/absence.py`'s `histories_at` narrowed to
+    those ids.
 
     **Both reads happen inside one `atomic` block**, and what that buys is worth
     being exact about. On SQLite it is a genuine consistent view: the transaction's
     read snapshot covers both statements. On PostgreSQL's default `READ COMMITTED`
     each statement still takes its own snapshot, so the block alone would not make
     the pair consistent -- what does is that the *set* of packages is decided by
-    the first read and `_breadth_at` is told which packages to answer for, so a
+    the first read and the fold is told which packages to answer for, so a
     concurrent commit can change what a package's breadth is but cannot make a
     selected package silently lose it. The block is what makes a deployment at
     `REPEATABLE READ` consistent too, without anything here having to know which
@@ -372,25 +265,33 @@ def unresolved_packages(*, cutoff: datetime) -> list[UnresolvedPackage]:
             caller from its run (`CPM-AD-25`), never derived here and never a clock
             reading: the queue at a stated cut-off is a function of the cut-off,
             which is what lets a replayed run see what the run it replays saw.
+        histories: The inventory histories at that cut-off, already folded by the
+            caller for at least the packages this selects; `None` folds here. A
+            package missing from the mapping is read as never observed.
 
     Returns:
-        Every package at a confidence outside `RESOLVED_CONFIDENCES`, ordered by
+        The queue and the count of what it left out.
+
+        **Offered:** every package at a confidence outside `RESOLVED_CONFIDENCES`
+        that the inventory has not recorded absent at the cut-off, ordered by
         `_breadth_ordering_key` -- descending internal component count, then
         descending internal line-of-business count, then ascending primary key --
         each carrying the breadth its latest snapshot at the cut-off recorded and
-        the mapping outcomes it already has. Empty when nothing needs review, which
-        is an ordinary answer rather than an error.
+        the mapping outcomes it already has. Packages with no breadth are offered
+        last rather than dropped: no snapshot at all, a latest that is `error`,
+        or a latest that is another non-`ok` sentinel.
 
-        Packages with no breadth are last rather than absent, and there are three
-        ways to be one of them: no snapshot at all, a latest that is `not_found`,
-        and a latest that is `error`.
+        **Not offered:** a package the inventory recorded absent at the cut-off --
+        a `not_found` with no `ok` after it (`CPM-OPERATE-S11`). It is counted in
+        `left_out_for_absence` instead. An empty queue is an ordinary answer
+        rather than an error.
 
     Raises:
         InventoryReadError: When `cutoff` is not an aware `datetime`. See
-            `_require_usable_cutoff`.
+            `collectors/absence.py`'s `require_usable_cutoff`.
 
     """
-    _require_usable_cutoff(cutoff)
+    require_usable_cutoff(cutoff, subject="the unresolved package queue")
 
     with transaction.atomic():
         # The complement in SQL rather than the derived set, so a stored confidence
@@ -415,8 +316,12 @@ def unresolved_packages(*, cutoff: datetime) -> list[UnresolvedPackage]:
                 Prefetch("mappings", queryset=PackageMapping.objects.order_by("pk")),
             ),
         )
-        breadth = _breadth_at(cutoff=cutoff, package_ids=[package.pk for package in selected])
+        if histories is None:
+            histories = histories_at(cutoff=cutoff, package_ids=[package.pk for package in selected])
 
+    # One fold, two readings: absence decides membership and breadth decides rank.
+    absent = {package_id for package_id, history in histories.items() if history.absence().absent}
+    breadth = {package_id: history.breadth() for package_id, history in histories.items()}
     queue = [
         UnresolvedPackage(
             package=package,
@@ -425,6 +330,7 @@ def unresolved_packages(*, cutoff: datetime) -> list[UnresolvedPackage]:
             mappings=tuple(package.mappings.all()),
         )
         for package in selected
+        if package.pk not in absent
     ]
     queue.sort(
         key=lambda entry: _breadth_ordering_key(
@@ -437,6 +343,27 @@ def unresolved_packages(*, cutoff: datetime) -> list[UnresolvedPackage]:
         QUEUE_SELECTED_EVENT,
         cutoff=cutoff.isoformat(),
         selected=len(queue),
-        with_breadth=len(breadth),
+        with_breadth=len(breadth) - len(absent),
+        left_out_for_absence=len(absent),
     )
-    return queue
+    return IdentityReviewSelection(packages=tuple(queue), left_out_for_absence=len(absent))
+
+
+def unresolved_packages(*, cutoff: datetime) -> list[UnresolvedPackage]:
+    """Return the ranked queue alone, without the count of what was left out.
+
+    `select_unresolved(...).packages` as a list, kept for the callers that want
+    the queue and nothing else. New callers that render the queue want the
+    selection, because the page states how many packages were not offered.
+
+    Args:
+        cutoff: The instant to select as of, aware.
+
+    Returns:
+        The ranked queue, on `select_unresolved`'s terms.
+
+    Raises:
+        InventoryReadError: When `cutoff` is not an aware `datetime`.
+
+    """
+    return list(select_unresolved(cutoff=cutoff).packages)

@@ -269,7 +269,19 @@ CONNECTION_SOURCES: Final[dict[str, frozenset[str]]] = {"django.db": frozenset({
 # `retire(...)` is the second counted form here, so a second caller of the door
 # in this module fails the gate as one elsewhere does. All three entries are
 # counted so that a second deletion path in either module fails the gate.
+# django_apps/.../collectors/absence.py -- `CPM-OPERATE-S11`'s after-run step,
+# which stamps `package_health.inventory_absent_since`/`inventory_last_listed`
+# on the run's rollup rows. One `objects.update(...)` form, issued once per
+# distinct `(since, last_listed)` pair; the compose has already written both
+# columns `NULL` on every row of the run, so nothing is cleared here.
+# `package_health` is derived state (`CPM-AD-11`), not evidence -- the compose
+# already `update_or_create`s every row -- and these two columns are the seam's
+# alone to write: `core` may not read the inventory's evidence table, so the
+# reading and the write meet here. Spelled on the manager rather than on a
+# local queryset precisely so this scan sees and counts it; a second is a
+# decision somebody records.
 RECORDED_EXEMPTIONS: Final[dict[str, dict[str, int]]] = {
+    "django_apps/conda_sentinel/collectors/absence.py": {"objects.update(...)": 1},
     "django_apps/conda_sentinel/core/migrations/0001_provision_role_groups.py": {
         "objects.delete(...)": 1,
     },

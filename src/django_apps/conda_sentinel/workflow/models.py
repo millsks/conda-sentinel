@@ -51,8 +51,11 @@ from conda_sentinel.workflow.states import Queue
 
 __all__ = [
     "CLAIMED_ONLY_IN_PROGRESS",
+    "EXACTLY_ONE_AUTHOR",
     "JUSTIFICATION_LENGTH",
     "ONE_ITEM_PER_FINDING",
+    "ORIGIN_LENGTH",
+    "SYSTEM_ORIGIN",
     "WorkflowItem",
     "WorkflowTransition",
 ]
@@ -61,6 +64,18 @@ __all__ = [
 #: a violation can name them too.
 ONE_ITEM_PER_FINDING: Final[str] = "workflow_one_item_per_finding_key"
 CLAIMED_ONLY_IN_PROGRESS: Final[str] = "workflow_claimed_only_while_in_progress"
+EXACTLY_ONE_AUTHOR: Final[str] = "workflow_transition_exactly_one_author"
+
+#: What `WorkflowTransition.origin` says when the product itself made the move
+#: (`CPM-OPERATE-S11`): the one non-human author, closing the open items of a
+#: package the inventory no longer lists. A person's transition carries an
+#: `actor` and a blank origin; the product's carries this and no actor -- never
+#: a fake account, because the product holds no role and borrows nobody's.
+SYSTEM_ORIGIN: Final[str] = "system"
+
+#: How long an origin may be. Sized for the one value declared, with room for a
+#: second product-authored path should one ever be argued for.
+ORIGIN_LENGTH: Final[int] = 32
 
 #: How long a recorded justification may be. Generous: the one transition that
 #: requires it is a decision not to fix something, and the reason is the only thing
@@ -211,12 +226,26 @@ class WorkflowTransition(models.Model):
 
     #: Who did it. `PROTECT`, so a user with audit history cannot be deleted out from
     #: under it -- an audit row naming nobody is not an audit row.
+    #:
+    #: Nullable since `CPM-OPERATE-S11`, and only for the product's own move:
+    #: `origin` names the author then, and `Meta.constraints` makes exactly one of
+    #: the two do so on every row. The shape is `collectors.InventoryChange`'s --
+    #: "an author is exactly one of a person and something that is not one" --
+    #: so a row can never name nobody and never name two.
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="workflow_transitions",
         verbose_name=_("actor"),
+        null=True,
+        blank=True,
+        default=None,
     )
+
+    #: What made the move when no person did: `SYSTEM_ORIGIN` for the product
+    #: closing the items of a package the inventory no longer lists
+    #: (`CPM-OPERATE-S11`). Blank on a human move, which names its actor instead.
+    origin = models.CharField(_("origin"), max_length=ORIGIN_LENGTH, blank=True, default="")
 
     #: Why, where the transition demands a reason. Required for accepting a risk and
     #: blank everywhere else -- the service enforces which, from the declaration.
@@ -233,12 +262,27 @@ class WorkflowTransition(models.Model):
         verbose_name = _("workflow transition")
         verbose_name_plural = _("workflow transitions")
         indexes = (models.Index(fields=("item", "occurred_at"), name="workflow_item_occurred"),)
+        constraints = (
+            # Exactly one author: a person, or the product by name. `actor` is
+            # nullable so the product can move an item without a fake account, and
+            # this is what stops the nullability becoming "nobody": a row with
+            # neither, and a row with both, are both refused by the database.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(actor__isnull=False) & models.Q(origin=""))
+                    | (models.Q(actor__isnull=True) & ~models.Q(origin=""))
+                ),
+                name=EXACTLY_ONE_AUTHOR,
+            ),
+        )
 
     def __str__(self) -> str:
         """Return the move this row records.
 
         Returns:
-            A one-line summary naming both states and the actor.
+            A one-line summary naming both states and the author -- the actor's
+            id for a person's move, the origin for the product's.
 
         """
-        return f"{self.from_state} -> {self.to_state} by {self.actor_id}"
+        author = self.origin if self.actor_id is None else str(self.actor_id)
+        return f"{self.from_state} -> {self.to_state} by {author}"

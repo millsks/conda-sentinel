@@ -1330,6 +1330,44 @@ class PackageHealth(models.Model):
         editable=False,
     )
 
+    #: When the inventory was first seen not listing this package, as of the
+    #: run's cut-off, and when it last listed it (`CPM-OPERATE-S11`). Both `NULL`
+    #: for a package the inventory lists; both set for one it does not. A pair of
+    #: instants rather than a status: absence is an *observation* the inventory
+    #: collector made (`CPM-AD-25`), not a verdict a pass reached, so the columns
+    #: are not named `*_status`, carry no `choices`, and go through neither the
+    #: confidence gate nor `contributable_columns()` -- `core/rollup.py`'s
+    #: `AFTER_RUN_COLUMNS` keeps them out of the pass registry's reach.
+    #:
+    #: **Written by an after-run step, not by the rollup writer.** `core` may not
+    #: read `inventory_snapshots` (`CPM-AD-4`'s layering), so
+    #: `collectors/absence.py` reads absence at `run.evidence_cutoff` and stamps
+    #: these two columns on the run's rows after the compose; the compose itself
+    #: writes them `NULL`, so a row is a full replacement and a package re-listed
+    #: since the previous run loses its tag on the same run.
+    #:
+    #: **Absence gates nothing.** An absent package's statuses are computed
+    #: exactly as before, and it is still gated by its confidence and never by
+    #: these columns; every surface reads them to *label* the package, and only
+    #: the feedstock-gap report excludes it.
+    #:
+    #: `editable=False` on the same terms as the status columns: no form and no
+    #: admin can write what only the after-run step is entitled to.
+    inventory_absent_since = models.DateTimeField(
+        _("inventory absent since"),
+        null=True,
+        blank=True,
+        default=None,
+        editable=False,
+    )
+    inventory_last_listed = models.DateTimeField(
+        _("inventory last listed"),
+        null=True,
+        blank=True,
+        default=None,
+        editable=False,
+    )
+
     class Meta:
         """The table the architecture names, not the `core_packagehealth` Django derives.
 

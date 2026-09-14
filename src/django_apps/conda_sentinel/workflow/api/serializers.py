@@ -52,7 +52,13 @@ class WorkflowTransitionSerializer(serializers.Serializer[Any]):
     queue = serializers.CharField()
     justification = serializers.CharField(allow_blank=True)
     occurred_at = serializers.DateTimeField()
+
+    #: Who made the move -- `null` for the product's own close (`CPM-OPERATE-S11`),
+    #: which names itself in `origin` instead. Exactly one of the two is set, by
+    #: the model's constraint; a reader that sees both blank is reading a row that
+    #: cannot exist.
     actor = serializers.CharField(source="actor.username", allow_null=True, default=None)
+    origin = serializers.CharField(allow_blank=True)
 
 
 class WorkflowItemSerializer(serializers.Serializer[Any]):

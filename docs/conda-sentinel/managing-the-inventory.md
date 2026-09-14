@@ -168,14 +168,56 @@ snapshot saying `not_found`, carrying that run's timestamp. The package, its evi
 its history and its inventory row all stay exactly where they are, and the row can be
 reactivated by changing it (the page's edit form, or a later import that names it).
 
-### What absence does today
+### What absence does
 
-The `not_found` snapshot is the whole of it. Nothing downstream reads inventory absence
-yet: the package keeps its rollup row and its place on every screen, stays in the
-identity queue if it was there (sorting last, for want of usage breadth), and is still
-offered to the collectors that select on its mappings. Changing what the queues and the
-rollup do with an absent package is a policy decision with its own story, recorded in
-the deferred-work ledger; this page documents what happens, not what should.
+The `not_found` snapshot is what every downstream reader reads, **as of a policy run's
+evidence cut-off** — never the `retired_at` column, which is governed data and not
+cut-off bound. At the next policy run, a package the inventory has recorded `not_found` at the
+cut-off with no `ok` observation since — the date it left is the *first* such
+row, and only a later listing ends the absence; a failed look in between does not:
+
+- **leaves the identity review queue.** The selection leaves it out rather than
+  ranking it last, and the queue page states how many packages it is not offering
+  for that reason.
+- **keeps its rollup row**, stamped with `inventory_absent_since` and
+  `inventory_last_listed`. Its statuses are computed exactly as before — absence
+  gates nothing; an unmapped package is still gated by its confidence, never by its
+  absence.
+- **opens no new work**, in any queue, and **has its open items closed** by the
+  product: each becomes `resolved` by a transition with `origin=system`, no actor,
+  and a justification naming the absence and the last-listed date. A claimed item is
+  released. Items already finished are left alone, and so are the items of a package
+  whose rollup row failed to write this run — the closer reads every package with
+  open work, not only the rows the run wrote
+  ([the queues](the-queues.md#the-products-own-table-one-move-one-circumstance)).
+- **is labelled wherever it appears** — the package page, the health list, a queue
+  row, a report row — with "absent from the inventory since *date* (last listed
+  *date*)", read from the rollup row. The last-listed clause is omitted when no
+  `ok` snapshot survives — the nightly purge keeps a package's newest row per
+  table and can remove every earlier listing, leaving the `not_found` alone — and
+  the product's closing reason omits it on the same terms: the date it left is a
+  fact the log still holds; the date it was last listed is not. The two surfaces
+  that exclude it — the feedstock-gap report and the health list filtered to
+  `feedstock=absent` — state the count and the reason above their rows; the health
+  list also states how many `unmapped` packages report `unknown` rather than
+  `absent` and are therefore never listed there.
+
+Collectors still select on its mappings and go on observing it; absence is about the
+queues and the labels, not about evidence.
+
+**Reactivating the row reverses all of it, with no manual step.** The next ingestion
+writes an `ok` snapshot, and the next policy run clears the two columns, drops the
+label, offers the package to the identity queue again and opens *fresh* items — in
+the identity queue, and in the remediation and compliance queues for any advisory or
+licence still matching — while the items the product closed stay closed, because
+each new item's key names the instant the new listing began. An evidence-backed key
+is the advisory or the licence, the same row before and after, so without that
+epoch a remediation item closed for absence would never re-open. A package never
+gets a second *open* identity item, whatever its keys: if the purge later erodes the
+history so the epoch is forgotten, the next run finds the open item and opens nothing.
+
+Because every read is bound to the run's cut-off, a replayed run selects, stamps,
+skips and closes exactly what the run it replays did, and closes nothing twice.
 
 !!! warning "Absences are recorded only by a run that observed something"
 

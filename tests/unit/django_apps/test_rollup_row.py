@@ -46,6 +46,7 @@ from conda_sentinel.core import rollup as rollup_module
 from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.core.models import PolicyRun
 from conda_sentinel.core.outcomes import OutcomeState
+from conda_sentinel.core.rollup import AFTER_RUN_COLUMNS
 from conda_sentinel.core.rollup import STAMP_COLUMNS
 from conda_sentinel.core.rollup import contributable_columns
 from conda_sentinel.identity.models import IdentityConfidence
@@ -222,11 +223,15 @@ def test_the_composed_row_covers_every_column_the_rollup_declares() -> None:
 
     A field added to the rollup and forgotten by the writer would leave a column
     it never sets. `package` is deliberately absent: it is the key the row is
-    matched on rather than part of what is replaced.
+    matched on rather than part of what is replaced. The after-run columns
+    (`CPM-OPERATE-S11`) are set too -- to `None`, because the compose cannot read
+    absence and the step that can fills them in afterwards; a compose that left
+    them out would carry last run's absence forward on a re-listed package.
     """
     row = composed(a_package(IdentityConfidence.VERIFIED), {A_DOMAIN_STATUS: A_VERDICT})
 
-    assert set(row) == (STAMP_COLUMNS | contributable_columns()) - {"package"}
+    assert set(row) == (STAMP_COLUMNS | contributable_columns() | AFTER_RUN_COLUMNS) - {"package"}
+    assert all(row[column] is None for column in AFTER_RUN_COLUMNS)
 
 
 def test_the_real_rollups_columns_already_have_owners() -> None:

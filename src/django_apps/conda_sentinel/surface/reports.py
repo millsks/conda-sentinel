@@ -26,6 +26,13 @@ against rather than used.
 -- that is how an export comes to disagree with the screen somebody exported it from,
 which is the disagreement nobody notices until it is in a board pack.
 
+**One report may exclude packages, and it says so.** `CPM-OPERATE-S11`: the
+feedstock-gap report is the only surface allowed to leave a package out -- a
+package the inventory no longer lists has no feedstock anybody needs maintained --
+and it declares the exclusion as data (`Report.excludes`) so the page can state
+"N packages excluded" with the reason, from the same query. Every other report
+carries absent packages and labels them; nothing else in the product excludes one.
+
 **On the `AD-` prefix.** A bare `AD-n` in this repository is an *inherited* platform
 decision; a decision from this product's own architecture spine always carries the
 `CPM-` prefix.
@@ -34,15 +41,18 @@ decision; a decision from this product's own architecture spine always carries t
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from typing import Final
 from typing import cast
 
 from django.db.models import Q
+from django.utils.translation import gettext_lazy as _
 
 from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.identity.confidence import IdentityConfidence
+from conda_sentinel.surface.labels import absence_tag
 from conda_sentinel.surface.labels import display_label
 from conda_sentinel.surface.search import name_condition
 
@@ -51,19 +61,28 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from django.db.models import QuerySet
+    from django.utils.functional import _StrPromise
 
 
 __all__ = [
+    "ABSENT_FROM_THE_INVENTORY",
     "EMPTY",
     "REPORTS",
     "REPORTS_BY_SLUG",
+    "Exclusion",
     "Report",
     "ReportColumn",
     "ReportPage",
+    "excluded_count",
+    "exclusion_sentence",
     "report_page",
     "report_rows",
     "report_values",
 ]
+
+#: Where the version map sits in a raw row: after the report's columns, before
+#: the two absence instants `report_values` appends.
+VERSIONS_POSITION: Final[int] = -3
 
 #: What a *field with no value* renders as, and what a status never renders as.
 #:
@@ -102,6 +121,10 @@ class ReportColumn:
     is_status: bool = False
 
 
+#: Where a row's package name comes from -- the column the screen tags when the
+#: inventory no longer lists the package (`CPM-OPERATE-S11`).
+NAME_SOURCE: Final[str] = "package__canonical_name"
+
 #: The columns every report carries, whatever else it shows.
 #:
 #: `CPM-APP-S06`'s AC 3: an export "carries the same freshness and confidence columns
@@ -109,10 +132,39 @@ class ReportColumn:
 #: a report cannot omit them, which is the point. `CPM-AD-11` requires the same of
 #: every view, so this is that rule reaching the artifact that leaves the system.
 COMMON_COLUMNS: Final[tuple[ReportColumn, ...]] = (
-    ReportColumn(heading="Package", source="package__canonical_name"),
+    ReportColumn(heading="Package", source=NAME_SOURCE),
     ReportColumn(heading="Confidence", source="confidence", is_status=True),
     ReportColumn(heading="Evidence cut-off", source="evidence_cutoff"),
     ReportColumn(heading="Computed at", source="computed_at"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Exclusion:
+    """What a report leaves out, and the sentence the page states for it.
+
+    Declared beside the report's condition rather than folded into it, because
+    the two are read differently: the condition is what the report is *about*,
+    and the exclusion is what it is deliberately not about -- which the page has
+    to say, with a count, or a reader concludes the excluded packages are fine.
+    """
+
+    #: The rows to leave out, among those the condition would otherwise select.
+    condition: Q
+
+    #: Why, in the words the page prints after the count. A translation promise:
+    #: this is a label a reader sees, not stored text, and it is rendered through
+    #: `str()` wherever it leaves the process -- the page, the CSV's provenance
+    #: line, the API.
+    reason: _StrPromise
+
+
+#: The one exclusion any report declares (`CPM-OPERATE-S11`): packages the
+#: inventory no longer listed at the run's cut-off, read off the rollup's own
+#: column. Spelled once so the report and the test that pins the sentence agree.
+ABSENT_FROM_THE_INVENTORY: Final[Exclusion] = Exclusion(
+    condition=Q(inventory_absent_since__isnull=False),
+    reason=_("absent from the inventory at the run's cut-off"),
 )
 
 
@@ -139,6 +191,11 @@ class Report:
 
     #: Its own columns, after the common ones.
     columns: tuple[ReportColumn, ...] = ()
+
+    #: What it leaves out, if anything. `None` for five of the six: only the
+    #: feedstock-gap report excludes a package, and it is the only surface in the
+    #: product allowed to (`CPM-OPERATE-S11`).
+    excludes: Exclusion | None = None
 
     def all_columns(self) -> tuple[ReportColumn, ...]:
         """Return every column, common ones first.
@@ -182,6 +239,10 @@ REPORTS: Final[tuple[Report, ...]] = (
             ReportColumn(heading="Currency", source="currency_status", is_status=True),
             ReportColumn(heading="Feedstock", source="feedstock_presence_status", is_status=True),
         ),
+        # A package the organisation no longer runs has no feedstock anybody needs
+        # to maintain; listing it here would be a gap nobody should fill. Stated
+        # on the page with its count, never silent.
+        excludes=ABSENT_FROM_THE_INVENTORY,
     ),
     Report(
         slug="python-314",
@@ -262,6 +323,29 @@ class ReportPage:
     evidence_cutoff: datetime | None
     policy_versions: tuple[str, ...]
 
+    #: The text tag each row's package carries when the inventory no longer lists
+    #: it (`CPM-OPERATE-S11`), in `rows` order; `""` for a listed package. Read
+    #: off the same query as the rows, and printed by `readable_rows` in the name
+    #: cell. Not a column: the CSV and the API carry the row as its columns, and
+    #: the tag is how the *screen* labels the package -- the health table's own
+    #: arrangement, one page over.
+    absence_tags: tuple[str, ...] = ()
+
+    #: How many rows the report's declared exclusion left out of this report,
+    #: over the same condition and search as `rows`. Zero when the report
+    #: declares none. Per report rather than per page: the sentence is about the
+    #: report a reader is looking at, not about the page they are on.
+    excluded: int = 0
+
+    def exclusion(self) -> str:
+        """Return the sentence this page states for what the report left out, or nothing.
+
+        Returns:
+            `exclusion_sentence` over this page's report and count.
+
+        """
+        return exclusion_sentence(self.report, excluded=self.excluded)
+
     def readable_rows(self) -> tuple[tuple[str, ...], ...]:
         """Return the rows as the **screen** shows them, statuses labelled.
 
@@ -275,16 +359,22 @@ class ReportPage:
         `Django` and a version into prose -- which is why this pairs each cell with
         its column rather than mapping over the row.
 
+        **And the name cell carries the absence tag**, appended after the name
+        and a middle dot, so a report row about a package the inventory no longer
+        lists says so on the screen as the health table's name cell does. The CSV
+        is unchanged: the tag is a label, and `rows` is the values.
+
         Returns:
             One tuple per row, in `columns` order, ready to print.
 
         """
+        tags = self.absence_tags or ("",) * len(self.rows)
         return tuple(
             tuple(
-                display_label(cell) if column.is_status else cell
+                _readable_cell(cell, column, tag=tag if column.source == NAME_SOURCE else "")
                 for cell, column in zip(row, self.columns, strict=True)
             )
-            for row in self.rows
+            for row, tag in zip(self.rows, tags, strict=True)
         )
 
 
@@ -310,16 +400,101 @@ def report_values(report: Report, *, search: str = "") -> QuerySet[PackageHealth
 
     Returns:
         One tuple per row -- the report's columns in order, then the row's version
-        map. Not evaluated: the caller slices it.
+        map, then the two inventory-absence instants the screen's tag is built
+        from. Not evaluated: the caller slices it.
 
     """
     columns = report.all_columns()
     return (
-        PackageHealth.objects.filter(report.condition & name_condition(search, field="package__canonical_name"))
+        _selected(report, search=search)
         .order_by("package__canonical_name", "pk")
-        .values_list(*(column.source for column in columns), "policy_versions")
+        .values_list(
+            *(column.source for column in columns),
+            "policy_versions",
+            "inventory_absent_since",
+            "inventory_last_listed",
+        )
         .distinct()
     )
+
+
+def _asked_for(report: Report, *, search: str) -> QuerySet[PackageHealth]:
+    """Return the rollup rows one report's condition and search select, exclusion not yet applied.
+
+    The one place the condition and the search are combined, so the rows, the
+    export, the API and the exclusion's count all read the same selection and
+    cannot disagree about which rows were asked for.
+
+    Args:
+        report: Which report.
+        search: A package-name fragment, already normalised.
+
+    Returns:
+        The matching rows, unordered and unbounded.
+
+    """
+    return PackageHealth.objects.filter(report.condition & name_condition(search, field=NAME_SOURCE))
+
+
+def _selected(report: Report, *, search: str) -> QuerySet[PackageHealth]:
+    """Return the rollup rows one report shows: what was asked for, less what it excludes.
+
+    Args:
+        report: Which report.
+        search: A package-name fragment, already normalised.
+
+    Returns:
+        The rows, unordered and unbounded.
+
+    """
+    selected = _asked_for(report, search=search)
+    if report.excludes is not None:
+        selected = selected.exclude(report.excludes.condition)
+    return selected
+
+
+def excluded_count(report: Report, *, search: str = "") -> int:
+    """Return how many packages the report's declared exclusion leaves out.
+
+    The rows `_asked_for` selects *and* the exclusion matches -- the complement
+    of `_selected` over the same condition and the same search, so a searched
+    page counts what the search would have shown. Zero for a report that
+    declares none, which is the honest answer rather than a special case.
+
+    Args:
+        report: Which report.
+        search: The same fragment the rows were narrowed by, so the count is about
+            the report the reader is looking at.
+
+    Returns:
+        The count of excluded packages.
+
+    """
+    if report.excludes is None:
+        return 0
+    return _asked_for(report, search=search).filter(report.excludes.condition).values("package_id").distinct().count()
+
+
+def exclusion_sentence(report: Report, *, excluded: int) -> str:
+    """Return the one sentence a report states for what it left out, or nothing.
+
+    Spelled once so the page, the CSV's provenance line and the API's
+    `excluded.reason` say the same thing.
+
+    Args:
+        report: Which report.
+        excluded: How many packages the exclusion left out.
+
+    Returns:
+        `"N packages excluded: <reason>"`, singular at one, or `""` for a report
+        that declares no exclusion.
+
+    """
+    if report.excludes is None:
+        return ""
+    if excluded == 1:
+        return str(_("%(total)d package excluded: %(reason)s") % {"total": excluded, "reason": report.excludes.reason})
+    return str(_("%(total)d packages excluded: %(reason)s") % {"total": excluded, "reason": report.excludes.reason})
 
 
 def report_rows(report: Report, values: Sequence[tuple[object, ...]]) -> ReportPage:
@@ -343,10 +518,14 @@ def report_rows(report: Report, values: Sequence[tuple[object, ...]]) -> ReportP
         report=report,
         columns=columns,
         rows=tuple(
-            tuple(_rendered(value, column) for value, column in zip(row[:-1], columns, strict=True)) for row in values
+            tuple(_rendered(value, column) for value, column in zip(row[: len(columns)], columns, strict=True))
+            for row in values
         ),
         evidence_cutoff=_cutoff(values, columns),
         policy_versions=_versions(values),
+        absence_tags=tuple(
+            absence_tag(cast("datetime | None", row[-2]), cast("datetime | None", row[-1])) for row in values
+        ),
     )
 
 
@@ -365,7 +544,8 @@ def report_page(report: Report, *, limit: int | None = None, search: str = "") -
 
     """
     values = report_values(report, search=search)
-    return report_rows(report, list(values[:limit] if limit is not None else values))
+    produced = report_rows(report, list(values[:limit] if limit is not None else values))
+    return replace(produced, excluded=excluded_count(report, search=search))
 
 
 def _rendered(value: object, column: ReportColumn) -> str:
@@ -408,7 +588,8 @@ def _versions(values: Sequence[tuple[object, ...]]) -> tuple[str, ...]:
     """Return the policy versions the rows were produced at.
 
     Args:
-        values: The raw rows, whose last element is each row's version map.
+        values: The raw rows, whose element at `VERSIONS_POSITION` is each row's
+            version map.
 
     Returns:
         Every distinct `domain@version`, sorted. **Every** one rather than a single
@@ -418,6 +599,25 @@ def _versions(values: Sequence[tuple[object, ...]]) -> tuple[str, ...]:
 
     """
     seen = {
-        f"{domain}@{version}" for row in values for domain, version in cast("dict[str, str]", row[-1] or {}).items()
+        f"{domain}@{version}"
+        for row in values
+        for domain, version in cast("dict[str, str]", row[VERSIONS_POSITION] or {}).items()
     }
     return tuple(sorted(seen))
+
+
+def _readable_cell(cell: str, column: ReportColumn, *, tag: str) -> str:
+    """Return one cell as the screen prints it.
+
+    Args:
+        cell: The value, as `rows` carries it.
+        column: Which column it is.
+        tag: The absence tag to append, or `""`.
+
+    Returns:
+        The label for a status column, the value otherwise -- with the tag after
+        a separator when there is one.
+
+    """
+    readable = display_label(cell) if column.is_status else cell
+    return f"{readable} \u00b7 {tag}" if tag else readable
