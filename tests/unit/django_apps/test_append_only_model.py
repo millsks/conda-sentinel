@@ -523,3 +523,33 @@ def test_a_plain_bulk_create_is_not_refused(observation: type[AppendOnlyModel]) 
     `tests/integration/django_apps/test_append_only_evidence.py`.
     """
     assert observation.objects.bulk_create([]) == []
+
+
+# ---------------------------------------------------------------------------
+# The one audited door (`CPM-OPERATE-S07`).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("door", [object(), None, "door", type("RetentionDoor", (), {})()])
+def test_the_door_refuses_anything_but_the_retention_token(
+    observation: type[AppendOnlyModel],
+    door: object,
+) -> None:
+    """Matrix row `Door`: `retire(door=object())` is refused, and every case above is unchanged.
+
+    The door is a method beside the five refusals rather than a softening of any
+    of them. It opens only for the token `core/retention.py` constructs -- by
+    identity, so a look-alike class, `None` and a string are all refused before
+    any statement is compiled -- which is why this is a unit test with no table
+    behind it, like every refusal above.
+
+    Args:
+        observation: The evidence model.
+        door: What a caller might hand in.
+
+    """
+    with pytest.raises(AppendOnlyError, match="retire") as refused:
+        observation.objects.all().retire(door=door)
+
+    assert refused.value.model_label == observation._meta.label  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
+    assert refused.value.pk is None

@@ -72,6 +72,16 @@ several, and the others do not construct an instance at all:
   (`EVIDENCE.02-AUDIT-002`), which sweeps the product's own source for every
   bypass form plus cursor-level `UPDATE`, `DELETE` and `ON CONFLICT`.
 
+**The one audited door (`CPM-OPERATE-S07`).** Retention is the one exception
+`CPM-AD-2` admits: `AppendOnlyQuerySet.retire(*, door)` performs a delete only
+when handed the token `core/retention.py` alone constructs, and refuses
+anything else with `AppendOnlyError`. It is a method beside the refusals rather
+than a softening of any of them -- `delete()`, `_raw_delete()`, `update()`,
+`bulk_update()` and the instance `delete()` refuse exactly as before -- and the
+mutation-path audit licenses its one raw delete by count, so a second door
+fails the gate. What goes through it is decided in `core/retention.py`, by a
+declared retention and a floor rule, and recorded per table in the run ledger.
+
 Two audits hold the shape of the models themselves:
 `test_evidence_inheritance_audit.py` (`EVIDENCE.02-AUDIT-001`), that every
 evidence model inherits this base, keeps its managers and cannot be deleted
@@ -100,6 +110,7 @@ from typing import override
 
 from django.conf import settings
 from django.db import models
+from django.db.models.deletion import Collector
 from django.utils.translation import gettext_lazy as _
 
 from conda_sentinel.core.clock import is_aware
@@ -129,7 +140,11 @@ if TYPE_CHECKING:
     from django.db.models.base import ModelBase
 
 __all__ = [
+    "COLLECTION_RUN_FINISHED_INDEX",
+    "COLLECTION_RUN_STARTED_INDEX",
     "FINISHED_AT_FIELD",
+    "POLICY_RUN_CUTOFF_INDEX",
+    "POLICY_RUN_FINISHED_INDEX",
     "AppendOnlyError",
     "AppendOnlyManager",
     "AppendOnlyModel",
@@ -184,6 +199,18 @@ _CONFIDENCE_LENGTH: Final[int] = 32
 #: primary key instead, which looks identical until the ids stop matching the
 #: chronology.
 FINISHED_AT_FIELD: Final[str] = "finished_at"
+
+#: The four time-leading indexes on the two ledgers (`CPM-OPERATE-S07`). Each
+#: names a column the nightly purge scans by cut-off -- `finished_at` and
+#: `started_at` on `collection_runs`, `finished_at` on `policy_runs` -- or that
+#: the floor rule joins on for every candidate evidence row (`evidence_cutoff`).
+#: Named here, as `package_health_cutoff` is on the rollup, so the migration and
+#: the model spell one name; `tests/unit/django_apps/test_retention.py` asserts
+#: each purged table declares an index whose first field is its cut-off column.
+COLLECTION_RUN_FINISHED_INDEX: Final[str] = "collection_runs_finished"
+COLLECTION_RUN_STARTED_INDEX: Final[str] = "collection_runs_started"
+POLICY_RUN_FINISHED_INDEX: Final[str] = "policy_runs_finished"
+POLICY_RUN_CUTOFF_INDEX: Final[str] = "policy_runs_cutoff"
 
 
 class AppendOnlyError(Exception):
@@ -268,6 +295,13 @@ class AppendOnlyQuerySet(models.QuerySet[_EvidenceModel]):
     Every other method is Django's own. Filtering, `values_list`, `create` and
     `acreate` are untouched, because reading evidence and inserting evidence are
     what evidence is for.
+
+    **One method is added rather than overridden: `retire(*, door)`**, the
+    audited door `CPM-OPERATE-S07` gives the retention purge. It opens only for
+    the token `core/retention.py` constructs, consults Django's collector so a
+    `PROTECT` relation still refuses, and then issues the parent's raw delete
+    over exactly the selection. Its docstring says the rest; what matters here is
+    that none of the five refusals above changed to make room for it.
 
     **`raw()` is left in place here and banned by the audit**, and the two are
     not in conflict: Django's `raw()` executes the SQL it is handed, and while it
@@ -368,6 +402,87 @@ class AppendOnlyQuerySet(models.QuerySet[_EvidenceModel]):
             f"An observation is removed by a declared retention process, never by product code (CPM-AD-2)."
         )
         raise AppendOnlyError(message, model_label=label)
+
+    def retire(self, *, door: object) -> int:
+        """Remove the selected observations through the one audited door (`CPM-OPERATE-S07`).
+
+        Retention is the one exception `CPM-AD-2` admits, and this is its whole
+        surface: a method that performs the delete only when handed the token
+        `core/retention.py` alone constructs, so the purge -- a declared window,
+        a floor rule, a run record per table -- is the only code that can reach
+        it. It is not a softening of `delete()` or `_raw_delete()`, both of which
+        refuse exactly as before; `tests/unit/django_apps/test_append_only_model.py`
+        pins each refusal and pins that this method refuses anything but the token.
+
+        **`PROTECT` is consulted first, then the parent's raw delete issues the
+        statement.** Django's deletion collector is what knows the relations
+        pointing at this table -- a derived row citing the observation it was
+        computed from, a KEV row citing its finding -- and it raises
+        `ProtectedError` before any SQL when one of them cites a selected row.
+        The statement itself is the parent queryset's `_raw_delete`: one
+        `DELETE ... WHERE` over exactly the selection, with no cascade, which
+        `EVIDENCE.02-AUDIT-001` has already made impossible on an evidence model.
+        The mutation-path audit licenses that one call by count.
+
+        **The four shapes `QuerySet.delete()` refuses are refused here too, with
+        its own `TypeError`s**, and one of them is why the check exists at all:
+        the parent's `_raw_delete` compiles the query as it stands and a slice
+        is silently dropped from a `DELETE`, so a `[:1000]` handed in would
+        remove every selected row rather than a thousand of them. A
+        `.values()`/`.values_list()` selection, a `.distinct(*fields)` and a
+        combined query are refused on the same terms Django refuses them.
+
+        Args:
+            door: The token. Anything else is refused.
+
+        Returns:
+            How many rows the statement removed.
+
+        Raises:
+            AppendOnlyError: When `door` is not the retention module's token.
+            TypeError: When the queryset is sliced, projected with `.values()` or
+                `.values_list()`, distinct on fields, or combined with
+                `.union()`, `.intersection()` or `.difference()` -- Django's own
+                sentences, because they are Django's own refusals.
+            ProtectedError: When a retained row cites a selected one. The purge
+                catches it per batch, retries without the cited rows, and counts
+                what stays.
+
+        """
+        # Imported here rather than at module scope: `core/retention.py` imports
+        # this module for the base and the ledger, so a module-scope import
+        # would be a cycle.
+        from conda_sentinel.core.retention import is_retention_door  # noqa: PLC0415 - see above
+
+        label = _label(self.model)
+        if not is_retention_door(door):
+            message = (
+                f"{label} is append-only, so retire(door={door!r}) is refused. The one door out of an evidence "
+                f"table opens for the retention token core/retention.py constructs and for nothing else "
+                f"(CPM-AD-2, CPM-OPERATE-S07)."
+            )
+            raise AppendOnlyError(message, model_label=label)
+        # The same four shapes `QuerySet.delete()` refuses, read off the same
+        # two attributes it reads; django-stubs declares neither, so both are
+        # reached as Django's own undeclared internals.
+        if self.query.combinator:
+            message = "Cannot call retire() after .union(), .intersection(), or .difference()."
+            raise TypeError(message)
+        if self.query.is_sliced:
+            message = "Cannot use 'limit' or 'offset' with retire(): a raw DELETE drops the slice silently."
+            raise TypeError(message)
+        if self.query.distinct_fields:
+            message = "Cannot call retire() after .distinct(*fields)."
+            raise TypeError(message)
+        if getattr(self, "_fields", None) is not None:
+            message = "Cannot call retire() after .values() or .values_list()"
+            raise TypeError(message)
+        # The selection is handed over as instances rather than as the queryset:
+        # the collector fetches them itself for any model something points at,
+        # which is every evidence model a pass cites, and a fetched batch is
+        # what lets it ask each `PROTECT` relation about exactly these rows.
+        Collector(using=self.db).collect(list(self))
+        return super()._raw_delete(self.db)
 
     @override
     def bulk_create(
@@ -860,6 +975,15 @@ class CollectionRun(RunLedgerModel):
         db_table = "collection_runs"
         verbose_name = _("collection run")
         verbose_name_plural = _("collection runs")
+        indexes = [
+            # The two cut-off scans the nightly purge makes of this table
+            # (`CPM-OPERATE-S07`): rows that ended before the retention, and
+            # rows that never ended and started before it. Neither column is
+            # indexed by anything else, and at ten thousand packages this table
+            # grows by the inventory every day.
+            models.Index(fields=[FINISHED_AT_FIELD], name=COLLECTION_RUN_FINISHED_INDEX),
+            models.Index(fields=["started_at"], name=COLLECTION_RUN_STARTED_INDEX),
+        ]
 
     def __str__(self) -> str:
         """Return the collector, its scope and its state.
@@ -906,6 +1030,15 @@ class PolicyRun(RunLedgerModel):
         db_table = "policy_runs"
         verbose_name = _("policy run")
         verbose_name_plural = _("policy runs")
+        indexes = [
+            # `finished_at` is the purge's cut-off scan of this table
+            # (`CPM-OPERATE-S07`); `evidence_cutoff` is what its floor rule asks
+            # of every surviving run for every candidate evidence row -- "does a
+            # cut-off fall between this row and the next" -- which is a range
+            # probe of this column, once per row considered.
+            models.Index(fields=[FINISHED_AT_FIELD], name=POLICY_RUN_FINISHED_INDEX),
+            models.Index(fields=["evidence_cutoff"], name=POLICY_RUN_CUTOFF_INDEX),
+        ]
 
     def __str__(self) -> str:
         """Return the policy version, its cut-off and its state.

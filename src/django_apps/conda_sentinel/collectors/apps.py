@@ -211,7 +211,9 @@ class CollectorsConfig(AppConfig):
                 disagree about a cadence (`CPM-AD-20`). And when `CPM_GITHUB_TOKEN`
                 is undeclared or malformed (`CPM-OPERATE-S05`): the refusal names
                 the setting and never the value, because a boot failure is
-                written to whatever collects a crashed container's logs.
+                written to whatever collects a crashed container's logs. And
+                when `CPM_EVIDENCE_RETENTION_DAYS` is undeclared, not a whole
+                number of days, or below one (`CPM-OPERATE-S07`).
 
         """
         # Imported here rather than at module scope: `AppConfig` classes are
@@ -313,7 +315,44 @@ class CollectorsConfig(AppConfig):
         if unusable_token:
             raise ImproperlyConfigured(unusable_token)
 
+        _require_retention(settings)
         _declare_inventory_source(settings)
+
+
+def _require_retention(settings: Any) -> None:
+    """Refuse a retention that can never become a cut-off (`CPM-OPERATE-S07`).
+
+    On the posture the credential takes: absent from the settings module is a
+    dropped assignment and refused by name; a value that is not a whole number
+    of days, or is below one, is refused here rather than on the first nightly
+    purge. `retention_fault` is `core/retention.py`'s own rule, so boot and the
+    purge cannot come to disagree. Lifted out of `ready()` for the reason
+    `_declare_inventory_source` is.
+
+    Args:
+        settings: The settings the hook read.
+
+    Raises:
+        ImproperlyConfigured: When `CPM_EVIDENCE_RETENTION_DAYS` is undeclared,
+            not an integer, or below one.
+
+    """
+    from django.core.exceptions import ImproperlyConfigured  # noqa: PLC0415 - after django.setup()
+
+    from conda_sentinel.core.retention import RETENTION_SETTING  # noqa: PLC0415 - see above
+    from conda_sentinel.core.retention import retention_fault  # noqa: PLC0415 - see above
+
+    declared = getattr(settings, RETENTION_SETTING, None)
+    if declared is None:
+        message = (
+            f"{RETENTION_SETTING} is not configured, so this component cannot tell how long it keeps "
+            f"evidence. config/settings/base.py assigns it -- ninety days by default -- and a settings "
+            f"module with no assignment at all is one that dropped the line (CPM-OPERATE-S07)."
+        )
+        raise ImproperlyConfigured(message)
+    unusable = retention_fault(declared)
+    if unusable:
+        raise ImproperlyConfigured(unusable)
 
 
 def _declare_inventory_source(settings: Any) -> None:

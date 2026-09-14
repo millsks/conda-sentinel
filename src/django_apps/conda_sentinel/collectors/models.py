@@ -161,12 +161,15 @@ __all__ = [
     "CONDA_PACKAGE_FACTS_CONSTRAINT",
     "CONDA_PACKAGE_PAIR_INDEX",
     "CONDA_PACKAGE_READ_INDEX",
+    "CONDA_PACKAGE_TIME_INDEX",
     "COUNTS_PRESENT_CONSTRAINT",
     "ESTABLISHED_ABSENCE_CONSTRAINT",
     "FEEDSTOCK_FACTS_CONSTRAINT",
     "FEEDSTOCK_READ_INDEX",
+    "FEEDSTOCK_TIME_INDEX",
     "IDENTITY_RESOLUTION_FACTS_CONSTRAINT",
     "IDENTITY_RESOLUTION_READ_INDEX",
+    "IDENTITY_RESOLUTION_TIME_INDEX",
     "INVENTORY_ACTIVE_NAME_CONSTRAINT",
     "INVENTORY_CHANGE_AUTHOR_CONSTRAINT",
     "INVENTORY_CHANGE_READ_INDEX",
@@ -182,28 +185,36 @@ __all__ = [
     "KEV_APPLICABILITY_CONSTRAINT",
     "KEV_FACTS_CONSTRAINT",
     "KEV_READ_INDEX",
+    "KEV_TIME_INDEX",
     "LICENSE_APPLICABILITY_CONSTRAINT",
     "LICENSE_CHANNEL_CONSTRAINT",
     "LICENSE_FACTS_CONSTRAINT",
     "LICENSE_READ_INDEX",
+    "LICENSE_TIME_INDEX",
     "PYPI_FACTS_CONSTRAINT",
     "PYPI_READ_INDEX",
+    "PYPI_TIME_INDEX",
     "READINESS_READ_INDEX",
     "READINESS_REASON_CONSTRAINT",
     "READINESS_SERIES_CONSTRAINT",
     "READINESS_SIGNAL_CONSTRAINT",
+    "READINESS_TIME_INDEX",
     "RELEASE_FACTS_CONSTRAINT",
     "RELEASE_READ_INDEX",
+    "RELEASE_TIME_INDEX",
     "SNAPSHOT_KEY_INDEX",
     "SNAPSHOT_READ_INDEX",
+    "SNAPSHOT_TIME_INDEX",
     "STAGED_RECIPE_CONSTRAINT",
     "VERIFICATION_EVIDENCE_CONSTRAINT",
     "VERIFICATION_READ_INDEX",
     "VERIFICATION_REASON_CONSTRAINT",
     "VERIFICATION_SERIES_CONSTRAINT",
+    "VERIFICATION_TIME_INDEX",
     "VULNERABILITY_APPLICABILITY_CONSTRAINT",
     "VULNERABILITY_FACTS_CONSTRAINT",
     "VULNERABILITY_READ_INDEX",
+    "VULNERABILITY_TIME_INDEX",
     "CondaPackageSnapshot",
     "FeedstockSnapshot",
     "IdentityResolutionSnapshot",
@@ -265,13 +276,15 @@ COUNTS_PRESENT_CONSTRAINT: Final[str] = "inventory_counts_present_exactly_when_o
 #: `SNAPSHOT_READ_INDEX` serves `snapshot_as_of`, which is every policy pass's
 #: read: filter by package, order by `observed_at` descending, take one. Without
 #: it that is a scan of one package's whole observation history on every read, and
-#: the history grows daily and is never pruned. `SNAPSHOT_KEY_INDEX` serves the
+#: the history grows daily and is kept for the declared retention
+#: (`CPM-OPERATE-S07`). `SNAPSHOT_KEY_INDEX` serves the
 #: ingestion collector's absence derivation, which excludes on
 #: `source_package_key` across the whole table once per sweep.
 #:
 #: Django caps an index name at 30 characters, which is why neither spells out
 #: `inventory_snapshot`.
 SNAPSHOT_READ_INDEX: Final[str] = "inv_snapshot_pkg_observed"
+SNAPSHOT_TIME_INDEX: Final[str] = "inv_snapshot_observed"
 SNAPSHOT_KEY_INDEX: Final[str] = "inv_snapshot_source_key"
 
 #: How wide the upstream version column is. A release tag is a string a project
@@ -300,6 +313,7 @@ _LOCATOR_LENGTH: Final[int] = 512
 #: spell out `source_release_snapshot`.
 RELEASE_FACTS_CONSTRAINT: Final[str] = "release_facts_present_exactly_when_observed"
 RELEASE_READ_INDEX: Final[str] = "src_release_pkg_observed"
+RELEASE_TIME_INDEX: Final[str] = "src_release_observed"
 
 #: How wide the `Requires-Python` column is. A version specifier is a short
 #: expression a project wrote -- `>=3.9`, `>=3.8, <4`, `!=3.0.*, >=2.7` -- so it
@@ -315,6 +329,7 @@ _SPECIFIER_LENGTH: Final[int] = 128
 #: `pypi_release_snapshot` for the same 30-character reason.
 PYPI_FACTS_CONSTRAINT: Final[str] = "pypi_facts_present_exactly_when_observed"
 PYPI_READ_INDEX: Final[str] = "pypi_release_pkg_observed"
+PYPI_TIME_INDEX: Final[str] = "pypi_release_observed"
 
 #: How wide the feedstock-name column is.
 #:
@@ -348,6 +363,7 @@ FEEDSTOCK_FACTS_CONSTRAINT: Final[str] = "feedstock_facts_present_exactly_when_o
 STAGED_RECIPE_CONSTRAINT: Final[str] = "staged_recipe_only_when_absent"
 ESTABLISHED_ABSENCE_CONSTRAINT: Final[str] = "absence_established_only_on_an_absence"
 FEEDSTOCK_READ_INDEX: Final[str] = "feedstock_pkg_observed"
+FEEDSTOCK_TIME_INDEX: Final[str] = "feedstock_observed"
 
 #: How wide the channel column is. A channel is one path segment a channel host
 #: serves a package under -- `conda-forge`, `bioconda`, an internal mirror's name
@@ -383,6 +399,7 @@ _BUILD_STRING_LENGTH: Final[int] = 256
 CONDA_PACKAGE_FACTS_CONSTRAINT: Final[str] = "conda_package_facts_present_exactly_when_observed"
 CHANNEL_AND_PLATFORM_CONSTRAINT: Final[str] = "conda_package_names_channel_and_platform"
 CONDA_PACKAGE_READ_INDEX: Final[str] = "conda_pkg_pkg_observed"
+CONDA_PACKAGE_TIME_INDEX: Final[str] = "conda_pkg_observed"
 
 #: The index the read this table exists to serve actually needs, and the one
 #: index no sibling table has an analogue of.
@@ -490,6 +507,7 @@ _ADVISORY_LOCATOR_LENGTH: Final[int] = 768
 VULNERABILITY_FACTS_CONSTRAINT: Final[str] = "vulnerability_facts_present_exactly_when_matched"
 VULNERABILITY_APPLICABILITY_CONSTRAINT: Final[str] = "vulnerability_applies_to_every_package"
 VULNERABILITY_READ_INDEX: Final[str] = "vuln_finding_pkg_observed"
+VULNERABILITY_TIME_INDEX: Final[str] = "vuln_finding_observed"
 
 #: The names of the two constraints `kev_findings` carries, and the read index its
 #: freshness query needs, declared on the terms every name above is: the model
@@ -510,6 +528,7 @@ VULNERABILITY_READ_INDEX: Final[str] = "vuln_finding_pkg_observed"
 KEV_FACTS_CONSTRAINT: Final[str] = "kev_facts_present_exactly_when_cross_referenced"
 KEV_APPLICABILITY_CONSTRAINT: Final[str] = "kev_applies_to_every_package"
 KEV_READ_INDEX: Final[str] = "kev_finding_pkg_observed"
+KEV_TIME_INDEX: Final[str] = "kev_finding_observed"
 
 #: How wide the raw-licence column is.
 #:
@@ -579,6 +598,7 @@ LICENSE_FACTS_CONSTRAINT: Final[str] = "license_facts_present_exactly_when_norma
 LICENSE_APPLICABILITY_CONSTRAINT: Final[str] = "license_applies_to_every_package"
 LICENSE_CHANNEL_CONSTRAINT: Final[str] = "license_names_the_channel_it_is_about"
 LICENSE_READ_INDEX: Final[str] = "license_finding_pkg_observed"
+LICENSE_TIME_INDEX: Final[str] = "license_finding_observed"
 
 #: How wide the assessed-series column is. `3.14` is four characters and this is
 #: the shape `_STATE_LENGTH` has: a bound comfortably above every value the code
@@ -653,6 +673,7 @@ READINESS_SIGNAL_CONSTRAINT: Final[str] = "readiness_signal_present_exactly_when
 READINESS_REASON_CONSTRAINT: Final[str] = "readiness_not_applicable_states_its_reason"
 READINESS_SERIES_CONSTRAINT: Final[str] = "readiness_names_the_series_it_assessed"
 READINESS_READ_INDEX: Final[str] = "py_readiness_pkg_observed"
+READINESS_TIME_INDEX: Final[str] = "py_readiness_observed"
 
 #: How wide the column recording the platform a verification **ran on** is.
 #:
@@ -729,6 +750,7 @@ VERIFICATION_EVIDENCE_CONSTRAINT: Final[str] = "verification_says_where_it_ran"
 VERIFICATION_REASON_CONSTRAINT: Final[str] = "verification_not_applicable_states_its_reason"
 VERIFICATION_SERIES_CONSTRAINT: Final[str] = "verification_names_the_series_it_ran"
 VERIFICATION_READ_INDEX: Final[str] = "py_verify_pkg_observed"
+VERIFICATION_TIME_INDEX: Final[str] = "py_verify_observed"
 
 #: How wide the `project_urls` key column is. A key is a label a project author
 #: typed -- `Source`, `Source Code`, `Homepage` -- so it is sized as a name, on
@@ -759,6 +781,7 @@ _CONFIDENCE_LENGTH: Final[int] = 32
 #: `identity_resolution`.
 IDENTITY_RESOLUTION_FACTS_CONSTRAINT: Final[str] = "resolution_facts_present_exactly_when_recorded"
 IDENTITY_RESOLUTION_READ_INDEX: Final[str] = "id_resolution_pkg_observed"
+IDENTITY_RESOLUTION_TIME_INDEX: Final[str] = "id_resolution_observed"
 
 #: The governed inventory table's vocabulary (`CPM-OPERATE-S03`): the key a row is
 #: filed under, the name it carries, and the six usage signals a row may state.
@@ -924,6 +947,12 @@ class InventorySnapshot(AppendOnlyModel):
             # index covers the filter alone and leaves the sort to a scan of that
             # package's whole history.
             models.Index(fields=["package", "-observed_at"], name=SNAPSHOT_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=SNAPSHOT_TIME_INDEX),
             # The absence derivation's, which asks about a key rather than about
             # a package -- it is the source's own identifier that stops appearing,
             # and the package is what that resolves to.
@@ -1192,6 +1221,12 @@ class SourceReleaseSnapshot(AppendOnlyModel):
             # package's whole observation history, which grows daily and is never
             # pruned.
             models.Index(fields=["package", "-observed_at"], name=RELEASE_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=RELEASE_TIME_INDEX),
         ]
         constraints = [
             # The biconditional, and all three conjuncts are load bearing.
@@ -1363,6 +1398,12 @@ class PyPIReleaseSnapshot(AppendOnlyModel):
             # `core/freshness.py`'s `latest_observation` reads exactly this, on
             # the terms `RELEASE_READ_INDEX` states.
             models.Index(fields=["package", "-observed_at"], name=PYPI_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=PYPI_TIME_INDEX),
         ]
         constraints = [
             # The biconditional, and all four conjuncts are load bearing.
@@ -1614,6 +1655,12 @@ class FeedstockSnapshot(AppendOnlyModel):
             # `core/freshness.py`'s `latest_observation` reads exactly this, on
             # the terms `RELEASE_READ_INDEX` states.
             models.Index(fields=["package", "-observed_at"], name=FEEDSTOCK_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=FEEDSTOCK_TIME_INDEX),
         ]
         constraints = [
             # The biconditional, and every conjunct is load bearing.
@@ -1834,6 +1881,12 @@ class CondaPackageSnapshot(AppendOnlyModel):
             # `core/freshness.py`'s `latest_observation` reads exactly this, on
             # the terms `RELEASE_READ_INDEX` states.
             models.Index(fields=["package", "-observed_at"], name=CONDA_PACKAGE_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=CONDA_PACKAGE_TIME_INDEX),
             # The read this table exists for: one package, one channel, one
             # platform, newest first. See `CONDA_PACKAGE_PAIR_INDEX`.
             models.Index(
@@ -2084,6 +2137,12 @@ class VulnerabilityFinding(AppendOnlyModel, FindingKeyed):
             # `core/freshness.py`'s `latest_observation` reads exactly this, on
             # the terms `RELEASE_READ_INDEX` states.
             models.Index(fields=["package", "-observed_at"], name=VULNERABILITY_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=VULNERABILITY_TIME_INDEX),
         ]
         constraints = [
             # The biconditional, and every conjunct is load bearing.
@@ -2329,6 +2388,12 @@ class KevFinding(AppendOnlyModel):
             # daily -- and grows once per current advisory rather than once per
             # package, so it is the faster-growing history of the two.
             models.Index(fields=["package", "-observed_at"], name=KEV_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=KEV_TIME_INDEX),
         ]
         constraints = [
             # The biconditional, and every conjunct is load bearing.
@@ -2620,6 +2685,12 @@ class LicenseFinding(AppendOnlyModel, FindingKeyed):
             # this story adds is per channel -- a reviewer's question is about a
             # package and the channels are what one answer holds.
             models.Index(fields=["package", "-observed_at"], name=LICENSE_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=LICENSE_TIME_INDEX),
         ]
         constraints = [
             # The biconditional, and it is deliberately asymmetric -- see
@@ -2835,6 +2906,12 @@ class PythonReadinessAssessment(AppendOnlyModel):
             # grows once per package per run, and the reads this story adds are all
             # about a package.
             models.Index(fields=["package", "-observed_at"], name=READINESS_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=READINESS_TIME_INDEX),
         ]
         constraints = [
             # The biconditional, over the one column that is a judgement rather
@@ -3033,6 +3110,12 @@ class PythonVerificationResult(AppendOnlyModel):
             # table grows only when somebody triggers a verification, and every
             # read this story adds is about a package.
             models.Index(fields=["package", "-observed_at"], name=VERIFICATION_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=VERIFICATION_TIME_INDEX),
         ]
         constraints = [
             # AC 1 as a database rule: a determinate row names where it ran, all
@@ -3233,6 +3316,12 @@ class IdentityResolutionSnapshot(AppendOnlyModel):
             # `core/freshness.py`'s `latest_observation` reads exactly this, on
             # the terms `RELEASE_READ_INDEX` states.
             models.Index(fields=["package", "-observed_at"], name=IDENTITY_RESOLUTION_READ_INDEX),
+            # The nightly purge's cut-off scan (`CPM-OPERATE-S07`): every row with
+            # `observed_at` before the retention, whatever the package. The read
+            # index above leads with the package and cannot serve a scan that
+            # names none, and a purge over a table this size without one is a
+            # sequential scan every night.
+            models.Index(fields=["observed_at"], name=IDENTITY_RESOLUTION_TIME_INDEX),
         ]
         constraints = [
             # The biconditional: a row that reached the recorder records the

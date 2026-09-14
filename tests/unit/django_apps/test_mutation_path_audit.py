@@ -157,8 +157,12 @@ MARKED_MUTATIONS: Final[frozenset[str]] = frozenset({"adelete", "aupdate", "dele
 
 #: Mutating ORM methods whose names belong to the ORM and to nothing else, so no
 #: marker is required. `bulk_update` on a queryset held in a local is the exact
-#: spelling a collector writes, and requiring a marker would lose it.
-UNMISTAKABLE_MUTATIONS: Final[frozenset[str]] = frozenset({"_raw_delete", "abulk_update", "bulk_update"})
+#: spelling a collector writes, and requiring a marker would lose it. `retire`
+#: is this product's own (`CPM-OPERATE-S07`): the one audited door out of an
+#: evidence table, which `core/retention.py` alone may call -- so a second
+#: caller anywhere under `src/` is reported here and fails the gate until it is
+#: recorded, whatever it holds the queryset in.
+UNMISTAKABLE_MUTATIONS: Final[frozenset[str]] = frozenset({"_raw_delete", "abulk_update", "bulk_update", "retire"})
 
 #: What makes a receiver chain a manager or a queryset drawn from one.
 MANAGER_MARKERS: Final[frozenset[str]] = frozenset({"_base_manager", "_default_manager", "objects"})
@@ -246,6 +250,25 @@ CONNECTION_SOURCES: Final[dict[str, frozenset[str]]] = {"django.db": frozenset({
 # exemption is recorded instead, and
 # `tests/integration/django_apps/test_run_ledger_migration.py` asserts what the
 # step does to a populated table.
+#
+# django_apps/.../core/models.py -- the one audited door (`CPM-OPERATE-S07`).
+# `AppendOnlyQuerySet.retire(*, door)` issues the parent queryset's raw delete,
+# after refusing anything but the retention token `core/retention.py` alone
+# constructs and after Django's collector has been consulted for `PROTECT`.
+# `CPM-AD-2` admits retention as the one exception to append-only, and this is
+# the whole of it: one call, counted, and every refusal on the base unchanged
+# (`tests/unit/django_apps/test_append_only_model.py` pins each).
+# django_apps/.../core/retention.py -- the same story's purge. Its one manager
+# delete -- spelled `_default_manager.delete(...)`, which is `objects` on every
+# model it serves, because the derived tables arrive as `type[Model]` from the
+# reverse relations and that is the accessor Django declares on the base -- is
+# the remover for the derived pass tables and the two run ledgers, none of which
+# is evidence: `PolicyRun` and `CollectionRun` are mutable by construction
+# (`CPM-AD-2`), and the `policies` tables are derived state that cites a run.
+# Evidence rows go through the door above and nowhere else -- its one
+# `retire(...)` is the second counted form here, so a second caller of the door
+# in this module fails the gate as one elsewhere does. All three entries are
+# counted so that a second deletion path in either module fails the gate.
 RECORDED_EXEMPTIONS: Final[dict[str, dict[str, int]]] = {
     "django_apps/conda_sentinel/core/migrations/0001_provision_role_groups.py": {
         "objects.delete(...)": 1,
@@ -253,6 +276,8 @@ RECORDED_EXEMPTIONS: Final[dict[str, dict[str, int]]] = {
     "django_apps/conda_sentinel/core/migrations/0004_collection_run_package.py": {
         "objects.update(...)": 1,
     },
+    "django_apps/conda_sentinel/core/models.py": {"_raw_delete(...)": 1},
+    "django_apps/conda_sentinel/core/retention.py": {"_default_manager.delete(...)": 1, "retire(...)": 1},
     "django_service/users/migrations/0003_provision_designated_groups.py": {"objects.delete(...)": 1},
 }
 
@@ -304,6 +329,14 @@ def rewrite(model):
 BULK_UPDATE_ON_A_LOCAL = """
 def rewrite(queryset, rows):
     queryset.bulk_update(rows, ["fact"])
+"""
+
+A_SECOND_USER_OF_THE_DOOR = """
+from conda_sentinel.core import retention
+from thing.models import Thing
+
+def tidy(rows):
+    rows.retire(door=retention._DOOR)
 """
 
 RAW_QUERY = """
@@ -1196,6 +1229,19 @@ def test_the_scan_cannot_see_a_queryset_bound_to_a_local() -> None:
     assert mutation_paths(ast.parse(BULK_UPDATE_ON_A_LOCAL)) != []
 
 
+def test_a_second_user_of_the_door_is_reported_whatever_holds_the_queryset() -> None:
+    """`CPM-OPERATE-S07`: `retire` needs no manager marker, so a local hides nothing.
+
+    The door is licensed to `core/retention.py` by count. A probe module that
+    reaches it through a queryset held in a parameter -- the shape the scan
+    admits it cannot see for `delete()` -- is still reported, because `retire`
+    is a name that belongs to this product's evidence base and to nothing else.
+    """
+    assert [entry.split(": ", 1)[1] for entry in mutation_paths(ast.parse(A_SECOND_USER_OF_THE_DOOR))] == [
+        "retire(...)"
+    ]
+
+
 def test_the_scan_reports_an_objects_attribute_that_is_not_a_manager() -> None:
     """The false positive this detector accepts, pinned rather than discovered.
 
@@ -1229,6 +1275,7 @@ def test_the_scan_reports_an_objects_attribute_that_is_not_a_manager() -> None:
         DEFAULT_MANAGER_UPDATE,
         BASE_MANAGER_UPDATE,
         BULK_UPDATE_ON_A_LOCAL,
+        A_SECOND_USER_OF_THE_DOOR,
         RAW_QUERY,
         ASYNC_UPDATE,
         ASYNC_DELETE,
@@ -1262,6 +1309,7 @@ def test_the_scan_reports_an_objects_attribute_that_is_not_a_manager() -> None:
         "default-manager",
         "base-manager",
         "bulk-update-local",
+        "second-user-of-the-door",
         "raw",
         "async-update",
         "async-delete",

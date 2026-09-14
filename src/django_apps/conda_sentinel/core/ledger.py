@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "RunHandle",
+    "abandon",
     "collection_run",
     "current_trace_id",
     "policy_run",
@@ -512,13 +513,13 @@ def _recorded(run: RunLedgerModel, clock: Clock) -> Iterator[RunHandle]:
         handle._raised(error)  # noqa: SLF001 - the recorder's own half of the handle; RunHandle says why it is private
         raise
     finally:
-        run.status = RunState.SUCCEEDED if handle.state is None else handle.state
-        run.detail = handle.detail
-        run.finished_at = clock.now()
         try:
-            # `instance.save(update_fields=...)`, never `queryset.update()`. See
-            # `FINALIZED_FIELDS` for both reasons the distinction is load-bearing.
-            run.save(update_fields=FINALIZED_FIELDS)
+            _write_ending(
+                run,
+                state=RunState.SUCCEEDED if handle.state is None else handle.state,
+                detail=handle.detail,
+                clock=clock,
+            )
         except DatabaseError as failure:
             # **The finalizing write is the one that most plausibly fails, and
             # exactly when it matters most.** A body raising `IntegrityError`
@@ -544,6 +545,61 @@ def _recorded(run: RunLedgerModel, clock: Clock) -> Iterator[RunHandle]:
             )
             if body_error is None:
                 raise
+
+
+def _write_ending(run: RunLedgerModel, *, state: RunState, detail: str, clock: Clock) -> None:
+    """Write a run's ending onto its row: the one place a ledger row's status is assigned.
+
+    Shared by the recorder's `finally` and by `abandon`, so the audit in
+    `tests/unit/django_apps/test_derived_status_writability_audit.py` records
+    one `status =` assignment in this module rather than two that could drift.
+
+    Args:
+        run: The saved ledger row.
+        state: The terminal state.
+        detail: What to record with it.
+        clock: The clock the finalizing instant is read from (`CPM-AD-26`).
+
+    Raises:
+        DatabaseError: From the write.
+
+    """
+    run.status = state
+    run.detail = detail
+    run.finished_at = clock.now()
+    # `instance.save(update_fields=...)`, never `queryset.update()`. See
+    # `FINALIZED_FIELDS` for both reasons the distinction is load-bearing.
+    run.save(update_fields=FINALIZED_FIELDS)
+
+
+def abandon(run: RunLedgerModel, *, clock: Clock, detail: str) -> None:
+    """Finalize a run some other process left `running` as `failed`, with a reason.
+
+    The recorder finalizes its own row on every exit path; the one row it cannot
+    reach is the one a killed worker left behind, which stays `running` with no
+    `finished_at` for ever and bounds `choose_evidence_cutoff` while it does. The
+    nightly purge (`CPM-OPERATE-S07`) uses this on its own stale rows at start --
+    a `prune_evidence` row still unfinished when the next purge begins was a purge
+    that died -- and nothing else does: a row another collector's worker is still
+    writing is that worker's to finalize.
+
+    Args:
+        run: The unfinished row. Refused when it already has an ending.
+        clock: The clock the finalizing instant is read from (`CPM-AD-26`).
+        detail: Why it is being closed, recorded as the row's detail.
+
+    Raises:
+        RunLedgerError: When the row already carries an ending.
+        DatabaseError: From the write.
+
+    """
+    if run.finished_at is not None:
+        message = (
+            f"run {run.pk} already ended {run.status} at {run.finished_at.isoformat()} and cannot be abandoned; "
+            f"only a row still running has no ending to write (CPM-AD-2)."
+        )
+        raise RunLedgerError(message)
+    _write_ending(run, state=RunState.FAILED, detail=detail, clock=clock)
 
 
 @contextmanager

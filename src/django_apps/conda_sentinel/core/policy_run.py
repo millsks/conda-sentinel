@@ -86,6 +86,7 @@ from conda_sentinel.core.models import CollectionRun
 from conda_sentinel.core.models import PolicyRun
 from conda_sentinel.core.policy import PolicyPassError
 from conda_sentinel.core.policy import registered_passes
+from conda_sentinel.core.retention import PRUNE_COLLECTOR
 from conda_sentinel.core.rollup import compose_rollup
 from conda_sentinel.core.rollup import packages_for_rollup
 from conda_sentinel.core.rollup import permitted_values
@@ -235,8 +236,16 @@ def choose_evidence_cutoff() -> datetime:
             is what makes that visible rather than mysterious.
 
     """
-    endings = CollectionRun.objects.finished()
-    boundary = CollectionRun.objects.unfinished().aggregate(models.Min(STARTED_AT_FIELD))[UNFINISHED_BOUNDARY_KEY]
+    # The nightly purge records one `collection_runs` row per table under its
+    # own name (`CPM-OPERATE-S07`), and those rows are not collections: a purge's
+    # ending is not an instant evidence was complete as of, and a purge killed
+    # mid-run would otherwise bound every cut-off at its start until the row
+    # aged out. Excluded by name, and only that name -- the demo seeder's
+    # synthetic run is a collection as far as this choice is concerned, and a
+    # fresh seed relies on it being counted.
+    collections = CollectionRun.objects.exclude(collector=PRUNE_COLLECTOR)
+    endings = collections.finished()
+    boundary = collections.unfinished().aggregate(models.Min(STARTED_AT_FIELD))[UNFINISHED_BOUNDARY_KEY]
     if boundary is not None:
         endings = endings.filter(**{f"{FINISHED_AT_FIELD}__lte": boundary})
     cutoff = endings.values_list(FINISHED_AT_FIELD, flat=True).first()

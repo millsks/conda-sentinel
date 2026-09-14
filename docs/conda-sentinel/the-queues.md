@@ -160,8 +160,11 @@ order:
 ### Items are not deleted
 
 Resolving or accepting moves an item to a terminal state; it stays in the table and
-drops off the queue view. There is no delete path, and `prune_expired_state` does not
-touch them — it prunes expired sessions and mapper epoch records.
+drops off the queue view. There is no delete path, and neither prune touches them:
+`prune_expired_state` prunes expired sessions and mapper epoch records, and
+`prune_evidence` — the nightly purge of evidence and run-ledger rows older than the
+retention — names every `workflow` table as one it never touches
+([operations](operations.md#ninety-days-of-evidence-purged-nightly)).
 
 ### A resolved finding that recurs opens a new item
 

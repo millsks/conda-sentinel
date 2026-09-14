@@ -442,6 +442,21 @@ CPM_SWEEP_ON_BEAT_START = env.bool("CPM_SWEEP_ON_BEAT_START", default=False)
 # every module, and config/settings/test.py empties it unconditionally so a
 # developer's export never enters the suite.
 CPM_GITHUB_TOKEN = env.str("CPM_GITHUB_TOKEN", default="").strip()
+# How long evidence and run-ledger rows are kept, in days (CPM-OPERATE-S07).
+# Ninety by default -- the product owner's decision -- and refused below one at
+# boot by CollectorsConfig.ready(), naming this setting: there is no "forever"
+# except by a number. The nightly `prune-evidence` admin process removes, in
+# bounded batches through the one audited door the append-only base exposes for
+# it alone, evidence rows and run-ledger rows older than this -- never a
+# package's newest row per table, never the row a retained policy run read at
+# its cut-off, never a package, rollup, identity, workflow or human-audit row --
+# and `replay_policy_run` refuses a cut-off older than it with a reason. A
+# setting rather than a versioned policy parameter: parameters are verdict rule
+# data (CPM-AD-8), a per-deployment duration belongs beside the other CPM_*
+# declarations here, and "which version's retention" has no answer for a
+# replay of an older run. The name is core/retention.py's RETENTION_SETTING;
+# tests/unit/test_settings.py pins the default in every module.
+CPM_EVIDENCE_RETENTION_DAYS = env.int("CPM_EVIDENCE_RETENTION_DAYS", default=90)
 # The conda channels and platforms the published-package collector observes
 # (CPM-FR-10, CPM-CURRENCY-S04). Both ship EMPTY, and that is the decision rather
 # than an omission.
