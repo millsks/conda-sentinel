@@ -520,6 +520,12 @@ policy-run = { cmd = "python manage.py run_policy", default-environment = "defau
 # on the page is left retired whatever the file says.
 # Locally: `pixi run stack-run import_watchlist [<path>] [--replace]`.
 import-watchlist = { cmd = "python manage.py import_watchlist --replace", default-environment = "default", description = "Admin process: bring the inventory table into line with the reviewed watchlist file (audited, one transaction per row; retires what the file no longer names)" }
+# The fifth admin process (`CPM-OPERATE-S07`), on the same terms: the nightly
+# purge of evidence and run-ledger rows older than `CPM_EVIDENCE_RETENTION_DAYS`,
+# in bounded batches through the one audited door, one collection run recorded
+# per table. `prune-evidence`, because `prune` is the accelerator's. Locally:
+# `pixi run stack-run prune_evidence --dry-run`, then without.
+prune-evidence = { cmd = "python manage.py prune_evidence", default-environment = "default", description = "Admin process: purge evidence and run-ledger rows older than the declared retention, in bounded batches (CPM-OPERATE-S07)" }
 # The cross-platform *local* ASGI server, and not a process type. uvicorn runs
 # on all three platforms, unlike the gunicorn+uvicorn-worker pairing the `web`
 # process uses, which is POSIX-only -- which is the only reason this task exists

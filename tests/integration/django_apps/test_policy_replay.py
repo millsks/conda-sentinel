@@ -18,6 +18,13 @@ load-bearing case writes *new evidence after the cut-off* between the two runs a
 asserts the replay still reproduces — which is what "against historical evidence"
 means, and what would break the moment a pass read a row the cut-off excludes.
 
+**A stated cut-off has to be one a run in the ledger read at (`CPM-OPERATE-S07`).**
+The nightly purge keeps what a run still in the ledger read at its cut-off and
+nothing else past the retention, so the command admits `--evidence-cutoff` only at
+such an instant; the case that states one runs a policy run at it first. The rule
+itself -- and `--of-run` reaching any run the ledger holds, however old -- is
+`tests/integration/django_apps/test_retention.py`'s subject.
+
 Every test here rolls back: `@pytest.mark.django_db` wraps each in a transaction.
 """
 
@@ -439,6 +446,7 @@ def test_a_stated_version_and_cutoff_run_without_a_comparison_and_say_so() -> No
     """
     an_ended_collection_run()
     a_package()
+    a_run()
     output = StringIO()
 
     call_command(

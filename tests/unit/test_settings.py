@@ -48,6 +48,8 @@ from conda_sentinel.collectors.vulnerability import COLLECTOR_NAME as VULNERABIL
 from conda_sentinel.collectors.vulnerability import VulnerabilityCollector
 from conda_sentinel.core import queues
 from conda_sentinel.core import roles
+from conda_sentinel.core.retention import DEFAULT_RETENTION_DAYS
+from conda_sentinel.core.retention import RETENTION_SETTING
 from config.authorization import claims
 from config.local_dev import keys
 from config.locality import LOCAL as LOCAL_RUNTIME
@@ -1821,6 +1823,59 @@ def test_no_checked_in_file_declares_the_github_token():
     assert workflows, "no workflow found, so the scan of them would be vacuous"
     naming_it = [path.name for path in workflows if GITHUB_TOKEN_SETTING in path.read_text(encoding="utf-8")]
     assert not naming_it, naming_it
+
+
+# ---------------------------------------------------------------------------
+# CPM-OPERATE-S07 -- the retention, declared and ninety.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_retention_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the variable so the module's *default* is what the case reads."""
+    monkeypatch.delenv(RETENTION_SETTING, raising=False)
+
+
+@pytest.mark.usefixtures("any_settings_module", "no_retention_env")
+@pytest.mark.parametrize("module", EVERY_SETTINGS_MODULE, ids=lambda name: name.rpartition(".")[2])
+def test_the_retention_is_declared_and_ninety_days_in_every_settings_module(module: str):
+    """`CPM-OPERATE-S07`: the setting ships, and it ships at ninety.
+
+    *Declared*, over all four modules, because `CollectorsConfig.ready()` refuses
+    a settings module with no assignment as one that dropped the line. *Ninety*,
+    because that is the product owner's decision and the one place it is written
+    is `base.py`; a leaf module that overrode it would be a second retention
+    nothing reconciles. The name is `core/retention.py`'s, so a rename on either
+    side fails here rather than booting a component that keeps evidence for ever.
+    """
+    settings_module = importlib.import_module(module)
+
+    assert getattr(settings_module, RETENTION_SETTING) == DEFAULT_RETENTION_DAYS
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_retention_is_read_from_the_environment_as_an_integer(monkeypatch: pytest.MonkeyPatch):
+    """The variable of the same name, read as a number of days."""
+    monkeypatch.setenv(RETENTION_SETTING, "30")
+
+    base = importlib.import_module(BASE)
+
+    assert base.CPM_EVIDENCE_RETENTION_DAYS == 30  # noqa: PLR2004 - the value the case exported
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_a_retention_that_is_not_a_number_refuses_the_settings_module(monkeypatch: pytest.MonkeyPatch):
+    """Matrix row `Setting`, at the read: `abc` never becomes a setting at all.
+
+    Refused by the integer read at settings import, before any hook runs. The
+    hook's own refusal -- which names the setting -- covers a value that *is* an
+    integer and is still unusable, and a settings module that assigned the wrong
+    type by hand; `tests/unit/django_apps/test_retention.py` drives both.
+    """
+    monkeypatch.setenv(RETENTION_SETTING, "abc")
+
+    with pytest.raises(ValueError, match="abc"):
+        importlib.import_module(BASE)
 
 
 def _as_list(value: object) -> list[object]:

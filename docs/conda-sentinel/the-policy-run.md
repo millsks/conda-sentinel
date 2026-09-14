@@ -134,6 +134,16 @@ Because a replay writes new rows rather than editing old ones, current health ca
 legitimately hold rows from two runs at once. That is why freshness is per row, and
 why every screen shows it.
 
+A replay reaches exactly as far as the ledger. Evidence older than
+`CPM_EVIDENCE_RETENTION_DAYS` (ninety by default) is purged nightly, and the purge
+keeps every row a run still in the ledger read at its cut-off — so any run the
+ledger holds reproduces byte-identically after any number of purges, however old.
+A run older than the retention that the rollup no longer cites is purged with its
+derived rows, and asking for it is "no such run"; a cut-off stated by hand is
+admitted only at an instant a run still in the ledger read at, and refused with the
+reason otherwise
+([operations](operations.md#a-replay-reaches-exactly-as-far-as-the-ledger)).
+
 ## Where this shows up when something looks wrong
 
 | Symptom | Usually |

@@ -169,3 +169,39 @@ is what a retirement produces, unchanged.
 **Why now.** The epic context gated the surface write on this amendment being accepted;
 until it is, `import-watchlist` is the only way rows change. The story ships both, so
 the amendment ships in the same commit.
+
+## 8. CPM-OPERATE-S07: two deviations from the epic's letter, recorded
+
+Proposed by `CPM-OPERATE-S07` and applied with its pull request, as §4c anticipated for
+`CPM-AD-2`'s wording.
+
+**Retention is a setting, not a versioned policy parameter.** The epic context said
+"retention as one duration in the versioned policy parameters, default 90 days". The
+story declares `CPM_EVIDENCE_RETENTION_DAYS` in `config/settings/base.py` instead
+(default 90, refused below 1 at boot naming the setting), beside the other declared
+`CPM_*` settings. Three reasons: parameters under `CPM-AD-8` are verdict rule data —
+severity orders, licence rules, freshness thresholds — and a retention decides no
+verdict; a per-deployment duration is an operator's declaration, not a reviewed rule
+set shared by every deployment; and "which version's retention applies" has no answer
+for a replay of a run recorded under an earlier version. The name is spelled once, in
+`core/retention.py`, and the settings tests pin it in every module.
+
+**The two human-audit tables are excluded from the purge.** `identity_overrides` and
+`inventory_changes` are evidence by every mark the registry reads, and the epic's
+"purges evidence older than ninety days" would have taken them. They are one row per
+human act — the audit trail of the two governed writes `CPM-FR-3` (as amended in §7)
+names — and a retention that removed the record of who changed what, and why, would
+remove exactly what the governed write path exists to keep. They are named as excluded
+in `core/retention.py` and in the operations page, and the exclusion is the product
+owner's to reverse: it is one roster entry each.
+
+**`CPM-AD-2` gains the "one audited door" sentence** under its exemptions, in the spine.
+The rule's refusals stand unchanged; the door is an addition beside them, licensed by
+count in the mutation-path audit.
+
+**Two clarifications the story made on the way, not deviations.** The replay floor is
+kept for *every* surviving policy run's cut-off, not only the oldest: two surviving runs
+at two cut-offs each read a different row, and protecting only the oldest cut-off would
+have let the other run's row go. And the two Python 3.14 tables are keyed per
+`(package, python_series)`, because their readers filter by series before taking the
+newest row, so a per-package key would have removed the row a replay reads.

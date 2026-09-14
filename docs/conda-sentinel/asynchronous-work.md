@@ -292,7 +292,12 @@ intended path is:
 recorded version) at whatever cadence your collection schedule makes sensible, after
 the daily sweeps have had time to land, and `pixi run ingest` (`ingest_inventory`) at
 the cadence you re-read the watchlist. The cadence is the deployment repository's, as
-it is for `prune`; `component.toml` declares only that the processes exist. The other
+it is for `prune`; `component.toml` declares only that the processes exist. One more
+belongs on that schedule and is not a beat entry either: `pixi run prune-evidence`
+(`prune_evidence`), **nightly**, which removes evidence and run-ledger rows older than
+`CPM_EVIDENCE_RETENTION_DAYS` in bounded batches — it is an admin process rather than
+a task for the reason `prune` is, and it needs no broker
+([operations](operations.md#ninety-days-of-evidence-purged-nightly)). The other
 route, a periodic task added in the Django admin (`Periodic Tasks` → add) naming
 `cpm.policy.run` with the version as its argument, still works — but it is a version
 pinned in a database row, which stops being the newest the day somebody records

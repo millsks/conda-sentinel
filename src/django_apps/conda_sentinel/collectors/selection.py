@@ -120,7 +120,8 @@ UNRESOLVED_CONFIDENCES: Final[frozenset[str]] = frozenset(IdentityConfidence.val
 
 #: How many snapshot rows are held in memory at once while the fold runs.
 #:
-#: `InventorySnapshot` is append-only and never pruned, so the rows at or before a
+#: `InventorySnapshot` is append-only and kept for the declared retention
+#: (`CPM-OPERATE-S07`, ninety days by default), so the rows at or before a
 #: cut-off grow with the *history* as well as with the inventory -- see
 #: `_breadth_at`, which says what that costs. Streaming in chunks is what keeps the
 #: fold's memory proportional to the number of packages rather than to the number
@@ -290,14 +291,17 @@ def _breadth_at(*, cutoff: datetime, package_ids: Collection[int]) -> dict[int, 
 
     **What this costs, stated rather than implied.** It reads every snapshot at or
     before the cut-off, filtering to the named packages in Python. `InventorySnapshot`
-    is append-only and nothing prunes it, so that is one row per package per sweep
-    for the whole retained history -- a year of daily sweeps over ten thousand
-    packages is millions of rows, and the number grows with time even when the
-    inventory does not. It is a fixed number of *queries*, which is not the same
-    claim as a fixed amount of work. `.iterator()` bounds the memory to
-    `_SNAPSHOT_CHUNK` rows plus one entry per named package; bounding the *rows*
-    needs either a pruning policy or a materialised latest-per-package projection,
-    and neither is this story's to invent.
+    is append-only and kept for the declared retention (`CPM-OPERATE-S07`), so that
+    is one row per package per sweep for the whole retained history -- ninety days
+    of daily sweeps over ten thousand packages is close to a million rows, and the
+    number grows with the retention even when the inventory does not. It is a
+    fixed number of *queries*, which is not the same claim as a fixed amount of
+    work. `.iterator()` bounds the memory to
+    `_SNAPSHOT_CHUNK` rows plus one entry per named package. The rows themselves
+    are bounded by the pruning policy `CPM-OPERATE-S07` declared -- the nightly
+    purge keeps the retention's worth per `(package, source_package_key)` and
+    the newest row per key beyond it -- so what is left to bound the *read* is a
+    materialised latest-per-package projection, which no story has claimed.
 
     Args:
         cutoff: The instant to read as of, aware. Checked by the caller.

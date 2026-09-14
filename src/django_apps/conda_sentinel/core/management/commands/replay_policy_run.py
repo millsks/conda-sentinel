@@ -19,6 +19,16 @@ the cut-off rather than from anything here: every pass reads evidence
 original run read are still there and still say the same thing. Nothing is
 re-fetched and no collector runs.
 
+**Replayable exactly as far as the ledger reaches (`CPM-OPERATE-S07`).** The
+nightly purge keeps every row a policy run still in the ledger read at its cut-off,
+so `--of-run` of any run the ledger holds reproduces after any number of purges,
+however old the run -- the run behind the current rollup is never purged, and an
+older run is either still there or "no such run", as any unknown id is. A cut-off
+stated by hand is admitted only when a run still in the ledger holds exactly that
+cut-off: at any other instant the purge has been free to remove what a run there
+would read, and the command refuses before running anything rather than replaying
+against a thinner history and reporting the difference as a defect in a pass.
+
 **It overwrites current health, and that is stated three times because it is the one
 surprise.** `CPM-AD-11` gives `package_health` exactly one row per package and
 `core/rollup.py` replaces it, so a replay of a quarter-old cut-off leaves the
@@ -126,11 +136,13 @@ class Command(BaseCommand):
         Raises:
             CommandError: When the arguments do not name exactly one run to replay,
                 when the named run does not exist, when the cut-off cannot be read
-                as an aware instant, when the reviewer declines the confirmation, or
-                when **the replay did not reproduce the original**. The last is the
+                as an aware instant, when a stated cut-off is one no run in the
+                ledger holds, when the reviewer declines the confirmation, or when
+                **the replay did not reproduce the original**. The last is the
                 whole point: a non-zero exit is the answer.
 
         """
+        clock = SystemClock()
         original, policy_version, evidence_cutoff = self._subject(options)
 
         self.stdout.write(f"Replaying policy version {policy_version!r} at evidence cut-off {evidence_cutoff}.")
@@ -141,7 +153,7 @@ class Command(BaseCommand):
 
         summary = execute_policy_run(
             policy_version=policy_version,
-            clock=SystemClock(),
+            clock=clock,
             evidence_cutoff=evidence_cutoff,
         )
 
@@ -170,8 +182,8 @@ class Command(BaseCommand):
 
         Raises:
             CommandError: When the arguments do not name exactly one subject, when
-                the named run does not exist, or when a stated cut-off is not an
-                aware ISO 8601 instant.
+                the named run does not exist, when a stated cut-off is not an
+                aware ISO 8601 instant, or when no run in the ledger holds it.
 
         """
         of_run = options["of_run"]
@@ -192,7 +204,9 @@ class Command(BaseCommand):
                 raise CommandError(message)
             return original, original.policy_version, original.evidence_cutoff
 
-        return None, stated_version, _aware_instant(stated_cutoff)
+        stated = _aware_instant(stated_cutoff)
+        _require_a_run_at(stated)
+        return None, stated_version, stated
 
     def _report(self, report: Any) -> None:
         """Print what the comparison found, and refuse when anything differs.
@@ -226,6 +240,30 @@ class Command(BaseCommand):
             f"evidence that was not append-only."
         )
         raise CommandError(message)
+
+
+def _require_a_run_at(evidence_cutoff: datetime) -> None:
+    """Refuse a stated cut-off that no run still in the ledger read at.
+
+    The purge keeps what a retained run read at *its* cut-off and nothing else
+    older than the retention, so an instant no run holds is one whose evidence
+    may be thinner than it was.
+
+    Args:
+        evidence_cutoff: The stated instant.
+
+    Raises:
+        CommandError: When no `PolicyRun` row carries exactly this cut-off.
+
+    """
+    if PolicyRun.objects.filter(evidence_cutoff=evidence_cutoff).exists():
+        return
+    message = (
+        f"no retained run read at this cut-off ({evidence_cutoff.isoformat()}); the nightly purge was free to "
+        f"remove what a run there would read, so a replay at it would not be a reproduction (CPM-FR-22, "
+        f"CPM-OPERATE-S07). Name a run with --of-run, or state the evidence_cutoff of a run still in the ledger."
+    )
+    raise CommandError(message)
 
 
 def _aware_instant(stated: str) -> datetime:

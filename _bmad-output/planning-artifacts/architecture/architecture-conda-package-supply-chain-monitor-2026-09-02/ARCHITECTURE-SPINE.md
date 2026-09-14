@@ -152,6 +152,17 @@ violation yet.
   `succeeded | partial | failed | skipped`. This is the only way a process killed mid-run
   is still visible, which `CPM-FR-38` and `CPM-UJ-3` both require. PRD Appendix A.2's
   classification of them as evidence tables is superseded by this rule.
+- **The one audited door (`CPM-OPERATE-S07`).** Retention is the one exception to
+  append-only: the base exposes exactly one method, opened only by a token the
+  retention module alone constructs, through which a declared nightly purge removes
+  evidence and run-ledger rows older than `CPM_EVIDENCE_RETENTION_DAYS` in bounded
+  batches, writing a run record per table naming the cut-off and the count. It never
+  removes a package's newest row per table, the row a retained policy run read at its
+  cut-off, a package row, a rollup row, or a human-audit row (`identity_overrides`,
+  `inventory_changes`); every other refusal on the base stands, and the mutation-path
+  audit licenses the door by count so a second deletion path fails the gate. A replay
+  inside the retention window is byte-identical; outside it is refused with a reason
+  (`CPM-FR-22`).
 
 ### CPM-AD-3 — Surrogate key, correctable canonical name  `[ADOPTED]`
 

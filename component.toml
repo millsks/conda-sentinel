@@ -235,3 +235,19 @@ schedule = "deployment-repository"
 name = "import-watchlist"
 task = "import-watchlist"
 schedule = "deployment-repository"
+
+# The fifth (`CPM-OPERATE-S07`): the nightly purge. Evidence and run-ledger rows
+# older than `CPM_EVIDENCE_RETENTION_DAYS` (ninety by default) are removed in
+# bounded batches through the one audited door the append-only base exposes for
+# this process alone -- never a package's newest row per table, never the row a
+# retained policy run read at its cut-off, never a package, rollup, identity,
+# workflow or human-audit row -- with one collection run recorded per table
+# naming the cut-off and the counts. `prune-evidence` rather than `prune`, which
+# is the accelerator's session-and-epoch prune above. The deployment repository
+# schedules it nightly; `--dry-run` on the stack first is the operator's
+# rehearsal.
+
+[[admin_processes]]
+name = "prune-evidence"
+task = "prune-evidence"
+schedule = "deployment-repository"

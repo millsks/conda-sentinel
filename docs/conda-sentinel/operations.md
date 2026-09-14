@@ -1355,8 +1355,9 @@ review queue.** One row per package per run: which locator was read, whether PyP
 answered and at which locator, which `project_urls` key won and what it normalised
 to, the feedstock names the index listed, and the confidence the package held once
 the recorder had finished. At a daily cadence that is **one row per package per
-day, and nothing prunes it**, on the same terms every evidence table here
-accumulates.
+day, kept for `CPM_EVIDENCE_RETENTION_DAYS`** — ninety by default — and purged
+nightly on the same terms as every evidence table here
+([the purge](#ninety-days-of-evidence-purged-nightly)).
 
 **`downgrade_refused` on a row means a `verified` package was recollected by
 hand.** The sweep never offers a `verified` package — a person's identity is never
@@ -1404,16 +1405,18 @@ monitoring everywhere else.
 
 Beat's interval entries start their clock when they are created, so a fresh
 component sweeps nothing for a day and its weekly surfaces for a week — unless
-you tell beat to enqueue its first tick the moment it starts. Three settings
-govern what a sweep reads, when the first one fires, and how fast the two
-GitHub-reading collectors may go; the second is `CPM-OPERATE-S04`'s and the
-third `CPM-OPERATE-S05`'s:
+you tell beat to enqueue its first tick the moment it starts. Four settings
+govern what a sweep reads, when the first one fires, how fast the two
+GitHub-reading collectors may go, and how long what they observe is kept; the
+second is `CPM-OPERATE-S04`'s, the third `CPM-OPERATE-S05`'s and the fourth
+`CPM-OPERATE-S07`'s:
 
 | Setting | Default | Declared where | Does |
 |---|---|---|---|
 | `CPM_INVENTORY_SOURCE` | `watchlist` | the `dev` pixi environment declares `database` | which inventory an ingestion reads — [above](#the-inventory-is-a-governed-table-and-it-ships-empty) |
 | `CPM_SWEEP_ON_BEAT_START` | off | the `dev` pixi environment declares `1`; nothing production-bound does | beat enqueues its first tick the moment it starts — [what fires at start](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run) |
 | `CPM_GITHUB_TOKEN` | empty | **your shell, the gitignored `.env`, or your deployment's secret store — never a checked-in file**: no pixi table, task `env`, compose service, `Dockerfile` or workflow carries it, and the suite scans all of them | the credential `source_release` and `feedstock` send to `https://api.github.com`, and with it GitHub's authenticated allowances — [the arithmetic](#the-upstream-release-collector-reads-github-with-or-without-a-credential) |
+| `CPM_EVIDENCE_RETENTION_DAYS` | `90` | your environment; refused at boot below `1` or above `3650`, naming the setting | how many days of evidence and run-ledger rows the nightly `prune-evidence` process keeps; a replay reaches any run still in the ledger — [the purge](#ninety-days-of-evidence-purged-nightly) |
 
 `CPM_GITHUB_TOKEN` wants a credential with **no permissions selected**: every
 endpoint the two collectors read is public, and the token exists to be counted,
@@ -1489,9 +1492,10 @@ name for the same reason.
 
 `CPM-OPERATE-S02` declares three `[[admin_processes]]` in `component.toml` on
 exactly `prune`'s terms — each a root pixi task running a management command,
-`schedule = "deployment-repository"`, no cadence in the component — and
-`CPM-OPERATE-S03` a fourth. The mechanism, and the environment such a job must
-carry, is the accelerator's [deployment page](../accelerator/deployment.md):
+`schedule = "deployment-repository"`, no cadence in the component —
+`CPM-OPERATE-S03` a fourth and `CPM-OPERATE-S07` a fifth. The mechanism, and the
+environment such a job must carry, is the accelerator's
+[deployment page](../accelerator/deployment.md):
 
 | Admin process | Task | Command | Does |
 |---|---|---|---|
@@ -1499,6 +1503,7 @@ carry, is the accelerator's [deployment page](../accelerator/deployment.md):
 | `sweep` | `pixi run sweep` | `dispatch_sweep --all` | enqueues one `cpm.collect.sweep` per registered collector that is swept per package |
 | `policy-run` | `pixi run policy-run` | `run_policy [--version V]` | enqueues `cpm.policy.run` at the newest recorded version |
 | `import-watchlist` | `pixi run import-watchlist` | `import_watchlist --replace` | **writes**: brings the `inventory` table into line with the reviewed file, one audited transaction per row; retires what the file no longer names |
+| `prune-evidence` | `pixi run prune-evidence` | `prune_evidence [--dry-run] [--batch N]` | **deletes**: evidence and run-ledger rows older than `CPM_EVIDENCE_RETENTION_DAYS`, in bounded batches, one collection run recorded per table — [the purge](#ninety-days-of-evidence-purged-nightly). Schedule it nightly. |
 
 Locally the same commands run against the stack through `pixi run stack-run
 <command>`; deployed, the deployment repository schedules `pixi run <task>`. None
@@ -1527,9 +1532,11 @@ Three things to know before scheduling any of them:
   fires, and it fires the daily and the weekly surfaces at once against
   allowances that were sized for one collector per tick. `ingest` and
   `policy-run` are the two that belong on a cadence.
-- **All three need a reachable broker**, unlike `prune`: each is one `.delay()`,
-  so a job environment without `REDIS_URL` (or with `CELERY_TASK_ALWAYS_EAGER`
-  set) does the work in the job itself rather than on a worker.
+- **The first three need a reachable broker**, unlike `prune` and
+  `prune-evidence`: each is one `.delay()`, so a job environment without
+  `REDIS_URL` (or with `CELERY_TASK_ALWAYS_EAGER` set) does the work in the job
+  itself rather than on a worker. The two prunes and the import talk to the
+  database and nothing else.
 - **An `ingest` with no declared adapter fails on the worker before the recorder
   opens**, so nothing reaches the Coverage screen or the run ledger — the failure
   is visible only in flower or the worker log. The command itself exits 0 with
@@ -1996,20 +2003,23 @@ A package that could not be computed is logged under `policy_pass_failed` with
 its primary key and the traceback; the ledger row carries the count, and the log
 is the only place the names are.
 
-### `package_currency` accumulates, and nothing prunes it
+### `package_currency` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted. At ten thousand
-packages a daily run adds ten thousand rows a day, and **every relation on the
-table is `PROTECT`** — to the package, to the policy run, and to each of the four
-evidence rows — so nothing else can be deleted while its rows reference it.
+One row per package per run, never updated. At ten thousand packages a daily run
+adds ten thousand rows a day, and **every relation on the table is `PROTECT`** —
+to the package, to the policy run, and to each of the four evidence rows — so
+nothing else can be deleted while its rows reference it.
 
 That is deliberate: the rows are what a replay is compared against and what an
 audit reads, and `CASCADE` would let an operational tidy-up of old policy runs
-silently empty the evidence for every verdict still on the rollup. It also means
-**there is no retention path here yet**. Deleting old runs is a decision nobody
-has taken, it would have to delete `package_currency` rows before the
-`policy_runs` rows they protect, and no story currently claims it. Size the
-database accordingly, or run the policy less often than you collect.
+silently empty the evidence for every verdict still on the rollup. The one
+retention path is `CPM-OPERATE-S07`'s nightly purge
+([below](#ninety-days-of-evidence-purged-nightly)): it deletes these rows
+**before** the `policy_runs` rows they protect, and only for runs older than
+`CPM_EVIDENCE_RETENTION_DAYS` that no `package_health` row cites — the run behind
+the current rollup is never purged, however old. Ninety days of daily runs at ten
+thousand packages is under a million rows here; size the database for that, and
+for the same again in each sibling table below.
 
 ### Nothing in this product can set a package's authority order
 
@@ -2224,13 +2234,14 @@ visible; making the reads set-based is recorded as deferred work on
 **this story**, `CPM-CURRENCY-S07`, alongside `CPM-CURRENCY-S06`'s entry for the
 currency pass's own five.
 
-### `package_feedstock_presence` accumulates, and nothing prunes it
+### `package_feedstock_presence` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted, with **every
-relation `PROTECT`** — to the package, to the policy run, and to the feedstock
-observation. The reasoning and the consequences are exactly `package_currency`'s,
-above: there is no retention path, deleting old runs would have to delete these
-rows first, and no story currently claims it. Size the database accordingly.
+One row per package per run, never updated, with **every relation `PROTECT`** —
+to the package, to the policy run, and to the feedstock observation. The
+reasoning and the consequences are exactly `package_currency`'s, above: the
+nightly purge deletes these rows before the runs they protect, for runs older
+than the retention that the rollup does not cite. Size the database for the
+retention.
 
 ## The vulnerability policy: one status per package, with KEV kept visible
 
@@ -2413,14 +2424,14 @@ Reading a *sweep* rather than a single row is what makes this a reduction: both
 evidence tables hold one row per advisory, and reading only the newest row would
 reduce nine advisories to whichever the database happened to return.
 
-### `package_vulnerability` accumulates, and nothing prunes it
+### `package_vulnerability` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted, with **every
-relation `PROTECT`** — to the package, to the policy run, and to both evidence
-rows. The reasoning and the consequences are exactly `package_currency`'s and
-`package_feedstock_presence`'s, above: there is no retention path, deleting old
-runs would have to delete these rows first, and no story currently claims it.
-Size the database accordingly, or run the policy less often than you collect.
+One row per package per run, never updated, with **every relation `PROTECT`** —
+to the package, to the policy run, and to both evidence rows. The reasoning and
+the consequences are exactly `package_currency`'s and
+`package_feedstock_presence`'s, above: the nightly purge deletes these rows
+before the runs they protect, for runs older than the retention that the rollup
+does not cite. Size the database for the retention.
 
 ## The licence policy: nothing is allowed, and that is the shipped answer
 
@@ -2622,14 +2633,13 @@ newest row would reduce four channels to whichever the database happened to
 return — which on this table is the difference between seeing a disagreement and
 not knowing there was one.
 
-### `package_license` accumulates, and nothing prunes it
+### `package_license` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted, with **every
-relation `PROTECT`** — to the package, to the policy run, and to the evidence row.
-The reasoning and the consequences are exactly the three sibling tables', above:
-there is no retention path, deleting old runs would have to delete these rows
-first, and no story currently claims it. Size the database accordingly, or run
-the policy less often than you collect.
+One row per package per run, never updated, with **every relation `PROTECT`** —
+to the package, to the policy run, and to the evidence row. The reasoning and the
+consequences are exactly the three sibling tables', above: the nightly purge
+deletes these rows before the runs they protect, for runs older than the
+retention that the rollup does not cite. Size the database for the retention.
 
 ## The remediation readiness policy: what you can do now, and what is waiting on somebody else
 
@@ -2840,16 +2850,18 @@ tie-break — would report `not_published` for a package whose fix a later-sorti
 channel publishes. Four such readings are `blocked`, which would be your channel
 list telling a reviewer to give up.
 
-### `package_remediation` accumulates, and nothing prunes it
+### `package_remediation` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted, with **every
-relation `PROTECT`** — to the package, to the policy run, to the advisory finding,
-and to each of the four surface observations. The reasoning and the consequences
-are exactly the four sibling tables', above: there is no retention path, deleting
-old runs would have to delete these rows first, and no story currently claims it.
-This table references more evidence rows than any of its siblings, so it is also
-the one that will most constrain a future retention story. Size the database
-accordingly, or run the policy less often than you collect.
+One row per package per run, never updated, with **every relation `PROTECT`** —
+to the package, to the policy run, to the advisory finding, and to each of the
+four surface observations. The reasoning and the consequences are exactly the
+four sibling tables', above: the nightly purge deletes these rows before the runs
+they protect, for runs older than the retention that the rollup does not cite.
+This table references more evidence rows than any of its siblings, which is why
+the purge's order — derived rows, then runs, then evidence — matters most here:
+an evidence row one of these rows still cites is skipped by the purge and
+counted as protected, never deleted out from under it. Size the database for the
+retention.
 
 ## The Python 3.14 readiness policy: ready, and on whose word
 
@@ -2945,14 +2957,14 @@ reads no versioned parameter, because "verified outranks inferred" is this epic'
 own semantics rather than a risk posture somebody has to choose. There is nothing
 here to tune and nothing to fill in before it works.
 
-### `package_python_readiness` accumulates, and nothing prunes it
+### `package_python_readiness` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted, with every relation
-`PROTECT` — to the package, to the policy run, and to the two evidence rows the
-verdict cites. The reasoning and the consequences are exactly the five sibling
-tables', above: there is no retention path, deleting old runs would have to delete
-these rows first, and no story currently claims it. Size the database accordingly,
-or run the policy less often than you collect.
+One row per package per run, never updated, with every relation `PROTECT` — to
+the package, to the policy run, and to the two evidence rows the verdict cites.
+The reasoning and the consequences are exactly the five sibling tables', above:
+the nightly purge deletes these rows before the runs they protect, for runs older
+than the retention that the rollup does not cite. Size the database for the
+retention.
 
 ## The priority policy: nothing was prioritised until `2026.09.4`
 
@@ -3081,11 +3093,10 @@ one insert. No outbound call. Every read is bounded by **both** the package and 
 policy run, so one run's priority is made entirely of that run's conclusions —
 which is what keeps a replay at a stated version and cut-off reproducible.
 
-### `package_priority` accumulates, and nothing prunes it
+### `package_priority` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted, every relation
-`PROTECT`. The reasoning and the consequences are exactly the six sibling tables',
-above.
+One row per package per run, never updated, every relation `PROTECT`. The
+reasoning and the consequences are exactly the six sibling tables', above.
 
 ## The work-type policy: what to do, decided without looking at the priority
 
@@ -3165,11 +3176,141 @@ because the two passes are independent — and one insert. No outbound call, and
 parameter file: this derivation is code, because the PRD closed the set and nothing
 about it is an open question.
 
-### `package_work_type` accumulates, and nothing prunes it
+### `package_work_type` accumulates, and the nightly purge is what prunes it
 
-One row per package per run, never updated and never deleted, every relation
-`PROTECT`. The reasoning and the consequences are exactly the seven sibling tables',
-above.
+One row per package per run, never updated, every relation `PROTECT`. The
+reasoning and the consequences are exactly the seven sibling tables', above.
+
+## Ninety days of evidence, purged nightly
+
+`CPM-OPERATE-S07`. Evidence is append-only and, until this story, nothing had
+ever removed a row from any table: at ten thousand packages the seven daily
+tables grow roughly seventy thousand rows a day between them, the collection
+ledger the same, and no index led with a time column. The decision is **ninety days, purged
+nightly**, and it is one setting and one admin process:
+
+```sh
+pixi run stack-run prune_evidence --dry-run   # rehearse: records the counts, removes nothing
+pixi run stack-run prune_evidence             # purge, in batches of 1000
+pixi run stack-run prune_evidence --batch 250 # smaller batches on a busy database
+```
+
+Deployed, the deployment repository schedules `pixi run prune-evidence` nightly
+— it is `component.toml`'s fifth `[[admin_processes]]`, on `prune`'s terms, and
+it needs the database and nothing else. `CPM_EVIDENCE_RETENTION_DAYS` is the
+window, ninety by default; the component refuses to boot at anything below one
+or above ten years, naming the setting, because **there is no "forever" except
+by a number**. It is
+a setting rather than a versioned policy parameter deliberately: parameters are
+verdict rule data, and "which version's retention" has no answer for a replay
+of an older run. The retention is not a command-line option for the same
+reason — a purge that could be told a different window at the terminal would be
+a purge whose window nobody reviewed.
+
+### What goes, in what order, and what never does
+
+Each table's purge is one `collection_runs` row under the collector name
+`prune_evidence` — a name nothing registers, so the rows never appear on the
+Coverage screen — whose `detail` names the table, the cut-off, how many rows
+went, how many the rule kept, how many were protected, and whether it was a
+rehearsal: `table=pypi_release_snapshots cutoff=2026-06-15T09:00:00+00:00
+deleted=68112 kept_by_rule=10000 protected=0 dry_run=false`. Every batch is its
+own transaction; the recorder is never inside one. The order is part of the
+correctness:
+
+1. **Derived pass rows, then their runs.** The eight `package_*` tables' rows
+   for policy runs older than the retention that **no `package_health` row
+   cites** — the run behind the current rollup is pinned, however old, and so
+   are its rows — then those `policy_runs` rows. Derived rows cite evidence with
+   `PROTECT`, so purging evidence first would leave every row an out-of-window
+   run still cited in place for ever.
+2. **Evidence**, per table: `inventory_snapshots`, `source_release_snapshots`,
+   `pypi_release_snapshots`, `feedstock_snapshots`, `conda_package_snapshots`,
+   `kev_findings` (before `vulnerability_findings`, which it cites),
+   `vulnerability_findings`, `license_findings`,
+   `python_readiness_assessments`, `python_verification_results`,
+   `identity_resolution_snapshots`. A row goes only when it is older than the
+   cut-off **and** the floor rule below lets it. A row a retained derived row
+   still cites is skipped and counted as `protected`, never deleted out from
+   under it; the batch falls back to one row at a time and carries on.
+3. **The collection ledger**: rows that ended before the cut-off, and rows that
+   never ended and started before it — a killed worker's row, which would
+   otherwise bound every policy run's cut-off choice at that instant for ever.
+   The record counts the two separately (`finished=`, `unfinished=`). This is
+   the step with an operator-visible cost: `CPM-FR-38`'s "which runs failed"
+   reaches back the retention and no further, the Coverage screen's
+   last-observed answer does too — **a collector silent for ninety days reads
+   as never run** — and a package page's observation history is the
+   retention's. The purge's own rows (`collector = prune_evidence`) are never
+   read by the policy run's cut-off choice, so neither a purge's ending nor a
+   killed purge's open row moves a cut-off; a purge closes any row an earlier
+   purge left running as `failed`, saying so.
+
+**Never purged, and named:** `package_health` (the rollup); `packages` and every
+`identity` table; every `workflow` table; and the two human-audit evidence tables,
+`identity_overrides` and `inventory_changes` — one row per human act, the audit
+trail of governed writes, excluded by the product owner's decision and
+reversible by it.
+
+**A table that fails does not stop the night, and a row refused is not a row
+lost.** A database error on one table finalises that table's record `failed`,
+carrying what was committed before it, and the purge carries on to the next
+table; the command then exits non-zero naming the failed tables, which the next
+scheduled purge retries. A row the database refuses because something cites it
+is skipped and counted as `protected`, the batch retried without it, and the
+record is `partial` rather than `succeeded`. That should be rare: **do not
+schedule `prune-evidence` to overlap `policy-run`**. The purge selects what no
+surviving run cites and then deletes; a policy run starting in between writes
+citations the selection did not see, and every such row is a refusal — harmless,
+but a `partial` record every night and a purge that does less than it counted.
+`--batch` accepts up to 10,000, and `CPM_EVIDENCE_RETENTION_DAYS` above 3,650
+(ten years) is refused at boot as a unit mistake. Lowering the retention is not
+refused — the setting is the declaration — but the first purge after it logs
+`retention.cutoff_moved`, naming the previous and the new cut-off, so the days
+about to go are on the record before they do.
+
+### The floor rule: what a replay would read is never removed
+
+Every policy pass reads **the newest row at or before its run's cut-off**, per
+package, and reads every row at that instant as one sweep. The purge keys each
+table a little more finely than that, and deliberately so — per `(package,
+channel, platform)` for `conda_package_snapshots`, per `(package, channel)` for
+`license_findings`, per `(package, advisory)` for the two advisory tables, per
+`(package, python_series)` for the two Python 3.14 tables, per `(package,
+source_package_key)` for `inventory_snapshots`, per package for the rest. A
+finer key than the reader's can only keep *more*: a row that is the newest under
+its key at the cut-off is in the sweep the reader takes. What the superset costs
+is one row per advisory, per channel, per platform or per source key ever seen,
+kept for ever however long ago the advisory closed or the channel stopped
+publishing — a bounded, slowly growing tail, not a table that shrinks to zero.
+
+So the purge removes a row only when a strictly newer row exists under the same
+key (**a package's newest row per table is never purged**, ties included,
+however old), **no surviving policy run's cut-off falls between the row and that
+newer one** — the interval in which a replay of that run would read it — and
+**nothing that survives still cites it**: a derived row of a surviving run, or a
+KEV row that is not itself going. Rows kept by any of those are counted as
+`kept_by_rule` on the record. The consequence for a reviewer is the one the
+replay section states: a run still in the ledger reproduces after any number of
+purges, and a cut-off no run holds is refused with the reason.
+
+### The door, and the indexes
+
+The append-only base refuses `delete()` in every spelling, and still does. The
+purge goes through **one audited door** — `AppendOnlyQuerySet.retire(door=…)`,
+which opens only for a token `core/retention.py` alone constructs, consults
+Django's collector so a `PROTECT` relation still refuses, and then issues one
+`DELETE … WHERE id IN (…)` over exactly the batch. The mutation-path audit
+licenses that one call and the purge's one manager delete by count; a second
+deletion path anywhere fails the gate.
+
+Every cut-off scan has an index that leads with its time column: a bare
+`observed_at` index on each of the eleven purged evidence tables, `finished_at`
+and `started_at` on `collection_runs`, `finished_at` and `evidence_cutoff` on
+`policy_runs`. They are declared on the models and reconciled by the migration
+audit; the plans were measured on PostgreSQL rather than assumed, and the story
+records them. On a table with a handful of rows the planner will still choose a
+sequential scan — that is the planner being right, not the index being absent.
 
 ## Replaying a policy run: reproducing what the system concluded
 
@@ -3204,6 +3345,29 @@ a naive one would read a window nobody chose. Stating a version and a cut-off wi
 `--of-run` runs the policy but compares nothing, and the output says so rather than
 reporting a success it did not check.
 
+### A replay reaches exactly as far as the ledger
+
+`CPM-OPERATE-S07` purges evidence older than `CPM_EVIDENCE_RETENTION_DAYS` every
+night, and it keeps every row a policy run still in the ledger read at its
+cut-off — so **`--of-run` of any run the ledger holds reproduces after any
+number of purges, however old the run**. The run behind the current rollup is
+never purged; an older run is either still there or was purged with its derived
+rows, and asking for it is `no policy run has id N`, exactly as an id that never
+existed is. A cut-off stated by hand is admitted only when a run still in the
+ledger holds exactly that instant; at any other instant the purge has been free
+to remove what a run there would read, and the command refuses before running
+anything:
+
+```
+CommandError: no retained run read at this cut-off (2026-05-01T02:00:00+00:00);
+the nightly purge was free to remove what a run there would read, so a replay at
+it would not be a reproduction (CPM-FR-22, CPM-OPERATE-S07). Name a run with
+--of-run, or state the evidence_cutoff of a run still in the ledger.
+```
+
+A refusal rather than a replay against a thinner history, because the
+difference report would then blame a pass for what the purge did.
+
 ### It rewrites current health — know this before you run it
 
 **This is the one consequence that surprises people.** `package_health` holds exactly
@@ -3228,7 +3392,9 @@ that is replaced.
 **It collects nothing.** No collector runs, no outbound call is made, and no evidence
 row is written or changed. Every pass reads evidence `observed_at <= cutoff`, and
 evidence is append-only, so the rows the original run read are still there and still
-say the same thing. That is what "re-runnable against historical evidence" means.
+say the same thing — for as long as the run itself is in the ledger, which is
+the one caveat above. That is what "re-runnable against historical evidence"
+means.
 
 **It does not touch the run it replays.** Derived tables are keyed
 `(package, policy_run)`, so the replay adds its own rows beside the original's. That
