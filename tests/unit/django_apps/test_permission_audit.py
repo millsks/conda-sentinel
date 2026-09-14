@@ -93,13 +93,17 @@ THE_IMPLEMENTATION: Final[str] = f"{PRODUCT_TREE}/core/permissions.py"
 
 #: The reads licensed outside the implementation, spelled exactly and spent exactly.
 #:
-#: Two entries, and neither is a role check -- which is the reason they are licensed
+#: Three entries, and none is a role check -- which is the reason they are licensed
 #: rather than the reason they are suspicious. `CPM-AD-14` makes the audited identity
 #: override a governed human write and gates it on a Django *permission*, and
 #: `core/permissions.py`'s own docstring says in as many words that it "stays where
 #: Django's permission system already puts it". `_require_permitted` is that gate.
 #: `CPM-OPERATE-S03` added the second governed write -- the inventory table -- and
 #: its service carries the same gate on the same terms, one read, spent here.
+#: `CPM-OPERATE-S08`'s manual recollection is not a governed write, but it spends a
+#: source's allowance on somebody's say-so and `CPM-AD-13` gates it the same way;
+#: its service's one read serves both the request and the page's `can_request`,
+#: so the view draws its button on a boolean and asks nothing itself.
 #:
 #: Recorded as the exact list the sweep must find rather than as a licensed
 #: *attribute*, on the terms `tests/unit/django_apps/test_clock_audit.py` sets: a
@@ -108,6 +112,7 @@ THE_IMPLEMENTATION: Final[str] = f"{PRODUCT_TREE}/core/permissions.py"
 #: licence for something that is no longer there.
 RECORDED_EXEMPTIONS: Final[dict[str, tuple[str, ...]]] = {
     f"{PRODUCT_TREE}/collectors/inventory.py": ("actor.has_perm",),
+    f"{PRODUCT_TREE}/collectors/recollection.py": ("actor.has_perm",),
     f"{PRODUCT_TREE}/identity/services.py": ("actor.has_perm",),
 }
 

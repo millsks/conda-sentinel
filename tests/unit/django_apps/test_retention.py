@@ -295,7 +295,11 @@ def test_the_roster_and_the_exclusions_are_exactly_the_evidence_models() -> None
     assert len(EVIDENCE_ROSTER) == PURGED_TABLES
     assert purged & EXCLUDED_EVIDENCE == set()
     assert purged | EXCLUDED_EVIDENCE == classified
-    assert {"collectors.InventoryChange", "identity.IdentityOverride"} == EXCLUDED_EVIDENCE
+    assert {
+        "collectors.InventoryChange",
+        "collectors.PackageRecollection",
+        "identity.IdentityOverride",
+    } == EXCLUDED_EVIDENCE
 
 
 def test_every_roster_entry_resolves_to_an_append_only_model_with_a_table() -> None:

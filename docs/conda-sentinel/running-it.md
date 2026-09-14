@@ -538,7 +538,7 @@ the worker, beat and flower lines are unaffected.
 |---|---|---|
 | Home | `/conda-sentinel/` | you want to know how current the picture is |
 | Packages | `/conda-sentinel/packages/` | you are looking a package up, or working down a ranking |
-| Package detail | `/conda-sentinel/packages/<name>/` | you want to know *why* a status says that |
+| Package detail | `/conda-sentinel/packages/<name>/` | you want to know *why* a status says that — and, holding the security-reviewer or leadership role, to press **Collect now** and have every applicable collector re-run on that package without waiting for the sweep |
 | Queues | `/conda-sentinel/queues/<queue>/` | you are doing the work |
 | Reports | `/conda-sentinel/reports/<slug>/` | a recurring question — KEV, feedstock lag, licences |
 | Coverage | `/conda-sentinel/coverage/` | you want to know what the product **cannot** see |

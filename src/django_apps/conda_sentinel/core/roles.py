@@ -48,6 +48,9 @@ __all__ = [
     "INVENTORY_CHANGE_PERMISSION",
     "LEADERSHIP",
     "PACKAGING_ENGINEER",
+    "RECOLLECT_APP_LABEL",
+    "RECOLLECT_CODENAME",
+    "RECOLLECT_PERMISSION",
     "ROLE_ENVIRONMENT_VARIABLES",
     "ROLE_GROUP_PERMISSIONS",
     "SECURITY_REVIEWER",
@@ -111,6 +114,20 @@ INVENTORY_APP_LABEL: Final = "collectors"
 INVENTORY_CHANGE_CODENAME: Final = "change_inventory"
 INVENTORY_CHANGE_PERMISSION: Final = f"{INVENTORY_APP_LABEL}.{INVENTORY_CHANGE_CODENAME}"
 
+#: The manual recollection and the codename that gates it (`CPM-OPERATE-S08`,
+#: `CPM-UJ-1`). Not a governed write -- "Collect now" mutates no reference data;
+#: it writes one audit row and enqueues the same per-package tasks a sweep does,
+#: with `force=True` -- but it spends a source's allowance on somebody's say-so,
+#: and `CPM-AD-13` puts that behind a permission a refusal can name.
+#: `collectors.PackageRecollection` attaches the codename on its
+#: `Meta.permissions` and `collectors/recollection.py` is the one module that
+#: checks it. Declared here for the reason the two pairs above are, and
+#: reconciled against the model's `_meta` by
+#: `tests/integration/django_apps/test_recollection.py`.
+RECOLLECT_APP_LABEL: Final = "collectors"
+RECOLLECT_CODENAME: Final = "recollect_package"
+RECOLLECT_PERMISSION: Final = f"{RECOLLECT_APP_LABEL}.{RECOLLECT_CODENAME}"
+
 #: What each role group may do, keyed by **role slot** and never by group name.
 #:
 #: **One grant, and it is the first.** Every tuple here was empty until
@@ -134,13 +151,21 @@ INVENTORY_CHANGE_PERMISSION: Final = f"{INVENTORY_APP_LABEL}.{INVENTORY_CHANGE_C
 #: on every database, new and existing, because a data migration that already ran
 #: is not re-run by editing it.
 #:
-#: **Leadership alone, and the other two stay empty on purpose.** The security
-#: and compliance reviewer and the packaging engineer read the review queue and
-#: act on what it says; correcting governed reference data is a different act,
-#: and `CPM-IDENTITY-S05` says in as many words that neither slot receives it.
-#: Two empty tuples beside one grant are also what keeps this table honest: they
-#: are what a test asserts is *still* empty, so a second permission attached to
-#: the wrong slot is a failure rather than a diff nobody reads.
+#: **Leadership alone holds the governed writes, and the packaging engineer holds
+#: nothing.** The security and compliance reviewer and the packaging engineer
+#: read the review queue and act on what it says; correcting governed reference
+#: data is a different act, and `CPM-IDENTITY-S05` says in as many words that
+#: neither slot receives it. The packaging engineer's empty tuple is what keeps
+#: this table honest: it is what a test asserts is *still* empty, so a
+#: permission attached to the wrong slot is a failure rather than a diff nobody
+#: reads.
+#:
+#: **The recollection is the third grant, and the first a reviewer holds
+#: (`CPM-OPERATE-S08`).** After an override or a fix it is the reviewer who
+#: waits a day for the sweep, so `CPM-UJ-1`'s manual recollection is theirs and
+#: leadership's; the packaging engineer's queue is remediation, and a re-run is
+#: not a remediation. Granted by `core/0013_grant_recollect` on the terms
+#: `0011` set: its own codename and no other.
 #:
 #: **Deleting a codename from this table does not revoke the grant, and there is
 #: no way to make it.** The role contract is a *secondary* declaration over the
@@ -158,9 +183,9 @@ INVENTORY_CHANGE_PERMISSION: Final = f"{INVENTORY_APP_LABEL}.{INVENTORY_CHANGE_C
 #: directions, so it is a property somebody demonstrated rather than a caveat in
 #: a comment.
 ROLE_GROUP_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
-    SECURITY_REVIEWER: (),
+    SECURITY_REVIEWER: (RECOLLECT_PERMISSION,),
     PACKAGING_ENGINEER: (),
-    LEADERSHIP: (IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION),
+    LEADERSHIP: (IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION, RECOLLECT_PERMISSION),
 }
 
 

@@ -76,6 +76,7 @@ from conda_sentinel.identity.models import Package
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
+    from datetime import timedelta
 
     from conda_sentinel.core.clock import Clock
     from conda_sentinel.core.models import RunLedgerModel
@@ -86,6 +87,7 @@ __all__ = [
     "collection_run",
     "current_trace_id",
     "policy_run",
+    "runs_in_flight",
 ]
 
 logger = structlog.get_logger(__name__)
@@ -122,6 +124,35 @@ FINALIZED_FIELDS = ("status", "detail", "finished_at")
 #: The event a failed finalization is logged under. Named so the case that
 #: asserts the log and the code that emits it cannot drift.
 FINALIZATION_FAILED_EVENT = "run_ledger_finalization_failed"
+
+
+def runs_in_flight(package_id: int, *, now: datetime, window: timedelta) -> list[CollectionRun]:
+    """Return the runs on one package that started within a window and have not been finalized.
+
+    The ledger's own answer to "is this package being collected right now",
+    read by `CPM-OPERATE-S08`'s recollection to refuse a second press and by
+    the package page to draw its "In flight" panel -- one query, so the two
+    cannot disagree. A row older than the window is a killed worker's: no live
+    run outlasts `CELERY_TASK_TIME_LIMIT`, so an open row that has is one the
+    recorder's `finally` never reached, and it must not lock a package for the
+    ninety days the purge keeps it.
+
+    Args:
+        package_id: The package, by the integer primary key `CPM-AD-3` fixes.
+        now: The instant the window is measured back from.
+        window: How far back an open row still counts. The caller derives it
+            from the task time limit; this module does not read settings.
+
+    Returns:
+        Every unfinished row on the package started at or after `now - window`,
+        newest first.
+
+    """
+    return list(
+        CollectionRun.objects.unfinished()
+        .filter(package_id=package_id, started_at__gte=now - window)
+        .order_by("-started_at", "-id"),
+    )
 
 
 def current_trace_id() -> str:

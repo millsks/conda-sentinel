@@ -42,6 +42,7 @@ from __future__ import annotations
 from typing import Final
 
 from conda_sentinel.core.outcomes import OutcomeState
+from conda_sentinel.core.runs import RunState
 from conda_sentinel.identity.confidence import IdentityConfidence
 from conda_sentinel.policies.outcomes import CurrencyOutcome
 from conda_sentinel.policies.outcomes import FeedstockOutcome
@@ -77,10 +78,10 @@ PLAIN: Final[str] = "tone-plain"
 
 #: What each status looks like, by value.
 #:
-#: Five tones, and they are the stylesheet's: `ok`, `warn`, `crit`, `unknown`,
-#: `notfound`, `na`, `error`, `plain`. The four sentinels take the four that are
-#: theirs alone, so no domain value can be mistaken for one and no sentinel can be
-#: mistaken for a verdict.
+#: The tones are the stylesheet's: `ok`, `warn`, `crit`, `unknown`, `notfound`,
+#: `na`, `error`, `plain`, and since `CPM-OPERATE-S08` `info`. The four sentinels
+#: take the four that are theirs alone, so no domain value can be mistaken for one
+#: and no sentinel can be mistaken for a verdict.
 #:
 #: **Read as one flat table rather than one per vocabulary**, because the values are
 #: globally unique by construction: `outcome_type` composes each domain vocabulary
@@ -162,6 +163,20 @@ TONES: Final[dict[str, str]] = {
     # because that is what the next ingestion records about it.
     INVENTORY_ACTIVE: "tone-ok",
     INVENTORY_RETIRED: "tone-notfound",
+    # The run ledger's five states (`CPM-OPERATE-S08`), which the package page
+    # draws beside the evidence and in its "In flight" panel. Not outcomes -- a
+    # run's state is about the run, not about the package (`core/runs.py` keeps
+    # the two vocabularies apart) -- and toned on that basis: `running` is
+    # `info`, the one tone that means "look here, nothing is wrong yet", so a
+    # run in flight is visible without reading as a verdict; `failed` is `crit`
+    # because a run that failed is what a stale status is usually explained by;
+    # `partial` is work; `skipped` is the window declining to observe again,
+    # which is emphatically not a failure and gets no colour at all.
+    RunState.RUNNING.value: "tone-info",
+    RunState.SUCCEEDED.value: "tone-ok",
+    RunState.PARTIAL.value: "tone-warn",
+    RunState.FAILED.value: "tone-crit",
+    RunState.SKIPPED.value: "tone-plain",
 }
 
 #: Every vocabulary a surface renders, for the audit that checks this table covers
@@ -179,6 +194,7 @@ TONED_VOCABULARIES: Final[tuple[type, ...]] = (
     PriorityBucket,
     WorkType,
     IdentityConfidence,
+    RunState,
 )
 
 

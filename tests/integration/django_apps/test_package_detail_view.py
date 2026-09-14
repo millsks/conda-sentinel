@@ -42,11 +42,14 @@ from rest_framework.test import APIClient
 
 from conda_sentinel.collectors.match_confidence import MatchConfidence
 from conda_sentinel.collectors.models import LicenseFinding
+from conda_sentinel.collectors.models import PackageRecollection
 from conda_sentinel.collectors.models import PythonReadinessAssessment
 from conda_sentinel.collectors.models import PythonVerificationResult
 from conda_sentinel.collectors.models import VulnerabilityFinding
 from conda_sentinel.collectors.outcomes import MATCHED
 from conda_sentinel.collectors.outcomes import VERIFIED_COMPATIBLE
+from conda_sentinel.collectors.recollection import in_flight_window
+from conda_sentinel.core.clock import SystemClock
 from conda_sentinel.core.models import CollectionRun
 from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.core.models import PolicyRun
@@ -840,6 +843,95 @@ def test_the_run_ledger_is_shown_and_is_labelled_as_not_evidence() -> None:
     assert len(response.context["runs"]) == 1
     assert "429 rate limited" in body
     assert "not evidence" in body
+
+
+@pytest.mark.django_db
+def test_runs_in_flight_are_listed_above_the_ledger_and_a_killed_workers_row_is_not() -> None:
+    """`CPM-OPERATE-S08`'s panel, on the recollection's own rule.
+
+    Two open rows: one started minutes ago is in flight; one started twice the
+    window ago is a killed worker's, is not in the panel, and still appears in
+    the ledger as `running` -- which is the observation `CPM-AD-2`'s exemption
+    exists to make possible.
+    """
+    run, package = a_run(), a_package()
+    a_rollup_row(package, run)
+    now = SystemClock().now()
+    CollectionRun.objects.create(
+        collector="feedstock", package=package, started_at=now - timedelta(minutes=3), status=RunState.RUNNING
+    )
+    CollectionRun.objects.create(
+        collector="kev",
+        package=package,
+        started_at=now - in_flight_window() * 2,
+        status=RunState.RUNNING,
+    )
+
+    response = a_reader().get(detail_url())
+    body = body_of(response)
+
+    assert [entry.collector for entry in response.context["in_flight"].runs] == ["feedstock"]
+    assert response.context["in_flight"].pending is None
+    assert [entry.collector for entry in response.context["runs"]] == ["feedstock", "kev"]
+    assert "In flight" in body
+    assert "1 run open" in body
+    # Both open rows are drawn as running, in the ledger and -- for the one in
+    # flight -- in the panel above it too.
+    assert body.count('class="chip tone-info"') == len(response.context["runs"]) + len(
+        response.context["in_flight"].runs
+    )
+
+
+@pytest.mark.django_db
+def test_the_last_recollection_is_shown_beneath_the_ledger_naming_who_asked() -> None:
+    """The audit row, read as the record of a human act: actor, when, collectors, and what was not offered."""
+    run, package = a_run(), a_package()
+    a_rollup_row(package, run)
+    actor = UserFactory.create(username="who-pressed")
+    PackageRecollection.objects.create(
+        package=package,
+        actor=actor,
+        observed_at=OLDEST,
+        collectors=["feedstock"],
+        not_offered=["pypi_release"],
+        trace_id="0" * 31 + "1",
+    )
+    PackageRecollection.objects.create(
+        package=package,
+        actor=actor,
+        observed_at=MIDDLE,
+        collectors=["source_release", "resolve_identity"],
+        not_offered=[],
+        trace_id="",
+    )
+
+    response = a_reader().get(detail_url())
+    body = body_of(response)
+
+    assert response.context["recollection"].observed_at == MIDDLE, "the newest, not the first"
+    assert "Last recollection" in body
+    assert "who-pressed" in body
+    assert "<dt>asked</dt>" in body, "asked for, not published: the row is written before the hand-off"
+    assert "source_release, resolve_identity" in body
+    assert "not offered" not in body, "an empty list draws no row"
+    # Both presses are older than the window, so neither is pending and the
+    # button is offered.
+    assert response.context["in_flight"].pending is None
+
+
+@pytest.mark.django_db
+def test_a_package_nobody_has_recollected_shows_neither_panel() -> None:
+    """Absence draws nothing: no empty in-flight panel, no blank last-recollection panel."""
+    run, package = a_run(), a_package()
+    a_rollup_row(package, run)
+
+    response = a_reader().get(detail_url())
+    body = body_of(response)
+
+    assert not response.context["in_flight"]
+    assert response.context["recollection"] is None
+    assert "In flight" not in body
+    assert "Last recollection" not in body
 
 
 @pytest.mark.django_db

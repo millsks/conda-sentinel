@@ -99,9 +99,9 @@ your directory's business, read at call time from configuration:
 
 | Slot | Variable | Reaches |
 |---|---|---|
-| `security_reviewer` | `CPM_SECURITY_REVIEWER_GROUP` | Compliance review queue; risk acceptance |
+| `security_reviewer` | `CPM_SECURITY_REVIEWER_GROUP` | Compliance review queue; risk acceptance; **Collect now** on a package page |
 | `packaging_engineer` | `CPM_PACKAGING_ENGINEER_GROUP` | Remediation queue |
-| `leadership` | `CPM_LEADERSHIP_GROUP` | Identity review queue; the identity override; the inventory page |
+| `leadership` | `CPM_LEADERSHIP_GROUP` | Identity review queue; the identity override; the inventory page; **Collect now** on a package page |
 
 All three reach the read surfaces — Home, Packages, Reports, Coverage. The queues are
 where they diverge.
@@ -131,7 +131,26 @@ one for each kind of surface, and all three resolve through `granted_roles()`:
 | Any surface open to all three | `AnyProductRole` | the packages API |
 
 A refusal is logged under the event `authorization.refused`, **with the acting user
-identity** — that is the string to alert on.
+identity** — that is the string to alert on. Three services carry a permission of
+their own beneath the role check and log their refusals under the same prefix:
+`authorization.inventory_change_refused` (the inventory page),
+`authorization.override_refused` (the identity override), and
+`authorization.recollection_refused` — a **Collect now**
+press by somebody whose group holds the role but not `collectors.recollect_package`,
+which `core/0013_grant_recollect` attaches to the security-reviewer and leadership
+groups on every `migrate`. Alert on the prefix and you have all of them.
+
+!!! note "Collect now is gated per package, and that is an accepted risk"
+
+    A press is refused while *that package* is in flight, and nothing counts
+    presses across the estate: a reviewer holding the permission can press
+    **Collect now** on package after package, and each press spends the
+    sources' allowances the sweep would otherwise spend. That is the reviewer's
+    own allowance to spend — the permission is granted to two roles for exactly
+    that judgement — and every press is on the record in `package_recollections`
+    with the acting identity, so a loop is visible after the fact. An
+    estate-wide bound is a product decision nobody has asked for; if one is
+    wanted, it belongs in the service, not in a view.
 
 What a refused person reads names the *surface's requirement*, not their own
 memberships:
@@ -169,9 +188,9 @@ anybody by.
 
 | Persona | Holds | Reaches |
 |---|---|---|
-| `reviewer-persona` | security review | compliance review |
+| `reviewer-persona` | security review | compliance review, Collect now |
 | `engineer-persona` | packaging engineering | remediation |
-| `leader-persona` | leadership | identity review, the identity override, the inventory page |
+| `leader-persona` | leadership | identity review, the identity override, the inventory page, Collect now |
 | `reader-persona` | nothing | nothing — the zero-groups case |
 | `staff-persona` | Django staff only | the admin |
 | `operations-persona` | all three roles **and** staff | everything |

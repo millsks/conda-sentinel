@@ -150,6 +150,7 @@ from conda_sentinel.core.models import AppendOnlyError
 from conda_sentinel.core.models import AppendOnlyModel
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.core.roles import INVENTORY_CHANGE_CODENAME
+from conda_sentinel.core.roles import RECOLLECT_CODENAME
 from conda_sentinel.identity.models import IdentityConfidence
 from conda_sentinel.identity.models import Package
 
@@ -199,6 +200,7 @@ __all__ = [
     "READINESS_SERIES_CONSTRAINT",
     "READINESS_SIGNAL_CONSTRAINT",
     "READINESS_TIME_INDEX",
+    "RECOLLECTION_READ_INDEX",
     "RELEASE_FACTS_CONSTRAINT",
     "RELEASE_READ_INDEX",
     "RELEASE_TIME_INDEX",
@@ -224,6 +226,7 @@ __all__ = [
     "InventorySnapshot",
     "KevFinding",
     "LicenseFinding",
+    "PackageRecollection",
     "PyPIReleaseSnapshot",
     "PythonReadinessAssessment",
     "PythonVerificationResult",
@@ -827,6 +830,11 @@ INVENTORY_CHANGE_REASON_CONSTRAINT: Final[str] = "inventory_change_row_states_it
 INVENTORY_CHANGE_AUTHOR_CONSTRAINT: Final[str] = "inventory_change_names_a_person_or_a_file"
 INVENTORY_RETIRED_INDEX: Final[str] = "inventory_retired_at"
 INVENTORY_CHANGE_READ_INDEX: Final[str] = "inv_change_entry_observed"
+
+#: The one read `package_recollections` serves: the newest recollection of one
+#: package, which the detail page shows beneath the run ledger
+#: (`CPM-OPERATE-S08`). Named on `INVENTORY_CHANGE_READ_INDEX`'s terms.
+RECOLLECTION_READ_INDEX: Final[str] = "recollection_pkg_observed"
 
 
 class InventoryReadError(ValueError):
@@ -3627,3 +3635,103 @@ class InventoryChange(AppendOnlyModel):
         who = f"user {self.actor_id}" if self.actor_id is not None else (self.origin or "nobody")
         when = "never" if self.observed_at is None else self.observed_at.isoformat()
         return f"{self.prior_package_name or '(no row)'} -> {self.new_package_name} on {scope} by {who} at {when}"
+
+
+class PackageRecollection(AppendOnlyModel):
+    """One person's request to re-run every applicable collector on one package. Table `package_recollections`.
+
+    `CPM-UJ-1`'s manual recollection, given a surface by `CPM-OPERATE-S08`: a
+    reviewer who has just corrected an identity, or is waiting on a fix upstream,
+    presses "Collect now" on the package page rather than waiting a day for the
+    sweep. What the press does is written here first -- who asked, when, for which
+    package, and which collectors were published and which were not -- and then
+    `collectors/recollection.py` publishes one per-package collection task per name
+    in `collectors`, with `force=True`, after the row commits.
+
+    **An audit row, not a run, and "asked for" rather than "published".** The
+    runs are `core.CollectionRun`'s, one per collector, written by the worker
+    when each task starts and finalised when it ends; this row is the record
+    that somebody *asked*, written before the publish and never updated, so it
+    stands whether or not the broker took every task. What the broker did with
+    each name is on the service's receipt and in the log, never here. Evidence-classified because a request is an
+    observation of a human act, on the terms `InventoryChange` and
+    `identity.IdentityOverride` are: append-only (`CPM-AD-2`), one row per act,
+    excluded from the nightly purge (`core/retention.py`).
+
+    **The actor is never NULL.** Nothing unattended writes here -- a scheduled
+    sweep is `collectors/sweep.py`'s and leaves no recollection row -- so unlike
+    `InventoryChange.actor` there is no origin to name instead of a person.
+    `PROTECT`, on the same terms: deleting a user must not delete the record of
+    what they asked for.
+
+    **Two lists of names, as JSON.** `collectors` holds the names the press
+    asked for, in the registry's order; `not_offered` the swept collectors whose
+    own selection did not contain the package -- a `pypi_release` for a package
+    with no PyPI mapping, say. Columns rather than rows, on the terms
+    `core.BackgroundJob.parameters` takes: the set of collectors is code, declared
+    and never discovered, and a row per name would be a table keyed on something
+    with no table of its own. Names, and nothing more: the runs themselves are on
+    the ledger, correlated by `trace_id`.
+
+    No unique constraint of any kind (`CPM-AD-2`): two presses are two requests,
+    and the second is refused or admitted by the service on what the ledger says,
+    never by this table.
+    """
+
+    #: The package the request is about. `PROTECT` for `CPM-AD-25`'s reason: no
+    #: package row is ever deleted, and this row must not be the thing a deletion
+    #: cascades through.
+    package = models.ForeignKey(
+        Package,
+        on_delete=models.PROTECT,
+        related_name="recollections",
+        verbose_name=_("package"),
+    )
+
+    #: Who asked. Non-null: see the class docstring.
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="package_recollections",
+        verbose_name=_("actor"),
+    )
+
+    #: The collector names the press asked for, in registry order. Asked, not
+    #: published: see the class docstring.
+    collectors = models.JSONField(_("collectors"), default=list, blank=True)
+
+    #: The swept collector names whose selection did not contain the package.
+    not_offered = models.JSONField(_("not offered"), default=list, blank=True)
+
+    #: The `trace_id` of the request the press was made in, formatted `032x`
+    #: (`CPM-AD-15`); empty when no span was active, which never blocks the write.
+    #: The Celery instrumentor propagates the same trace into every task the
+    #: service publishes, so each run's row carries it too -- which is how the runs
+    #: a press produced are told from the sweep's.
+    trace_id = models.CharField(_("trace id"), max_length=_TRACE_ID_LENGTH, blank=True, default="")
+
+    class Meta:
+        """The table, newest first, and the permission the request requires."""
+
+        db_table = "package_recollections"
+        verbose_name = _("package recollection")
+        verbose_name_plural = _("package recollections")
+        ordering = ("-observed_at", "-id")
+        indexes = [
+            models.Index(fields=["package", "-observed_at"], name=RECOLLECTION_READ_INDEX),
+        ]
+        #: The permission `CPM-AD-13` requires of the actor, declared on the model
+        #: the request records itself in. The codename is `core/roles.py`'s,
+        #: imported rather than restated, on `InventoryChange`'s terms.
+        permissions = [(RECOLLECT_CODENAME, "Can request a package recollection")]
+
+    def __str__(self) -> str:
+        """Return which package, by whom, when, and what was published.
+
+        Returns:
+            A one-line summary, read off the id columns rather than the related
+            objects for the reason `IdentityOverride.__str__` gives.
+
+        """
+        when = "never" if self.observed_at is None else self.observed_at.isoformat()
+        return f"recollection of package {self.package_id} by user {self.actor_id} at {when}: {self.collectors}"

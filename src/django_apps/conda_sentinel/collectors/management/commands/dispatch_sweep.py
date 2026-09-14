@@ -29,11 +29,11 @@ makes no outbound call and writes nothing.
 
 **`--all` is the swept set, derived rather than listed.** Every registered
 collector whose `selectable_packages()` is not `None`, in the registry's own
-deterministic order -- the same rule the dispatcher applies, so whatever it
-refuses is left out here. `tests/unit/django_apps/test_operator_commands.py`
-reconciles that set against the collectors `CELERY_BEAT_SCHEDULE` names, so the
-two cannot drift. A registry with nothing swept is refused rather than reported
-as an empty success.
+deterministic order -- `core/registry.py`'s `swept_collectors()`, the same rule
+the dispatcher applies, so whatever it refuses is left out here.
+`tests/unit/django_apps/test_operator_commands.py` reconciles that set against
+the collectors `CELERY_BEAT_SCHEDULE` names, so the two cannot drift. A registry
+with nothing swept is refused rather than reported as an empty success.
 
 **The count comes from the ledger, and from this call's row.** `collect_sweep`
 returns the run state as a string; how many packages the dispatch enqueued lives
@@ -71,13 +71,11 @@ from conda_sentinel.collectors.tasks import collect_sweep
 from conda_sentinel.core.models import CollectionRun
 from conda_sentinel.core.operator_commands import WHERE_TO_WATCH_A_COLLECTION
 from conda_sentinel.core.operator_commands import runs_eagerly
-from conda_sentinel.core.registry import registered_collectors
 from conda_sentinel.core.registry import registrations
+from conda_sentinel.core.registry import swept_collectors
 
 if TYPE_CHECKING:
     from argparse import ArgumentParser
-
-    from conda_sentinel.core.collection import Collector
 
 __all__ = [
     "SWEEP_ENQUEUED_EVENT",
@@ -116,23 +114,14 @@ UNRECORDED: Final[str] = "unrecorded"
 ENQUEUED_COUNT: Final[re.Pattern[str]] = re.compile(r"\benqueued (\d+)\b")
 
 
-def swept_collectors() -> tuple[type[Collector], ...]:
-    """Return every registered collector the dispatch can sweep, in registry order.
-
-    Returns:
-        The registered classes whose `selectable_packages()` is not `None` --
-        the same predicate `collectors/sweep.py` applies, so a collector this
-        leaves out is one the dispatch would refuse.
-
-    """
-    return tuple(collector for collector in registered_collectors() if collector.selectable_packages() is not None)
-
-
 def swept_collector_names() -> tuple[str, ...]:
     """Return the names `--all` dispatches, in the order it dispatches them.
 
     Returns:
-        The declared names of `swept_collectors()`.
+        The declared names of `core/registry.py`'s `swept_collectors()` -- the
+        predicate lived here until `CPM-OPERATE-S08` moved it beside the registry,
+        so the page's "Collect now" and this command derive the swept set from one
+        function.
 
     """
     return tuple(collector.name for collector in swept_collectors())

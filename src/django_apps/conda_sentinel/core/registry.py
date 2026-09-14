@@ -44,8 +44,13 @@ typo.
 
 from __future__ import annotations
 
+from types import GeneratorType
 from typing import TYPE_CHECKING
+from typing import Any
 from typing import Final
+
+import structlog
+from django.db.models import QuerySet
 
 from conda_sentinel.core.collection import Collector
 
@@ -53,12 +58,36 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = [
+    "PACKAGE_COLUMN",
+    "PACKAGE_MODEL_LABEL",
+    "SELECTION_NOT_ASKED_EVENT",
     "CollectorRegistryError",
     "register",
     "registered_collectors",
     "registrations",
+    "selects",
+    "swept_collectors",
     "unregister",
 ]
+
+#: The label of the model a selection over packages themselves is a queryset of.
+#:
+#: A label rather than the class: `core` may not import `identity`'s models
+#: outside the four modules `tests/unit/django_apps/test_app_layering_audit.py`
+#: records, and `core/models.py` names the same relation the same way
+#: (`"identity.Package"`) for the same reason. `selects` below reads it off the
+#: queryset's own `_meta` to decide which column names the package.
+PACKAGE_MODEL_LABEL: Final[str] = "identity.Package"
+
+#: The column a selection over any other table names the package by: the
+#: `attname` Django gives a `ForeignKey` called `package`.
+PACKAGE_COLUMN: Final[str] = "package_id"
+
+#: What `selects` logs when it answers `False` without asking the selection:
+#: a generator it will not iterate, or items that are not package keys.
+SELECTION_NOT_ASKED_EVENT: Final[str] = "registry.selection_not_asked"
+
+logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 #: The registered collector classes, by the name each declares.
 #:
@@ -174,6 +203,134 @@ def registered_collectors() -> tuple[type[Collector], ...]:
 
     """
     return tuple(_REGISTERED[name] for name in sorted(_REGISTERED))
+
+
+def swept_collectors() -> tuple[type[Collector], ...]:
+    """Return every registered collector that is swept one package at a time, in registry order.
+
+    The predicate `collectors/sweep.py` applies before it dispatches, applied to
+    the whole registry: a `selectable_packages()` that answers `None` says the
+    collector is not swept per package (`CPM-AD-25`), and everything else is.
+    Declared here rather than in the `dispatch_sweep` command, where
+    `CPM-OPERATE-S02` first wrote it, because `CPM-OPERATE-S08`'s recollection
+    asks the same question from the web process and may import neither the
+    command nor the dispatcher.
+
+    Returns:
+        The registered classes whose selection is not `None`, ordered as
+        `registered_collectors()` orders them. A collector this leaves out is
+        one the dispatch would refuse by name.
+
+    """
+    return tuple(collector for collector in registered_collectors() if collector.selectable_packages() is not None)
+
+
+def selects(collector: type[Collector], package_id: int) -> bool:
+    """Report whether one collector's own selection contains one package.
+
+    The question `CPM-OPERATE-S08`'s "Collect now" asks before it publishes: a
+    forced collection of a collector that cannot ask about the package writes a
+    `failed` run with a refusal on the record, so only the collectors whose
+    `selectable_packages()` holds the package are offered.
+
+    **The selection is asked, never re-derived.** Each collector declares its
+    precondition beside its refusals, and restating any of them here would be
+    the second table that hook's docstring exists to prevent. What this function
+    knows is only the *shapes* a selection takes, and it answers each without
+    reading ten thousand keys:
+
+    * A lazy queryset over `identity.Package` (`pk` names the package) or over a
+      table that references one (`package_id` does) is narrowed by a filter and
+      asked whether a row exists. A queryset this cannot narrow honestly -- one
+      already sliced, one combined with `union`/`intersection`/`difference`, or
+      one over a model with neither the package label nor a `package_id` column
+      -- is refused with `CollectorRegistryError` rather than answered by a
+      `FieldError` out of a request.
+    * A generator is answered `False` without being iterated. The two the
+      product declares are the empty ones an undeclared advisory or KEV source
+      answers with, and each says why *on first use*; iterating one here would
+      emit that warning on every press. A collector that wants to be offered
+      from the page answers a queryset or a sequence, never a generator.
+    * Any other iterable is materialised and searched, provided every item is
+      an `int`; an item of another shape -- a tuple, a model instance -- means
+      the selection is not one of package keys, and it is answered `False`
+      with a logged event rather than by a coincidental `==`.
+
+    Args:
+        collector: The registered class.
+        package_id: The package, by the integer primary key `CPM-AD-3` fixes.
+
+    Returns:
+        True when the selection contains the package. False when it does not,
+        when the collector is not swept per package at all -- `None` is not a
+        selection, and a collector that is never dispatched is never offered --
+        or when the selection is a generator or carries items that are not keys.
+
+    Raises:
+        CollectorRegistryError: When the selection is a queryset of a shape
+            this cannot narrow. See above.
+
+    """
+    selection = collector.selectable_packages()
+    if selection is None:
+        return False
+    if isinstance(selection, QuerySet):
+        return _queryset_selects(collector, selection, package_id)
+    if isinstance(selection, GeneratorType):
+        logger.info(SELECTION_NOT_ASKED_EVENT, collector=collector.name, reason="generator", package_id=package_id)
+        return False
+    items = list(selection)
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in items):
+        logger.warning(
+            SELECTION_NOT_ASKED_EVENT,
+            collector=collector.name,
+            reason="items_are_not_keys",
+            package_id=package_id,
+            sample=repr(items[:3]),
+        )
+        return False
+    return package_id in items
+
+
+def _queryset_selects(collector: type[Collector], selection: QuerySet[Any], package_id: int) -> bool:
+    """Ask a queryset selection whether it holds one package, refusing a shape that cannot be narrowed.
+
+    Args:
+        collector: The class, for the refusal's wording.
+        selection: The queryset it answered.
+        package_id: The package.
+
+    Returns:
+        Whether a row for the package exists in the narrowed selection.
+
+    Raises:
+        CollectorRegistryError: For a sliced or combined queryset, or one over a
+            model that names a package neither by label nor by `package_id`.
+
+    """
+    query = selection.query
+    if query.is_sliced or query.combinator:
+        message = (
+            f"{collector.__name__} (name={collector.name!r}) answered a selection that is "
+            f"{'sliced' if query.is_sliced else 'combined with ' + str(query.combinator)}, which cannot be "
+            f"narrowed to one package: a filter on a sliced or combined queryset is refused by Django, and "
+            f"materialising it would read the whole inventory. A selection is a lazy, unsliced queryset "
+            f"(core/collection.py, selectable_packages)."
+        )
+        raise CollectorRegistryError(message)
+    options = selection.model._meta  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
+    if options.label == PACKAGE_MODEL_LABEL:
+        column = "pk"
+    elif any(field.attname == PACKAGE_COLUMN for field in options.concrete_fields):
+        column = PACKAGE_COLUMN
+    else:
+        message = (
+            f"{collector.__name__} (name={collector.name!r}) answered a selection over {options.label}, which "
+            f"is neither {PACKAGE_MODEL_LABEL} nor a table with a {PACKAGE_COLUMN!r} column, so nothing here "
+            f"knows which column names the package."
+        )
+        raise CollectorRegistryError(message)
+    return bool(selection.filter(**{column: package_id}).exists())
 
 
 def registrations() -> Mapping[str, type[Collector]]:

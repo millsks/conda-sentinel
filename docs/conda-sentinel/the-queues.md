@@ -119,6 +119,12 @@ remembering to ask.
     job today. If you were expecting to click something, you were not wrong to —
     it just is not built.
 
+    The one button a reviewer *does* have is on the package page an item links to:
+    **Collect now** re-runs every applicable collector on that package without
+    waiting for the sweep, which is what you want after an override or once a fix
+    has landed and before you move the item. It is on the
+    [operations page](operations.md#collect-now-a-manual-recollection-from-the-page).
+
 The endpoint resolves its permission from the queue the item is **currently in**, not
 from a fixed role. An item routed to another queue is that queue's to move.
 

@@ -48,7 +48,11 @@ from typing import TYPE_CHECKING
 from typing import Final
 from typing import cast
 
+from conda_sentinel.collectors.models import PackageRecollection
+from conda_sentinel.collectors.recollection import in_flight_window
+from conda_sentinel.collectors.recollection import pending_recollection
 from conda_sentinel.core.confidence import gated_status
+from conda_sentinel.core.ledger import runs_in_flight
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.identity.models import IdentityOverride
 from conda_sentinel.identity.models import PackageMapping
@@ -68,6 +72,7 @@ if TYPE_CHECKING:
 
     from django.db import models
 
+    from conda_sentinel.collectors.recollection import PendingRecollection
     from conda_sentinel.core.models import CollectionRun
     from conda_sentinel.core.models import PackageHealth
     from conda_sentinel.identity.models import Package
@@ -78,11 +83,14 @@ __all__ = [
     "NO_OBSERVATION_CITED",
     "TRACES",
     "Identity",
+    "InFlight",
     "Observation",
     "StatusTrace",
     "Trace",
     "WorkItem",
     "identity_of",
+    "in_flight",
+    "last_recollection",
     "recent_runs",
     "traces_for",
 ]
@@ -505,6 +513,73 @@ def identity_of(package: Package) -> Identity:
         override=IdentityOverride.objects.filter(package=package).order_by("-observed_at", "-id").first(),
         mappings=tuple(PackageMapping.objects.filter(package=package).order_by("-resolved_at", "-id")),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class InFlight:
+    """What the "In flight" panel shows: the open runs, and the press still awaiting its runs.
+
+    Both halves of the recollection's own rule, read here so the panel never
+    lists a run the service would not refuse over and never omits a press it
+    would. Empty on both counts means the button may be pressed.
+    """
+
+    #: The unfinished runs on the package started within the window, newest first.
+    runs: tuple[CollectionRun, ...]
+
+    #: The newest press within the window the ledger has not answered in full,
+    #: with the collectors it still awaits, or `None`.
+    pending: PendingRecollection | None
+
+    def __bool__(self) -> bool:
+        """Report whether anything is in flight.
+
+        Returns:
+            True when a run is open or a press is unanswered.
+
+        """
+        return bool(self.runs) or self.pending is not None
+
+
+def in_flight(package: Package, *, now: datetime) -> InFlight:
+    """Return what is in flight on this package, by the recollection's own rule.
+
+    The "In flight" panel `CPM-OPERATE-S08` puts above the run ledger: what a
+    reviewer who has just pressed "Collect now" watches, and what the service
+    refuses a second press over. One rule, read from `core/ledger.py` and
+    `collectors/recollection.py`, so the panel and the refusal cannot disagree
+    -- an open row older than the window is a killed worker's, is not listed
+    here, and still appears in `recent_runs` as `running`.
+
+    Args:
+        package: The package.
+        now: The instant the window is measured back from.
+
+    Returns:
+        The open runs and the pending press, either of which may be empty.
+
+    """
+    return InFlight(
+        runs=tuple(runs_in_flight(package.pk, now=now, window=in_flight_window())),
+        pending=pending_recollection(package.pk, now=now),
+    )
+
+
+def last_recollection(package: Package) -> PackageRecollection | None:
+    """Return the newest recollection somebody asked for on this package, if any.
+
+    Shown beneath the run ledger: who pressed the button, when, and which
+    collectors were published -- the audit row, read as the record of a human act
+    rather than as evidence about the package.
+
+    Args:
+        package: The package.
+
+    Returns:
+        The newest `PackageRecollection`, with its actor joined, or `None`.
+
+    """
+    return PackageRecollection.objects.filter(package=package).select_related("actor").first()
 
 
 def recent_runs(package: Package) -> tuple[CollectionRun, ...]:

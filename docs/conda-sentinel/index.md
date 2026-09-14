@@ -107,7 +107,7 @@ is no work, and a reviewer who reads that goes away satisfied.
 |---|---|
 | Home | how current is the picture, and how much is missing from it |
 | Packages | the whole estate, filtered and ranked |
-| Package detail | every status on one package, traced to the evidence behind it |
+| Package detail | every status on one package, traced to the evidence behind it; **Collect now** re-runs every applicable collector on it |
 | Queues | what is left to do, ranked, scoped to your role |
 | Reports | six recurring questions — KEV, feedstock lag, Python 3.14, licences, unmapped identities, stale evidence |
 | Coverage | what the product **cannot** see |

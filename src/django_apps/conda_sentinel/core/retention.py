@@ -451,9 +451,12 @@ EVIDENCE_ROSTER: Final[tuple[EvidenceTable, ...]] = (
     EvidenceTable("collectors.IdentityResolutionSnapshot", (PACKAGE_KEY,)),
 )
 
-#: The two evidence tables the purge never touches: one row per human act, the
-#: audit trail of governed writes. The product owner may reverse this.
-EXCLUDED_EVIDENCE: Final[frozenset[str]] = frozenset({"collectors.InventoryChange", "identity.IdentityOverride"})
+#: The three evidence tables the purge never touches: one row per human act --
+#: the audit trail of the two governed writes, and of every manual recollection
+#: (`CPM-OPERATE-S08`). The product owner may reverse this.
+EXCLUDED_EVIDENCE: Final[frozenset[str]] = frozenset(
+    {"collectors.InventoryChange", "collectors.PackageRecollection", "identity.IdentityOverride"},
+)
 
 
 def derived_tables() -> tuple[tuple[type[models.Model], str], ...]:

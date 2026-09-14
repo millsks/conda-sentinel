@@ -82,20 +82,25 @@ FORBIDDEN_FROM_A_REQUEST: Final[dict[str, str]] = {
 #:
 #: `core/registry.py` -> `core/collection.py` is licensed because the registry needs
 #: the `Collector` class at runtime, for the `issubclass` refusal that is the whole
-#: of what it does; `Collector` cannot move behind `TYPE_CHECKING`. The read surface
-#: that reaches the registry -- `surface/coverage.py`, the screen that says which
-#: collector has not completed a run inside its declared window -- reads *names and
-#: cadences* off it and never constructs one. So the client is reachable by import
-#: and unreachable by call, and closing the gap would mean splitting `Collector`'s
-#: declaration from its transport, which is a change to `CPM-AD-9`'s own vocabulary
-#: rather than to this story.
+#: of what it does; `Collector` cannot move behind `TYPE_CHECKING`. The read
+#: surfaces that reach the registry read *declarations* off the classes and never
+#: construct one: `surface/coverage.py` reads names and cadences, and since
+#: `CPM-OPERATE-S08` the request path also calls `selectable_packages()` on each
+#: swept class (`core/registry.py`'s `swept_collectors` and `selects`, for the
+#: "Collect now" service) -- a classmethod that builds a lazy queryset and touches
+#: no transport, which is the property `core/collection.py`'s own docstring
+#: declares for it. So the client is reachable by import and unreachable by call,
+#: and closing the gap would mean splitting `Collector`'s declaration from its
+#: transport, which is a change to `CPM-AD-9`'s own vocabulary rather than to
+#: this story.
 #:
 #: Spelled exactly and spent exactly: `test_every_recorded_edge_is_still_real` fails
 #: on an entry that has stopped existing, so this cannot go on licensing nothing.
 RECORDED_EDGES: Final[dict[tuple[str, str], str]] = {
     (f"{IMPORT_ROOT}.core.registry", f"{IMPORT_ROOT}.core.collection"): (
         "the registry holds the Collector class for its issubclass refusal; the coverage screen reads names and "
-        "cadences off the registry and constructs nothing"
+        "cadences off the registry, the recollection service calls selectable_packages() on the swept classes "
+        "(a query, no transport), and neither constructs a collector"
     ),
 }
 

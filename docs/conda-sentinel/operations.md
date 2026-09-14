@@ -1760,6 +1760,93 @@ refuses the calls it cannot afford, which records `error` rows rather than
 exceeding the source's budget. Expect `skipped` dispatch rows and `error`
 collection rows at that scale until the allowances are raised.
 
+### Collect now: a manual recollection from the page
+
+After an identity override, or once an upstream fix has landed, nobody should wait
+a day for the sweep or ask you for a shell. **Collect now** on a package's detail
+page (`CPM-UJ-1`, `CPM-OPERATE-S08`) is the manual recollection: a person holding
+the `security_reviewer` or `leadership` role presses it, and the request writes one
+audit row — `package_recollections`: who asked, when, which collectors were
+**asked for**, the request's trace id — and then enqueues **the same per-package
+tasks a sweep enqueues**, one per collector, each with `force=True` so the
+observation window is bypassed and the collector actually calls out. Nothing runs
+in the request (`CPM-AD-9`); the worker does the collecting, and the page shows
+the press and its runs in an **In flight** panel until each finalises on the
+ledger below it.
+
+**"Now" means "next in the collect queue".** The forced tasks land on the same
+`collect` queue a sweep drains, behind whatever is already on it — behind a
+whole-inventory dispatch, "now" is when a worker reaches them. The In flight
+panel says what a press is still awaiting while that happens.
+
+**What is offered is what each collector's own selection contains, and nothing
+offered is refused.** The button does not force every collector: a forced
+`pypi_release` on a package with no PyPI mapping would write a `failed` run with
+the refusal on the record, and a ledger full of those is noise. So the request
+asks each swept collector whether its selection — the same one the sweep reads,
+[above](#which-packages-a-sweep-offers) — contains the package, asks for only
+those, and records the rest as `not_offered` on the audit row; the page's message
+names both lists. When no selection contains the package (its identity is not
+resolved yet, or the sources the collectors wait on are undeclared) the press is
+refused with `400` and nothing is written. `verify_py314_build` is never offered:
+it is not swept per package and takes no `force`. The one row a reviewer will
+still meet is a collector that *was* asked and then refused in the worker — a
+source that answered `429`, a credential GitHub rejected — which finalises
+`failed` with its `detail` saying why, exactly as it would under a sweep.
+
+**The audit row says what was asked; the message says what was handed off.**
+The row is written before the tasks are published and is append-only, so its
+`collectors` column can only mean "asked for". The hand-off happens after the
+row commits, one task at a time; a name whose publish fails — the broker is
+down, or anything else raises — is logged under `recollection.unpublished`,
+the other names still go, the row stands as the record that somebody asked,
+and the page's message (a warning, not a success) names what was not handed
+off. Press again once the broker is reachable. The row's `trace_id` is the
+request's, and the Celery instrumentor propagates that trace into every task
+the request publishes, so each run's ledger row carries the same id
+(`CPM-AD-15`) — how you tell the runs a press produced from the sweep's, in the
+ledger and in the logs.
+
+**A second press is refused while the package is in flight, and "in flight"
+is two questions.** The request answers `409`, naming what it is waiting on,
+and writes and publishes nothing, when either
+
+- the ledger holds an **unfinished run** on the package that started within
+  the window, or
+- a **press for the package within the window has not been answered** —
+  answered meaning every collector it asked for has a run on the package,
+  started at or after the press, that has finished. This is what covers the
+  gap between a press and a worker starting its tasks: a run row exists only
+  once a worker begins, so a ledger-only rule would admit every press made
+  during queue latency.
+
+The check and the audit row's insert happen with the package row locked, so two
+presses arriving together are serialised: one lands, the other is refused. The
+page hides the button while either question is true and says what to wait for.
+The rule is **per package**: a reviewer pressing the button on package after
+package is spending their own allowance, and nothing estate-wide stops them —
+an accepted risk, on the [authorization page](authorization.md).
+
+**The window is twice the task time limit, and it is the killed-worker bound.**
+No live run outlasts `CELERY_TASK_TIME_LIMIT` (five minutes as shipped), so an
+open row older than twice that — ten minutes — is a killed worker's: a worker
+killed mid-call leaves a `running` row that nothing will ever finalise (by
+design; it is the observation the ledger exists to make), and such a row must
+not lock a reviewer out of a package for the ninety days the purge keeps it.
+So a row older than twice the task time limit stays on the ledger as `running`,
+is not listed as in flight, and does not refuse the press; the next successful
+run supersedes it and the nightly purge removes it in time. A press older than
+the window stops counting as pending on the same terms, and each task a press
+publishes carries `expires` set to the window, so a message nobody consumed
+inside it is dropped rather than firing days later against a package somebody
+has since corrected. Raise `CELERY_TASK_TIME_LIMIT` and the window widens with
+it; it is read at each press, never fixed at import.
+
+The permission behind the button is `collectors.recollect_package`, granted to
+the two roles by `core/0013_grant_recollect` on the
+[authorization page](authorization.md)'s terms; a refusal is logged under
+`authorization.recollection_refused` with the acting identity.
+
 ## The currency policy: what it compares, and what it will not
 
 `CPM-CURRENCY-S06` adds the first policy pass. It runs inside the orchestrating
@@ -3247,10 +3334,11 @@ correctness:
    purge left running as `failed`, saying so.
 
 **Never purged, and named:** `package_health` (the rollup); `packages` and every
-`identity` table; every `workflow` table; and the two human-audit evidence tables,
-`identity_overrides` and `inventory_changes` — one row per human act, the audit
-trail of governed writes, excluded by the product owner's decision and
-reversible by it.
+`identity` table; every `workflow` table; and the three human-audit evidence
+tables, `identity_overrides`, `inventory_changes` and `package_recollections` —
+one row per human act, the audit trail of the governed writes and of every
+"Collect now" press, excluded by the product owner's decision and reversible
+by it.
 
 **A table that fails does not stop the night, and a row refused is not a row
 lost.** A database error on one table finalises that table's record `failed`,
