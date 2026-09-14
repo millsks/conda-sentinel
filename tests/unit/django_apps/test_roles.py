@@ -37,6 +37,9 @@ from conda_sentinel.core.roles import INVENTORY_CHANGE_CODENAME
 from conda_sentinel.core.roles import INVENTORY_CHANGE_PERMISSION
 from conda_sentinel.core.roles import LEADERSHIP
 from conda_sentinel.core.roles import PACKAGING_ENGINEER
+from conda_sentinel.core.roles import RECOLLECT_APP_LABEL
+from conda_sentinel.core.roles import RECOLLECT_CODENAME
+from conda_sentinel.core.roles import RECOLLECT_PERMISSION
 from conda_sentinel.core.roles import ROLE_ENVIRONMENT_VARIABLES
 from conda_sentinel.core.roles import ROLE_GROUP_PERMISSIONS
 from conda_sentinel.core.roles import SECURITY_REVIEWER
@@ -217,12 +220,17 @@ def test_the_permission_declaration_is_keyed_by_role_slot() -> None:
     assert set(ROLE_GROUP_PERMISSIONS) == ROLE_SLOTS
 
 
-def test_only_the_leadership_slot_grants_anything_and_it_grants_the_two_governed_writes() -> None:
-    """AC #7's declaration half: two grants, to one slot, and two slots still empty.
+def test_leadership_holds_the_governed_writes_the_reviewer_recollects_and_the_engineer_holds_nothing() -> None:
+    """AC #7's declaration half: three grants across two slots, and one slot still empty.
 
-    Two since `CPM-OPERATE-S03`: the identity override and the inventory change
-    are the two governed human writes `CPM-FR-3` (as amended) names, and both
-    arrive with the write rather than with a surface.
+    Two governed writes since `CPM-OPERATE-S03`: the identity override and the
+    inventory change are the two governed human writes `CPM-FR-3` (as amended)
+    names, both leadership's, and both arrive with the write rather than with a
+    surface. A third grant since `CPM-OPERATE-S08`: the manual recollection is
+    not a governed write, but it spends a source's allowance and `CPM-AD-13`
+    gates it -- for the security reviewer, who is the one waiting on the sweep
+    after an override, and for leadership. The packaging engineer's tuple is
+    the one still asserted empty.
 
     This case used to assert that every slot granted nothing, which was the state
     until `CPM-IDENTITY-S05`. It is rewritten rather than deleted, because the
@@ -242,8 +250,12 @@ def test_only_the_leadership_slot_grants_anything_and_it_grants_the_two_governed
     `tests/unit/django_apps/test_identity_overrides.py`, which reconciles it
     against the model's own `Meta.permissions`.
     """
-    assert ROLE_GROUP_PERMISSIONS[LEADERSHIP] == (IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION)
-    assert ROLE_GROUP_PERMISSIONS[SECURITY_REVIEWER] == ()
+    assert ROLE_GROUP_PERMISSIONS[LEADERSHIP] == (
+        IDENTITY_OVERRIDE_PERMISSION,
+        INVENTORY_CHANGE_PERMISSION,
+        RECOLLECT_PERMISSION,
+    )
+    assert ROLE_GROUP_PERMISSIONS[SECURITY_REVIEWER] == (RECOLLECT_PERMISSION,)
     assert ROLE_GROUP_PERMISSIONS[PACKAGING_ENGINEER] == ()
 
 
@@ -278,6 +290,20 @@ def test_the_inventory_permission_is_an_app_label_and_a_codename() -> None:
     assert INVENTORY_APP_LABEL == "collectors"
     assert INVENTORY_CHANGE_CODENAME
     assert INVENTORY_CHANGE_PERMISSION != IDENTITY_OVERRIDE_PERMISSION
+
+
+def test_the_recollect_permission_is_an_app_label_and_a_codename() -> None:
+    """The third grant's shape, on the first two's terms (`CPM-OPERATE-S08`).
+
+    The application is `collectors`, where `PackageRecollection` lives; the
+    codename names the act rather than a model, so it cannot collide with the
+    four Django derives.
+    """
+    assert f"{RECOLLECT_APP_LABEL}.{RECOLLECT_CODENAME}" == RECOLLECT_PERMISSION
+    assert RECOLLECT_PERMISSION.count(".") == 1
+    assert RECOLLECT_APP_LABEL == "collectors"
+    assert RECOLLECT_CODENAME
+    assert RECOLLECT_PERMISSION not in {IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION}
 
 
 def test_the_declared_variables_pair_with_the_contract_fields_in_order() -> None:
@@ -379,10 +405,12 @@ def test_two_slots_naming_one_group_union_rather_than_clobber() -> None:
     """Nothing stops an operator pointing two role variables at one group.
 
     Iterating the slots directly would hand the provisioner the same name twice,
-    and the second pass would `set` its own codenames over the first's. The
-    tuples are empty today, so what this pins is the *shape* that keeps the
-    clobber impossible once they are not -- the mistake is unrecoverable
-    afterwards, because a cleared grant looks exactly like one never made.
+    and the second pass would `set` its own codenames over the first's. Since
+    `CPM-OPERATE-S08` the reviewer's tuple is not empty, so this is no longer
+    only about shape: a group named by both slots holds the reviewer's grant
+    and the engineer's nothing, once, in slot order -- the mistake is
+    unrecoverable afterwards, because a cleared grant looks exactly like one
+    never made.
     """
     contract = RoleContract(
         security_reviewer=A_REVIEWER_GROUP,
@@ -397,6 +425,7 @@ def test_two_slots_naming_one_group_union_rather_than_clobber() -> None:
         dict.fromkeys(ROLE_GROUP_PERMISSIONS[SECURITY_REVIEWER] + ROLE_GROUP_PERMISSIONS[PACKAGING_ENGINEER]),
     )
     assert mapping[A_REVIEWER_GROUP] == expected
+    assert mapping[A_REVIEWER_GROUP] == (RECOLLECT_PERMISSION,)
 
 
 def test_an_unconfigured_contract_asks_for_no_group() -> None:

@@ -56,6 +56,9 @@ from conda_sentinel.core.roles import IDENTITY_OVERRIDE_PERMISSION
 from conda_sentinel.core.roles import INVENTORY_APP_LABEL
 from conda_sentinel.core.roles import INVENTORY_CHANGE_CODENAME
 from conda_sentinel.core.roles import INVENTORY_CHANGE_PERMISSION
+from conda_sentinel.core.roles import RECOLLECT_APP_LABEL
+from conda_sentinel.core.roles import RECOLLECT_CODENAME
+from conda_sentinel.core.roles import RECOLLECT_PERMISSION
 from conda_sentinel.core.roles import RoleContract
 from conda_sentinel.core.roles import role_group_permissions
 from config.authorization.exceptions import ClaimsRejected
@@ -79,8 +82,13 @@ GRANT_MIGRATION_MODULE = "conda_sentinel.core.migrations.0005_grant_identity_ove
 #: `CPM-OPERATE-S03`'s grant, on `0005`'s terms: the second governed write.
 INVENTORY_GRANT_MIGRATION_MODULE = "conda_sentinel.core.migrations.0011_grant_inventory_change"
 
-#: What the leadership row holds after both grants have run.
-THE_LEADERSHIP_GRANTS = {IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION}
+#: `CPM-OPERATE-S08`'s grant, on `0011`'s terms: the manual recollection, to two roles.
+RECOLLECT_GRANT_MIGRATION_MODULE = "conda_sentinel.core.migrations.0013_grant_recollect"
+
+#: What the leadership row holds after all three grants have run, and what the
+#: security-reviewer row holds after the third.
+THE_LEADERSHIP_GRANTS = {IDENTITY_OVERRIDE_PERMISSION, INVENTORY_CHANGE_PERMISSION, RECOLLECT_PERMISSION}
+THE_REVIEWER_GRANTS = {RECOLLECT_PERMISSION}
 
 # The leadership group the suite is configured with, bound once so the
 # unconfigured-contract case can still name the row after it has replaced the
@@ -213,19 +221,21 @@ def test_the_migration_provisions_the_three_role_groups() -> None:
 
 
 @pytest.mark.django_db
-def test_the_migrations_grant_the_two_governed_writes_to_leadership_and_to_nobody_else() -> None:
-    """AC #7: the rows after migration hold exactly the two grants, and the other two hold none.
+def test_the_migrations_grant_the_governed_writes_to_leadership_the_recollection_to_two_rows_and_nothing_else() -> None:
+    """AC #7: the rows after migration hold exactly the declared grants, and the engineer row holds none.
 
-    Two since `CPM-OPERATE-S03`: `core/0005` attaches the identity override and
-    `core/0011` the inventory change, both to the leadership row.
+    Two governed writes since `CPM-OPERATE-S03`: `core/0005` attaches the identity
+    override and `core/0011` the inventory change, both to the leadership row. A
+    third grant since `CPM-OPERATE-S08`: `core/0013` attaches the recollection to
+    the leadership row and to the security-reviewer row.
 
     This case used to assert that every role group carried no permissions at all,
     which was true until `CPM-IDENTITY-S05` -- the first story with anything to
     grant. It is rewritten rather than deleted, because the property it protected
-    is the half that still matters: a permission on the security-reviewer or
-    packaging-engineer row is the accident the empty assertion existed to catch,
-    and it is now a *narrower* claim than "nobody holds anything", not a weaker
-    one.
+    is the half that still matters: a permission on the packaging-engineer row,
+    or a governed write on the reviewer's, is the accident the empty assertion
+    existed to catch, and it is now a *narrower* claim than "nobody holds
+    anything", not a weaker one.
 
     **Asserted on the rows, not on the declaration.** An entry in
     `ROLE_GROUP_PERMISSIONS` and a `Permission` attached to an `auth_group` row
@@ -252,7 +262,7 @@ def test_the_migrations_grant_the_two_governed_writes_to_leadership_and_to_nobod
     }
 
     assert held[contract.leadership] == THE_LEADERSHIP_GRANTS
-    assert held[contract.security_reviewer] == set()
+    assert held[contract.security_reviewer] == THE_REVIEWER_GRANTS
     assert held[contract.packaging_engineer] == set()
 
 
@@ -673,8 +683,11 @@ def test_the_grant_reverse_detaches_the_permission_and_leaves_the_group() -> Non
 
     leadership.refresh_from_db()
     # Its own grant and no other: the inventory permission `core/0011` attached
-    # is not this migration's to take away.
-    assert {_label(permission) for permission in leadership.permissions.all()} == {INVENTORY_CHANGE_PERMISSION}
+    # and the recollection `core/0013` attached are not this migration's to take
+    # away.
+    assert {_label(permission) for permission in leadership.permissions.all()} == (
+        THE_LEADERSHIP_GRANTS - {IDENTITY_OVERRIDE_PERMISSION}
+    )
     assert Group.objects.filter(name=settings.ROLE_CONTRACT.leadership).exists()
     assert Permission.objects.filter(codename=IDENTITY_OVERRIDE_CODENAME).exists()
 
@@ -785,7 +798,9 @@ def test_the_inventory_grant_reverse_detaches_only_its_own_permission() -> None:
     grant.reverse(global_apps, _schema_editor())
 
     leadership.refresh_from_db()
-    assert {_label(permission) for permission in leadership.permissions.all()} == {IDENTITY_OVERRIDE_PERMISSION}
+    assert {_label(permission) for permission in leadership.permissions.all()} == (
+        THE_LEADERSHIP_GRANTS - {INVENTORY_CHANGE_PERMISSION}
+    )
     assert Group.objects.filter(name=settings.ROLE_CONTRACT.leadership).exists()
     assert Permission.objects.filter(
         content_type__app_label=INVENTORY_APP_LABEL,
@@ -842,11 +857,139 @@ def test_the_two_grants_converge_whichever_order_a_rollback_and_a_re_apply_happe
     second = import_module(INVENTORY_GRANT_MIGRATION_MODULE)
     leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
 
+    without_the_second = THE_LEADERSHIP_GRANTS - {INVENTORY_CHANGE_PERMISSION}
+
     second.reverse(global_apps, _schema_editor())
-    assert {_label(permission) for permission in leadership.permissions.all()} == {IDENTITY_OVERRIDE_PERMISSION}
+    assert {_label(permission) for permission in leadership.permissions.all()} == without_the_second
     first.forward(global_apps, _schema_editor())
-    assert {_label(permission) for permission in leadership.permissions.all()} == {IDENTITY_OVERRIDE_PERMISSION}
+    assert {_label(permission) for permission in leadership.permissions.all()} == without_the_second
     second.forward(global_apps, _schema_editor())
 
     assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
     assert leadership.permissions.count() == len(THE_LEADERSHIP_GRANTS)
+
+
+# ---------------------------------------------------------------------------
+# `core/0013_grant_recollect`, run rather than only read (CPM-OPERATE-S08).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_the_granted_recollect_permission_is_the_one_the_service_actually_checks() -> None:
+    """The grant and the check are one string, proven against real rows for both roles.
+
+    A person put in the security-reviewer group by nothing but a membership passes
+    `has_perm` for the permission `collectors/recollection.py` asks about; so does
+    one in the leadership group; one in the packaging-engineer group does not.
+    Re-read from the database each time, because Django caches permissions on the
+    instance.
+    """
+    contract = settings.ROLE_CONTRACT
+    user = UserFactory.create(username="a-reviewer", idp_subject=SUBJECT)
+    assert get_user_model().objects.get(pk=user.pk).has_perm(RECOLLECT_PERMISSION) is False
+
+    user.groups.add(Group.objects.get(name=contract.packaging_engineer))
+    assert get_user_model().objects.get(pk=user.pk).has_perm(RECOLLECT_PERMISSION) is False
+
+    user.groups.set([Group.objects.get(name=contract.security_reviewer)])
+    assert get_user_model().objects.get(pk=user.pk).has_perm(RECOLLECT_PERMISSION) is True
+
+    user.groups.set([Group.objects.get(name=contract.leadership)])
+    assert get_user_model().objects.get(pk=user.pk).has_perm(RECOLLECT_PERMISSION) is True
+
+
+@pytest.mark.django_db
+def test_the_recollect_grant_pass_converges_rather_than_duplicating() -> None:
+    """`migrate` is re-run on every deployment, so the pass must be idempotent -- on both rows."""
+    grant = import_module(RECOLLECT_GRANT_MIGRATION_MODULE)
+    leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
+    reviewers = Group.objects.get(name=settings.ROLE_CONTRACT.security_reviewer)
+
+    grant.forward(global_apps, _schema_editor())
+    grant.forward(global_apps, _schema_editor())
+
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
+    assert leadership.permissions.count() == len(THE_LEADERSHIP_GRANTS)
+    assert {_label(permission) for permission in reviewers.permissions.all()} == THE_REVIEWER_GRANTS
+    assert reviewers.permissions.count() == len(THE_REVIEWER_GRANTS)
+
+
+@pytest.mark.django_db
+def test_the_recollect_grant_reverse_detaches_only_its_own_permission_from_both_rows() -> None:
+    """The rollback path, executed: the recollection goes from both rows; the governed writes and the groups stay."""
+    grant = import_module(RECOLLECT_GRANT_MIGRATION_MODULE)
+    grant.forward(global_apps, _schema_editor())
+    leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
+    reviewers = Group.objects.get(name=settings.ROLE_CONTRACT.security_reviewer)
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
+
+    grant.reverse(global_apps, _schema_editor())
+
+    leadership.refresh_from_db()
+    reviewers.refresh_from_db()
+    assert {_label(permission) for permission in leadership.permissions.all()} == (
+        THE_LEADERSHIP_GRANTS - {RECOLLECT_PERMISSION}
+    )
+    assert {_label(permission) for permission in reviewers.permissions.all()} == set()
+    assert Group.objects.filter(name=settings.ROLE_CONTRACT.security_reviewer).exists()
+    assert Permission.objects.filter(content_type__app_label=RECOLLECT_APP_LABEL, codename=RECOLLECT_CODENAME).exists()
+
+
+@pytest.mark.django_db
+def test_the_recollect_grant_reverse_leaves_a_group_the_role_contract_does_not_name() -> None:
+    """The rollback revokes what this migration granted, and not what somebody else did."""
+    grant = import_module(RECOLLECT_GRANT_MIGRATION_MODULE)
+    grant.forward(global_apps, _schema_editor())
+    permission = Permission.objects.get(content_type__app_label=RECOLLECT_APP_LABEL, codename=RECOLLECT_CODENAME)
+    somebody_elses = Group.objects.create(name=A_LEADERSHIP_GROUP)
+    somebody_elses.permissions.add(permission)
+
+    grant.reverse(global_apps, _schema_editor())
+
+    assert permission not in Group.objects.get(name=settings.ROLE_CONTRACT.leadership).permissions.all()
+    assert permission not in Group.objects.get(name=settings.ROLE_CONTRACT.security_reviewer).permissions.all()
+    assert list(somebody_elses.permissions.all()) == [permission]
+
+
+@pytest.mark.django_db
+def test_the_recollect_grant_pass_provisions_nothing_on_an_unconfigured_contract(
+    settings: SettingsWrapper,
+) -> None:
+    """A fresh clone is migrated long before anyone has role groups to declare; the permission row is still created."""
+    grant = import_module(RECOLLECT_GRANT_MIGRATION_MODULE)
+    settings.ROLE_CONTRACT = AN_UNCONFIGURED_CONTRACT
+    leadership_before = set(
+        Group.objects.get(name=TEST_LEADERSHIP_GROUP).permissions.values_list("pk", flat=True),
+    )
+
+    grant.forward(global_apps, _schema_editor())
+    grant.reverse(global_apps, _schema_editor())
+
+    assert Permission.objects.filter(content_type__app_label=RECOLLECT_APP_LABEL, codename=RECOLLECT_CODENAME).exists()
+    assert set(Group.objects.get(name=TEST_LEADERSHIP_GROUP).permissions.values_list("pk", flat=True)) == (
+        leadership_before
+    )
+
+
+@pytest.mark.django_db
+def test_the_three_grants_converge_whichever_order_a_rollback_and_a_re_apply_happen_in() -> None:
+    """Unapply the third, re-run the first two, re-apply the third: all three held, once each."""
+    first = import_module(GRANT_MIGRATION_MODULE)
+    second = import_module(INVENTORY_GRANT_MIGRATION_MODULE)
+    third = import_module(RECOLLECT_GRANT_MIGRATION_MODULE)
+    leadership = Group.objects.get(name=settings.ROLE_CONTRACT.leadership)
+    reviewers = Group.objects.get(name=settings.ROLE_CONTRACT.security_reviewer)
+    without_the_third = THE_LEADERSHIP_GRANTS - {RECOLLECT_PERMISSION}
+
+    third.reverse(global_apps, _schema_editor())
+    assert {_label(permission) for permission in leadership.permissions.all()} == without_the_third
+    assert reviewers.permissions.count() == 0
+    first.forward(global_apps, _schema_editor())
+    second.forward(global_apps, _schema_editor())
+    assert {_label(permission) for permission in leadership.permissions.all()} == without_the_third
+    assert reviewers.permissions.count() == 0
+    third.forward(global_apps, _schema_editor())
+
+    assert {_label(permission) for permission in leadership.permissions.all()} == THE_LEADERSHIP_GRANTS
+    assert leadership.permissions.count() == len(THE_LEADERSHIP_GRANTS)
+    assert {_label(permission) for permission in reviewers.permissions.all()} == THE_REVIEWER_GRANTS

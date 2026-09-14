@@ -16,7 +16,46 @@
         <a href="{% url 'conda_sentinel:package-health' %}">{% translate "back to package health" %}</a>
       </div>
     </div>
+    {% if can_recollect %}
+      {% comment %}
+        CPM-OPERATE-S08, CPM-UJ-1. Drawn on a boolean the view computes from the
+        service's can_request and the recollect view's role -- the template never
+        asks has_perm -- and posted to its own route, so the detail view stays a
+        read surface. Hidden while anything is in flight, because the service would
+        refuse the press: the panel below says what to wait for. The service writes
+        the audit row and publishes one forced per-package collection per collector
+        whose selection contains this package; nothing runs in the request.
+      {% endcomment %}
+      {% if in_flight %}
+        <div class="ev recollect-wait">{% translate "Collect now is waiting on the runs in flight below." %}</div>
+      {% else %}
+        <form method="post" action="{% url 'conda_sentinel:package-recollect' canonical_name=package.canonical_name %}">
+          {% csrf_token %}
+          <button class="btn primary" type="submit">{% translate "Collect now" %}</button>
+        </form>
+      {% endif %}
+    {% endif %}
   </div>
+
+  {% if messages %}
+    {% for message in messages %}
+      <div class="toast{% if message.tags %} toast-{{ message.tags }}{% endif %}">
+        <div><b>{{ message }}</b></div>
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if refusal %}
+    {% comment %} The service's own words, verbatim: a refusal names the run in
+       flight and when it started, and paraphrasing it here would be a second
+       place the rule lived. {% endcomment %}
+    <div class="toast">
+      <div>
+        <b>{% translate "Refused" %}</b>
+        <p>{{ refusal }}</p>
+      </div>
+    </div>
+  {% endif %}
 
   {% comment %}
     CPM-AD-11 requires every view to display the run's stamps, and this one needs them
@@ -225,6 +264,45 @@
         </div>
       {% endif %}
 
+      {% if in_flight %}
+        {% comment %}
+          CPM-OPERATE-S08. What a press produced, while it is still open: the open
+          runs, and the press the ledger has not yet answered in full -- the same two
+          questions the service refuses a second press over, so what is listed here is
+          exactly what "in flight" means to it. An open row older than the window is a
+          killed worker's; it is not listed here and still appears below as running.
+        {% endcomment %}
+        <div class="panel">
+          <header class="in-flight">
+            <h4>{% translate "In flight" %}</h4>
+            <span class="hx">{% blocktranslate count total=in_flight.runs|length trimmed %}{{ total }} run open{% plural %}{{ total }} runs open{% endblocktranslate %}</span>
+          </header>
+          {% if in_flight.pending %}
+            <div class="body">
+              <div class="ev">
+                {% blocktranslate with when=in_flight.pending.recollection.observed_at|date:"Y-m-d H:i" actor=in_flight.pending.recollection.actor trimmed %}
+                  asked for at {{ when }}Z by {{ actor }}; still awaiting:
+                {% endblocktranslate %}
+                <span class="mono">{% for name in in_flight.pending.awaiting %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}</span>
+              </div>
+            </div>
+          {% endif %}
+          {% if in_flight.runs %}
+            <table class="tbl">
+              <tbody>
+                {% for run in in_flight.runs %}
+                  <tr>
+                    <td class="mono">{{ run.collector }}</td>
+                    <td><span class="chip {{ run.status|tone }}">{{ run.status }}</span></td>
+                    <td class="mono">{{ run.started_at|date:"Y-m-d H:i" }}Z</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% endif %}
+        </div>
+      {% endif %}
+
       <div class="panel">
         <header>
           <h4>{% translate "Collection runs, this package" %}</h4>
@@ -247,6 +325,38 @@
           </tbody>
         </table>
       </div>
+
+      {% if recollection %}
+        {% comment %}
+          CPM-OPERATE-S08. The newest audit row: who pressed the button, when, and
+          which collectors were asked for -- asked, not published: the row is written
+          before the hand-off and never updated, so what the broker did is in the log
+          and the message, never here. Shown as the record of a human act, on the
+          terms the identity override is -- attributable, and never mistaken for a run.
+        {% endcomment %}
+        <div class="panel">
+          <header>
+            <h4>{% translate "Last recollection" %}</h4>
+            <span class="hx">{% translate "asked for from this page" %}</span>
+          </header>
+          <div class="body">
+            <dl class="kv kv-narrow">
+              <dt>{% translate "actor" %}</dt><dd>{{ recollection.actor }}</dd>
+              <dt>{% translate "when" %}</dt>
+              <dd class="mono">{{ recollection.observed_at|date:"Y-m-d H:i" }}Z</dd>
+              <dt>{% translate "asked" %}</dt>
+              <dd class="mono">{% for name in recollection.collectors %}{{ name }}{% if not forloop.last %}, {% endif %}{% empty %}—{% endfor %}</dd>
+              {% if recollection.not_offered %}
+                <dt>{% translate "not offered" %}</dt>
+                <dd class="mono">{% for name in recollection.not_offered %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}</dd>
+              {% endif %}
+              {% if recollection.trace_id %}
+                <dt>{% translate "trace" %}</dt><dd class="mono">{{ recollection.trace_id }}</dd>
+              {% endif %}
+            </dl>
+          </div>
+        </div>
+      {% endif %}
     </div>
   </div>
 {% endblock content %}

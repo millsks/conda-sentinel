@@ -310,7 +310,8 @@ one by hand. [How](running-it.md#running-a-policy-pass-yourself).
 
 ## Handing work off from a request
 
-The one path a *person* triggers: exporting a report bigger than the synchronous cap.
+Two paths a *person* triggers. The first is exporting a report bigger than the
+synchronous cap.
 
 ```
 POST /conda-sentinel/reports/<slug>/export/
@@ -348,6 +349,39 @@ reason on its own page — which is the page the person was just sent to.
 **The result backend broke the hand-off under eager execution.** Export tasks declare
 `ignore_result=True`: the job row is the result, and a second copy of it in Redis was
 an inconsistency waiting to happen.
+
+### Collect now: the second path a person triggers
+
+The other is the **manual recollection** on a package page (`CPM-UJ-1`,
+`CPM-OPERATE-S08`). It publishes **the same per-package tasks a sweep does** —
+`cpm.collect.source_release`, `cpm.collect.feedstock` and the rest — one per
+collector whose own selection contains the package, each with `force=True` so the
+observation window is bypassed. Nothing new is registered: the button is a different
+caller of the tasks in the table above.
+
+```
+POST /conda-sentinel/packages/<name>/recollect/
+   │  writes a package_recollections row (who asked, which collectors, trace id)
+   │  enqueues cpm.collect.<collector> with package_id and force=True, on commit
+   ▼
+303 back to /conda-sentinel/packages/<name>/
+   │  the "In flight" panel lists the runs while they are open
+   ▼
+the run ledger shows each one finalised, carrying the request's trace id
+```
+
+Three things carry over from the export path and two differ. By name, never by
+importing the task; on commit, never inside the transaction; `ignore_result=True`,
+because the run ledger is the result. What differs, first, is that the tasks land
+on the `collect` queue behind whatever a sweep is draining — "now" means "next in
+that queue" — and each carries `expires` set to the in-flight window, so a
+message nobody consumed inside it is dropped rather than fired days later. And
+second, what a refused broker does: there is no job row to fail, so the audit row
+stands as the record that somebody *asked*, the failure is logged under
+`recollection.unpublished`, and the page's message names the collectors that
+were not handed off. The rule for when a second press is refused, and what the
+page offers, is on the
+[operations page](operations.md#collect-now-a-manual-recollection-from-the-page).
 
 ---
 

@@ -25,6 +25,7 @@ from conda_sentinel.surface.views import HomeView
 from conda_sentinel.surface.views import InventoryView
 from conda_sentinel.surface.views import PackageDetailView
 from conda_sentinel.surface.views import PackageHealthView
+from conda_sentinel.surface.views import PackageRecollectView
 from conda_sentinel.surface.views import QueueView
 from conda_sentinel.surface.views import ReportExportView
 from conda_sentinel.surface.views import ReportView
@@ -54,6 +55,9 @@ urlpatterns = [
     # or an underscore -- `ruamel.yaml`, `backports.zoneinfo` -- and `slug` matches
     # neither, which would make exactly the packages with awkward names unreachable.
     path("packages/<str:canonical_name>/", PackageDetailView.as_view(), name="package-detail"),
+    # `CPM-OPERATE-S08`'s "Collect now": `POST` only, on its own route, so the
+    # detail view stays the read surface `CPM-AD-10` makes it and keeps its 405.
+    path("packages/<str:canonical_name>/recollect/", PackageRecollectView.as_view(), name="package-recollect"),
     # One route for three queues, because they are three filtered views over one
     # table (`CPM-AD-22`) and three routes would invite three views. `<str:>` rather
     # than an enumeration in the pattern: the closed set is `QUEUE_OWNERS`, and a

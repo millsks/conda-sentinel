@@ -78,6 +78,21 @@ EXPECTED_INVENTORY_GRANT_DEPENDENCIES = [
     ("core", "0010_background_jobs"),
 ]
 
+# `CPM-OPERATE-S08`'s grant: the manual recollection, to the reviewer and to
+# leadership, on `0011`'s terms exactly.
+RECOLLECT_GRANT_MIGRATION_MODULE = "conda_sentinel.core.migrations.0013_grant_recollect"
+
+# Five entries again: `collectors.0015_package_recollections` is the model the
+# codename hangs off, `core.0011` the grant this one converges with, `core.0012`
+# this application's own latest.
+EXPECTED_RECOLLECT_GRANT_DEPENDENCIES = [
+    ("auth", "0012_alter_user_first_name_max_length"),
+    ("collectors", "0015_package_recollections"),
+    ("contenttypes", "0002_remove_content_type_name"),
+    ("core", "0011_grant_inventory_change"),
+    ("core", "0012_ledger_time_indexes"),
+]
+
 # The module the role declaration lives in, read by the revocation case below.
 # Off `__file__` for the reason `migration_source` is: a hand-built path is a
 # second copy of a layout `tests/unit/test_import_roots.py` owns.
@@ -397,8 +412,73 @@ def test_each_grant_provisions_only_its_own_codename(
     """
     first = grant_migration_source.read_text(encoding="utf-8")
     second = inventory_grant_migration_source.read_text(encoding="utf-8")
+    third = Path(str(import_module(RECOLLECT_GRANT_MIGRATION_MODULE).__file__)).read_text(encoding="utf-8")
 
     assert "code == IDENTITY_OVERRIDE_PERMISSION" in first
     assert "INVENTORY_CHANGE_PERMISSION" not in first
+    assert "RECOLLECT_PERMISSION" not in first
     assert "code == INVENTORY_CHANGE_PERMISSION" in second
     assert "IDENTITY_OVERRIDE_PERMISSION" not in second
+    assert "RECOLLECT_PERMISSION" not in second
+    assert "code == RECOLLECT_PERMISSION" in third
+    assert "IDENTITY_OVERRIDE_PERMISSION" not in third
+    assert "INVENTORY_CHANGE_PERMISSION" not in third
+
+
+# ---------------------------------------------------------------------------
+# `core/0013_grant_recollect`: the third grant, on the second's terms (CPM-OPERATE-S08).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def recollect_grant_migration() -> ModuleType:
+    """The third grant migration, imported per case for the reason its siblings are."""
+    return import_module(RECOLLECT_GRANT_MIGRATION_MODULE)
+
+
+@pytest.fixture
+def recollect_grant_migration_source(recollect_grant_migration: ModuleType) -> Path:
+    """The third grant migration's own file, resolved from the imported module."""
+    assert recollect_grant_migration.__file__ is not None
+    return Path(recollect_grant_migration.__file__)
+
+
+def test_the_recollect_grant_is_a_single_non_elidable_run_python_operation(
+    recollect_grant_migration: ModuleType,
+) -> None:
+    """One data operation, forward and reverse, never squashed away."""
+    operations = recollect_grant_migration.Migration.operations
+
+    assert [type(operation).__name__ for operation in operations] == ["RunPython"]
+    operation = operations[0]
+    assert isinstance(operation, migrations.RunPython)
+    assert operation.code is recollect_grant_migration.forward
+    assert operation.reverse_code is recollect_grant_migration.reverse
+    assert operation.elidable is False
+
+
+def test_the_recollect_grant_runs_after_the_model_and_after_the_second_grant(
+    recollect_grant_migration: ModuleType,
+) -> None:
+    """`collectors.0015` makes the codename resolvable; `core.0011` is what this converges with."""
+    assert sorted(recollect_grant_migration.Migration.dependencies) == sorted(EXPECTED_RECOLLECT_GRANT_DEPENDENCIES)
+
+
+def test_the_recollect_grant_creates_and_names_no_group(recollect_grant_migration_source: Path) -> None:
+    """AD-27 and the no-names rule, for the sixth file that could break either."""
+    source = recollect_grant_migration_source.read_text(encoding="utf-8")
+    contract = settings.ROLE_CONTRACT
+
+    assert group_creation_verbs(recollect_grant_migration_source) == set()
+    for name in (contract.security_reviewer, contract.packaging_engineer, contract.leadership):
+        assert name, "the suite must run against a configured role contract for this to mean anything"
+        assert name not in source, f"the recollect grant migration hardcodes the configured group name {name!r}"
+
+
+def test_the_recollect_grant_provisions_without_revoking_and_says_so(recollect_grant_migration_source: Path) -> None:
+    """`preserve_existing=True`, and the trade it buys stated where somebody would look."""
+    source = recollect_grant_migration_source.read_text(encoding="utf-8")
+
+    assert "preserve_existing=True" in source
+    assert "preserve_existing=False" not in source
+    assert REVOCATION_NOTE in _prose(recollect_grant_migration_source)

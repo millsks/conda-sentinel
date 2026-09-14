@@ -45,12 +45,16 @@ from typing import cast
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import REDIRECT_FIELD_NAME
+from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.http import Http404
 from django.http import HttpResponse
 from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404
 from django.shortcuts import redirect
 from django.urls import reverse
+from django.utils.decorators import method_decorator
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext as _
 from django.views import View
@@ -69,6 +73,12 @@ from conda_sentinel.collectors.models import INVENTORY_NAME_FIELD
 from conda_sentinel.collectors.models import INVENTORY_SIGNALS
 from conda_sentinel.collectors.models import InventoryChange
 from conda_sentinel.collectors.models import InventoryEntry
+from conda_sentinel.collectors.recollection import RecollectionError
+from conda_sentinel.collectors.recollection import RecollectionInFlightError
+from conda_sentinel.collectors.recollection import RecollectionNotPermittedError
+from conda_sentinel.collectors.recollection import RecollectionReceipt
+from conda_sentinel.collectors.recollection import can_request
+from conda_sentinel.collectors.recollection import request_recollection
 from conda_sentinel.core.clock import SystemClock
 from conda_sentinel.core.jobs import JobState
 from conda_sentinel.core.jobs import request_job
@@ -77,10 +87,15 @@ from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.core.pagination import DEFAULT_PAGE_SIZE
 from conda_sentinel.core.permissions import PRODUCT_ROLES
 from conda_sentinel.core.permissions import RoleRequiredMixin
+from conda_sentinel.core.permissions import granted_roles
 from conda_sentinel.core.roles import LEADERSHIP
+from conda_sentinel.core.roles import SECURITY_REVIEWER
+from conda_sentinel.identity.models import Package
 from conda_sentinel.surface.coverage import collector_health
 from conda_sentinel.surface.coverage import coverage_of
 from conda_sentinel.surface.detail import identity_of
+from conda_sentinel.surface.detail import in_flight
+from conda_sentinel.surface.detail import last_recollection
 from conda_sentinel.surface.detail import recent_runs
 from conda_sentinel.surface.detail import traces_for
 from conda_sentinel.surface.detail import work_on
@@ -131,6 +146,7 @@ from conda_sentinel.workflow.states import QUEUE_OWNERS
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
+    from django.http.response import HttpResponseBase
 
     from conda_sentinel.workflow.models import WorkflowItem
     from django_service.users.models import User
@@ -138,7 +154,17 @@ if TYPE_CHECKING:
 #: Re-exported: both names were declared here before `surface/listing.py` existed,
 #: and templates and tests reach for them at this path. The definitions live beside
 #: the queryset that uses them, which is what stops the API growing a second one.
-__all__ = ["DEFAULT_ORDERING", "EXPORT_TOO_LARGE", "ORDERINGS", "SORT_PARAM", "InventoryView", "PackageHealthView"]
+__all__ = [
+    "DEFAULT_ORDERING",
+    "EXPORT_TOO_LARGE",
+    "ORDERINGS",
+    "SORT_PARAM",
+    "InventoryView",
+    "PackageHealthView",
+    "PackageRecollectView",
+    "can_recollect",
+    "recollection_message",
+]
 
 #: What a URL naming no declared queue is told.
 #:
@@ -320,6 +346,11 @@ class PackageDetailView(RoleRequiredMixin, DetailView):  # type: ignore[type-arg
     slug_field = "package__canonical_name"
     slug_url_kwarg = "canonical_name"
 
+    #: What a refused "Collect now" said, carried into the re-render by
+    #: `PackageRecollectView`. Blank on a `GET`. Not a write method: the refusal
+    #: is rendered, never stored.
+    refusal: str = ""
+
     def get_queryset(self) -> QuerySet[PackageHealth]:
         """Return the rollup rows a detail URL may name.
 
@@ -351,8 +382,214 @@ class PackageDetailView(RoleRequiredMixin, DetailView):  # type: ignore[type-arg
             identity=identity_of(row.package),
             runs=recent_runs(row.package),
             work=work_on(row.package),
+            # `CPM-OPERATE-S08`. The button is drawn on the intersection of two
+            # answers, neither of them this view's: the *service*'s `can_request`
+            # (the one licensed `has_perm`, so the template never asks it) and the
+            # recollect view's own role requirement through `granted_roles` (the
+            # one place a membership becomes a role). A superuser whose only
+            # group is the packaging engineers' passes the first and fails the
+            # second, and would otherwise see a button that answers 403. The
+            # in-flight panel reads the service's own rule too, so what the page
+            # lists is exactly what a second press is refused over.
+            can_recollect=can_recollect(self.request.user),
+            in_flight=in_flight(row.package, now=SystemClock().now()),
+            recollection=last_recollection(row.package),
+            refusal=self.refusal,
         )
         return context
+
+
+def can_recollect(user: Any) -> bool:
+    """Report whether the page should draw "Collect now" for this user.
+
+    Args:
+        user: The request's user.
+
+    Returns:
+        True only when the service would admit the actor *and* the recollect
+        view's mixin would admit the role -- the two gates a press has to pass.
+
+    """
+    return can_request(user) and bool(granted_roles(user) & PackageRecollectView.required_roles)
+
+
+@method_decorator(transaction.non_atomic_requests, name="dispatch")
+class PackageRecollectView(RoleRequiredMixin, View):
+    """`CPM-UJ-1`'s manual recollection, as one button on the package page (`CPM-OPERATE-S08`).
+
+    **`POST` only, and on its own route.** `PackageDetailView` is `CPM-AD-10`'s read
+    surface and gains no write method -- its 405 stays pinned -- so the button posts
+    here, and this view answers a `GET` with 405 for the reason `ReportExportView`
+    splits its methods: a `GET` that enqueued work would make a bookmark, a prefetch
+    or a link checker spend a source's allowance.
+
+    **It delegates and answers what the service answered.** `collectors/recollection.py`
+    checks the permission, refuses over a run in flight, writes the audit row and
+    publishes the tasks; this view resolves the package, hands over the actor and a
+    clock, and turns each refusal into a status: about *who* is a 403, a run in
+    flight is 409, anything else 400, and a request that landed is a 303 back to the
+    detail page with a message naming what was published and what was not. The
+    view opens no transaction and checks no permission of its own: the mixin gates
+    the role, the service gates the permission.
+
+    **Exempt from `ATOMIC_REQUESTS`, and the exemption is the message.** The service
+    publishes in `transaction.on_commit`, after the audit row lands; under the
+    request-wide transaction the setting installs, that callback would run after
+    this view had already composed its message and the reader would be told every
+    collector was handed off whether or not the broker took it. With the exemption
+    the service's own `atomic()` is the outermost transaction, the callback runs
+    inside the service call, and the receipt this view reads names what the broker
+    refused -- which is the one thing `CG-3` asks a refusal to be: unmissable.
+    `config/health/views.py` takes the same exemption for its own reason, and
+    `tests/integration/django_apps/test_recollection.py` asserts this one covers
+    the default alias.
+
+    Two roles rather than all three: `core/roles.py` grants the permission to the
+    security reviewer and to leadership, and a packaging engineer -- whose queue is
+    remediation, not re-observation -- is refused at the mixin before the service is
+    reached.
+    """
+
+    required_roles: ClassVar[frozenset[str]] = frozenset({SECURITY_REVIEWER, LEADERSHIP})
+
+    def dispatch(self, request: Any, *args: Any, **kwargs: Any) -> HttpResponseBase:
+        """Send an anonymous visitor to sign in and then to the *page*, not back to this route.
+
+        The mixin's redirect carries the request's own path as `next=`, which for
+        a `POST`-only route lands a freshly signed-in person on a 405. The page the
+        button is on is where they were, so that is where sign-in returns them.
+
+        Args:
+            request: The request.
+            *args: Django's positional URL arguments.
+            **kwargs: Django's keyword URL arguments, carrying the canonical name.
+
+        Returns:
+            The sign-in redirect for an anonymous visitor; otherwise whatever the
+            mixin and the method answer.
+
+        """
+        if not getattr(request.user, "is_authenticated", False):
+            page = reverse(
+                "conda_sentinel:package-detail",
+                kwargs={"canonical_name": str(kwargs.get("canonical_name", ""))},
+            )
+            return redirect_to_login(page, str(settings.LOGIN_URL))
+        return super().dispatch(request, *args, **kwargs)
+
+    def post(self, request: Any, *args: Any, **kwargs: Any) -> HttpResponse:
+        """Ask the service for a recollection of one package, and answer what it answered.
+
+        Args:
+            request: The request, carrying the form's CSRF token and nothing else.
+            *args: Django's positional URL arguments.
+            **kwargs: Django's keyword URL arguments, carrying the canonical name.
+
+        Returns:
+            A 303 back to the detail page when the request landed; the detail page
+            re-rendered with the refusal and 409 while a run is in flight, or 400
+            for any other refusal.
+
+        Raises:
+            PermissionDenied: When the service refused the actor. The mixin has
+                already admitted the role, so this is a group that does not hold
+                the permission -- a provisioning fault, answered as the 403 it is.
+            Http404: When the name resolves no package.
+
+        """
+        health = get_object_or_404(
+            PackageHealth.objects.select_related("package"),
+            package__canonical_name=str(kwargs.get("canonical_name", "")),
+        )
+        try:
+            receipt = request_recollection(
+                package_id=health.package_id,
+                actor=cast("User", request.user),
+                clock=SystemClock(),
+            )
+        except RecollectionNotPermittedError as forbidden:
+            raise PermissionDenied(str(forbidden)) from forbidden
+        except RecollectionInFlightError as in_flight:
+            return _refused_detail(request, str(in_flight), status=HTTPStatus.CONFLICT, **kwargs)
+        except RecollectionError as refused:
+            return _refused_detail(request, str(refused), status=HTTPStatus.BAD_REQUEST, **kwargs)
+
+        # The name is re-read from the database before the redirect is composed:
+        # the row was fetched before the service ran, and a correction landing
+        # between the two would send the reader to a URL that now 404s.
+        name = str(Package.objects.filter(pk=health.package_id).values_list("canonical_name", flat=True).get())
+        message = recollection_message(receipt, name=name)
+        if receipt.unpublished:
+            messages.warning(request, message)
+        else:
+            messages.success(request, message)
+        # 303, so a refresh of the detail page does not re-post the form and ask
+        # again -- which the service would refuse anyway, but with a 409 in place
+        # of the page the reader was sent to.
+        return HttpResponseRedirect(
+            reverse("conda_sentinel:package-detail", kwargs={"canonical_name": name}),
+            status=HTTPStatus.SEE_OTHER,
+        )
+
+
+def recollection_message(receipt: RecollectionReceipt, *, name: str) -> str:
+    """Return what the page tells the reader a recollection did.
+
+    Names the collectors asked for, the ones not offered and why, and any whose
+    hand-off failed -- each list verbatim from the receipt, so the message and
+    the audit row agree about what was asked and the message alone says what
+    was handed off.
+
+    Args:
+        receipt: What the service answered.
+        name: The package's canonical name.
+
+    Returns:
+        One or more sentences.
+
+    """
+    parts = [
+        _("Collect now: asked %(collectors)s to re-run on %(name)s, forced past the observation window.")
+        % {"collectors": ", ".join(receipt.collectors), "name": name},
+    ]
+    if receipt.not_offered:
+        parts.append(
+            _("Not offered, because their selection does not contain this package: %(collectors)s.")
+            % {"collectors": ", ".join(receipt.not_offered)},
+        )
+    if receipt.unpublished:
+        parts.append(
+            _(
+                "The hand-off failed for %(collectors)s; the request is on the record, and those collectors "
+                "were not handed off. Ask again once the broker is reachable."
+            )
+            % {"collectors": ", ".join(receipt.unpublished)},
+        )
+    return " ".join(parts)
+
+
+def _refused_detail(request: Any, refusal: str, *, status: HTTPStatus, **kwargs: Any) -> HttpResponse:
+    """Re-render the detail page carrying a refusal, with the status the refusal earns.
+
+    The detail view's own `get`, run on a fresh instance rather than through its
+    `dispatch`: the recollect view's mixin has already admitted the role, and both
+    roles it admits may read the page.
+
+    Args:
+        request: The request.
+        refusal: What was refused, in the service's own words.
+        status: 409 for a run in flight, 400 otherwise.
+        **kwargs: Django's keyword URL arguments, carrying the canonical name.
+
+    Returns:
+        The detail page, with the refusal shown and the given status.
+
+    """
+    detail = PackageDetailView(refusal=refusal)
+    detail.setup(request, **kwargs)
+    response = detail.get(request, **kwargs)
+    response.status_code = status
+    return response
 
 
 class CoverageView(RoleRequiredMixin, TemplateView):

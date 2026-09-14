@@ -34,6 +34,7 @@ import pytest
 from django.db import models
 
 from conda_sentinel.core.outcomes import OutcomeState
+from conda_sentinel.core.runs import RunState
 from conda_sentinel.identity.confidence import IdentityConfidence
 from conda_sentinel.surface.tone import PLAIN
 from conda_sentinel.surface.tone import TONED_VOCABULARIES
@@ -187,3 +188,36 @@ def test_identity_confidence_is_toned_because_the_health_view_shows_it() -> None
     """
     assert tone_of(IdentityConfidence.UNMAPPED.value) == SENTINEL_TONES[OutcomeState.UNKNOWN.value]
     assert tone_of(IdentityConfidence.VERIFIED.value) == REASSURING
+
+
+#: The run ledger's five states and the tone each wears (`CPM-OPERATE-S08`).
+RUN_STATE_TONES: Final[dict[str, str]] = {
+    RunState.RUNNING.value: "tone-info",
+    RunState.SUCCEEDED.value: "tone-ok",
+    RunState.PARTIAL.value: "tone-warn",
+    RunState.FAILED.value: "tone-crit",
+    RunState.SKIPPED.value: "tone-plain",
+}
+
+
+@pytest.mark.parametrize(("value", "expected"), sorted(RUN_STATE_TONES.items()))
+def test_each_run_state_has_the_tone_the_page_draws_it_with(value: str, expected: str) -> None:
+    """The five states, toned rather than plain, so the in-flight panel and the ledger stop rendering grey.
+
+    `running` is the one `info` in the table: something is happening and nothing
+    is wrong yet. `skipped` is deliberately undecorated -- the window declining to
+    observe again is not a failure and must not look like one.
+
+    Args:
+        value: The state.
+        expected: Its tone.
+
+    """
+    assert RunState in TONED_VOCABULARIES
+    assert tone_of(value) == expected
+
+
+def test_a_running_run_is_neither_reassuring_nor_a_sentinel() -> None:
+    """`info` is its own tone: not `ok`, and not one of the four `CPM-FR-5` reserves for the sentinels."""
+    assert tone_of(RunState.RUNNING.value) != REASSURING
+    assert tone_of(RunState.RUNNING.value) not in set(SENTINEL_TONES.values())

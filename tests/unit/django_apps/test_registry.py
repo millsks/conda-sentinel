@@ -22,6 +22,8 @@ attribute rather than building a transport.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from conda_sentinel.core.collection import Collector
@@ -29,12 +31,17 @@ from conda_sentinel.core.registry import CollectorRegistryError
 from conda_sentinel.core.registry import register
 from conda_sentinel.core.registry import registered_collectors
 from conda_sentinel.core.registry import registrations
+from conda_sentinel.core.registry import selects
+from conda_sentinel.core.registry import swept_collectors
 from conda_sentinel.core.registry import unregister
 from tests.collectors import FIXTURE_COLLECTOR
 from tests.collectors import OTHER_FIXTURE_COLLECTOR
 from tests.collectors import collector_class
 from tests.collectors import fixture_evidence_model
 from tests.collectors import registered_collector
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _a_collector(name: str = FIXTURE_COLLECTOR) -> type[Collector]:
@@ -193,3 +200,44 @@ def test_the_registry_cannot_be_widened_through_what_it_hands_back() -> None:
 def test_the_refusal_is_a_value_error() -> None:
     """One family of declaration defects, so a caller catching one catches them all."""
     assert issubclass(CollectorRegistryError, ValueError)
+
+
+def test_the_swept_set_is_the_registered_collectors_declaring_a_selection() -> None:
+    """`swept_collectors()`: `None` means not swept, and anything else -- an empty generator included -- means swept."""
+    unswept = _a_collector()
+    swept = collector_class(declared_model=fixture_evidence_model(), declared_name=OTHER_FIXTURE_COLLECTOR)
+    swept.selectable_packages = classmethod(lambda cls: iter(()))  # type: ignore[method-assign]
+
+    with registered_collector(unswept), registered_collector(swept):
+        assert unswept.selectable_packages() is None
+        assert unswept not in swept_collectors()
+        assert swept in swept_collectors()
+
+
+def test_selects_materialises_a_sequence_selection_never_iterates_a_generator_and_refuses_an_unswept_collector() -> (
+    None
+):
+    """The three shapes a unit case can build: a sequence, a generator, and `None`.
+
+    A generator is answered `False` without being drawn: the two the product
+    declares are the empty ones an undeclared source answers with, and each
+    warns on first use. The queryset shapes need a database and are asserted in
+    `tests/integration/django_apps/test_recollection.py`.
+    """
+    unswept = _a_collector()
+    swept = collector_class(declared_model=fixture_evidence_model(), declared_name=OTHER_FIXTURE_COLLECTOR)
+    swept.selectable_packages = classmethod(lambda cls: [7, 9])  # type: ignore[method-assign]
+    drawn: list[int] = []
+
+    def a_generator() -> Iterator[int]:
+        drawn.append(7)
+        yield 7
+
+    lazy = collector_class(declared_model=fixture_evidence_model(), declared_name="lazy")
+    lazy.selectable_packages = classmethod(lambda cls: a_generator())  # type: ignore[method-assign]
+
+    assert selects(unswept, 7) is False
+    assert selects(swept, 7) is True
+    assert selects(swept, 8) is False
+    assert selects(lazy, 7) is False
+    assert drawn == [], "the generator was never iterated"

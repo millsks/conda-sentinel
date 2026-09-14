@@ -212,6 +212,9 @@ body{margin:0}
 .chip.tone-error::before{border-radius:0;clip-path:polygon(50% 0,100% 100%,0 100%);height:9px}
 .chip.tone-plain{color:var(--ink-2);background:var(--surface-2);border-color:var(--line)}
 .chip.tone-plain::before{display:none}
+/* info: a run in flight -- something is happening and nothing is wrong yet; the accent, not a verdict colour */
+.chip.tone-info{color:var(--accent);background:var(--accent-wash);border-color:color-mix(in srgb,var(--accent) 32%,transparent)}
+.chip.tone-info::before{background:transparent;border:1.5px solid currentColor;border-top-color:transparent}
 .chip.sm{font-size:10px;padding:1px 6px 1px 6px}
 
 /* the evidence footline that sits under every claimed value */
@@ -370,6 +373,13 @@ body{margin:0}
   border-top-color:var(--accent);flex:none;margin-top:2px;animation:sp 1s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
 .toast b{font-size:12.5px}
+/* CPM-OPERATE-S08: a message's level is its Django tag; a warning must not read as success */
+.toast.toast-success{border-color:color-mix(in srgb,var(--ok) 40%,transparent);background:var(--ok-wash)}
+.toast.toast-warning{border-color:color-mix(in srgb,var(--warn) 40%,transparent);background:var(--warn-wash)}
+.toast.toast-error{border-color:color-mix(in srgb,var(--err) 40%,transparent);background:var(--err-wash)}
+.panel header.in-flight{background:var(--accent-wash)}
+.kv.kv-narrow{grid-template-columns:110px minmax(0,1fr)}
+.recollect-wait{align-self:center}
 .toast p{font-size:11.5px;color:var(--muted);margin-top:2px}
 
 /* diagram surface */
