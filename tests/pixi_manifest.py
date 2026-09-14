@@ -22,23 +22,28 @@ and it sits at `tests/` rather than under `tests/unit/` because
 share: a collected test module is not a helper library, and importing one from
 another ties two files' collection together.
 
-`tests/unit/test_locality_declaration.py` reads the same tables through its own
-copies of `_task_tables` and `_task_env`. Those are deliberately left where they
-are: that module asserts the *other* half of AD-13's task-`env` contract -- which
-tasks may declare `COMPONENT_RUNTIME` -- and its walk predates and is wider than
-this one, taking in `[activation.env]` tables that have nothing to do with tasks.
-Folding it in is a refactor of Story 5.2's and Story 4.4's work rather than of
-this story's, and it is recorded here rather than done quietly.
+`tests/unit/test_locality_declaration.py` asserts the *other* half of AD-13's
+contract -- which tasks and which activation envs may declare `COMPONENT_*` --
+and its walk is wider than the task one, taking in every `[activation.env]`
+table, platform scopes included, and every activation *script*. Since
+`CPM-OPERATE-S06` it reads those through `activation_envs` and
+`activation_scripts` here rather than through copies of its own, and
+`variable_sites` is the one answer to "where does the manifest declare this
+name" that both it and `tests/unit/test_settings.py` scan with.
 """
 
 from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Final
 
 from config.locality import PROCESS_ENV_VAR
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 #: The repository root. Two parents up: `pixi_manifest.py` -> `tests` -> root.
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
@@ -118,6 +123,120 @@ def feature_scopes(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
             raise ValueError(message)
         scopes[str(name)] = feature
     return scopes
+
+
+def _activation(scope: Any) -> dict[str, Any]:
+    """Return one scope's `activation` table, or an empty one.
+
+    Guarded rather than indexed: a scope whose `activation` is not a table -- a
+    string, say, from a half-edited manifest -- would otherwise raise inside a
+    walk whose whole job is to find offenders, and a walk that raises finds none.
+
+    Args:
+        scope: A feature scope or a `[target.<platform>]` table.
+
+    Returns:
+        The activation table, or `{}` when the scope declares none.
+    """
+    if not isinstance(scope, dict):
+        return {}
+    activation = scope.get("activation")
+    return activation if isinstance(activation, dict) else {}
+
+
+def activation_envs(manifest: dict[str, Any]) -> dict[str, tuple[str, dict[str, Any]]]:
+    """Return every activation-env table in the manifest, platform scopes included.
+
+    Four shapes are walked: `[activation.env]`,
+    `[target.<platform>.activation.env]`, `[feature.<name>.activation.env]` and
+    `[feature.<name>.target.<platform>.activation.env]`. The platform-scoped
+    pair is not hypothetical -- pixi honours it and it reaches the process, so
+    omitting it would leave a hole that ships to production.
+
+    Args:
+        manifest: The parsed pixi manifest.
+
+    Returns:
+        Table location -> (the feature that owns it, the variables it declares).
+    """
+    tables: dict[str, tuple[str, dict[str, Any]]] = {}
+    for feature, scope in feature_scopes(manifest).items():
+        prefix = "" if feature == DEFAULT_FEATURE else f"feature.{feature}."
+        env = _activation(scope).get("env")
+        if isinstance(env, dict):
+            tables[f"[{prefix}activation.env]"] = (feature, env)
+        for platform, target in scope.get("target", {}).items():
+            platform_env = _activation(target).get("env")
+            if isinstance(platform_env, dict):
+                tables[f"[{prefix}target.{platform}.activation.env]"] = (feature, platform_env)
+    return tables
+
+
+def activation_scripts(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return every activation *script* declaration in the manifest.
+
+    An activation script is a second export route the parsed manifest cannot
+    show: it is a path to a shell script, and its contents are not part of the
+    document. The manifest declares none today, and
+    `tests/unit/test_locality_declaration.py` keeps it that way; `variable_sites`
+    below reads each declared script's text anyway, so a scan for a name is not
+    blind to one the day it appears.
+
+    Args:
+        manifest: The parsed pixi manifest.
+
+    Returns:
+        Table location -> the declared scripts.
+    """
+    scripts: dict[str, Any] = {}
+    for feature, scope in feature_scopes(manifest).items():
+        prefix = "" if feature == DEFAULT_FEATURE else f"feature.{feature}."
+        declared = _activation(scope).get("scripts")
+        if declared is not None:
+            scripts[f"[{prefix}activation].scripts"] = declared
+        for platform, target in scope.get("target", {}).items():
+            platform_scripts = _activation(target).get("scripts")
+            if platform_scripts is not None:
+                scripts[f"[{prefix}target.{platform}.activation].scripts"] = platform_scripts
+    return scripts
+
+
+def variable_sites(manifest: dict[str, Any], names: Iterable[str], *, root: Path | None = None) -> list[str]:
+    """Return every place the manifest declares one of the named variables.
+
+    Three routes reach a process from the manifest, and all three are walked:
+    every activation env (`activation_envs`), the text of every activation
+    script (`activation_scripts` -- a script that cannot be read is reported as
+    a site, since a scan that skipped it would be a scan with a hole), and
+    every task's own `env` (`task_env`).
+
+    Args:
+        manifest: The parsed pixi manifest.
+        names: The variable names to look for.
+        root: The directory script paths resolve against. Defaults to the
+            repository root.
+
+    Returns:
+        One line per declaration, naming the variable and where it was found,
+        sorted. Empty when no route declares any of the names.
+    """
+    wanted = tuple(names)
+    sites: list[str] = []
+    for table, (_feature, env) in activation_envs(manifest).items():
+        sites.extend(f"{name} in {table}" for name in wanted if name in env)
+    for table, declared in activation_scripts(manifest).items():
+        paths = declared if isinstance(declared, list) else [declared]
+        for script in paths:
+            path = (root or REPO_ROOT) / str(script)
+            if not path.is_file():
+                sites.extend(f"{name} may be in {table} ({script}, which cannot be read)" for name in wanted)
+                continue
+            text = path.read_text(encoding="utf-8")
+            sites.extend(f"{name} in {table} ({script})" for name in wanted if name in text)
+    for table, task_name, definition in tasks(manifest):
+        env = task_env(definition)
+        sites.extend(f"{name} in {task_name} in {table}" for name in wanted if name in env)
+    return sorted(sites)
 
 
 def task_tables(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:

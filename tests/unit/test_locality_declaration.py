@@ -42,14 +42,18 @@ environment, and opens no network, database or other filesystem surface.
 from __future__ import annotations
 
 import os
-import tomllib
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-PIXI_MANIFEST = REPO_ROOT / "pixi.toml"
+from tests.pixi_manifest import DEFAULT_FEATURE
+from tests.pixi_manifest import PIXI_MANIFEST
+from tests.pixi_manifest import activation_envs
+from tests.pixi_manifest import activation_scripts
+from tests.pixi_manifest import load_manifest
+from tests.pixi_manifest import task_env
+from tests.pixi_manifest import task_tables
+from tests.pixi_manifest import tasks
 
 # The prefix AD-13 keeps out of the deployed activation env. Matched as a prefix
 # rather than as the two names, so a third `COMPONENT_*` fact invented later is
@@ -72,11 +76,6 @@ LOCAL = "local"
 # variable it may declare.
 DECLARATION_FEATURE = "dev"
 
-# pixi's implicit feature: the unscoped `[activation.env]`, `[tasks]` and
-# `[dependencies]` tables belong to it, and every environment includes it unless
-# it sets `no-default-feature`.
-DEFAULT_FEATURE = "default"
-
 # The environments a developer runs in, and therefore the ones allowed to carry
 # the `dev` feature and its declaration. `spike-storage` layers the dev feature
 # deliberately (it is `dev` plus django-storages, for R-1's fitness spike), so
@@ -98,152 +97,12 @@ def manifest() -> dict[str, Any]:
     """Return the parsed pixi manifest.
 
     Returns:
-        The manifest, parsed from TOML.
+        The manifest, parsed from TOML through `tests.pixi_manifest`, which is
+        the one reader every manifest assertion in the suite shares -- the
+        activation-env and script walks this module used to carry copies of live
+        there since `CPM-OPERATE-S06`.
     """
-    with PIXI_MANIFEST.open("rb") as handle:
-        parsed: dict[str, Any] = tomllib.load(handle)
-    return parsed
-
-
-def _feature_scopes(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Return every feature scope in the manifest, including the implicit default one.
-
-    Args:
-        manifest: The parsed pixi manifest.
-
-    Returns:
-        Feature name -> the table that scopes it. The unscoped root is returned
-        under `default`, which is the feature it belongs to.
-    """
-    scopes: dict[str, dict[str, Any]] = {DEFAULT_FEATURE: manifest}
-    for name, feature in manifest.get("feature", {}).items():
-        if isinstance(feature, dict):
-            scopes[str(name)] = feature
-    return scopes
-
-
-def _activation_tables(manifest: dict[str, Any]) -> dict[str, tuple[str, dict[str, Any]]]:
-    """Return every activation-env table in the manifest, platform scopes included.
-
-    Four shapes are walked: `[activation.env]`,
-    `[target.<platform>.activation.env]`, `[feature.<name>.activation.env]` and
-    `[feature.<name>.target.<platform>.activation.env]`. The platform-scoped
-    pair is not hypothetical -- pixi honours it and it reaches the process, so
-    omitting it would leave a hole that ships to production.
-
-    Args:
-        manifest: The parsed pixi manifest.
-
-    Returns:
-        Table location -> (the feature that owns it, the variables it declares).
-    """
-    tables: dict[str, tuple[str, dict[str, Any]]] = {}
-    for feature, scope in _feature_scopes(manifest).items():
-        prefix = "" if feature == DEFAULT_FEATURE else f"feature.{feature}."
-        env = scope.get("activation", {}).get("env")
-        if isinstance(env, dict):
-            tables[f"[{prefix}activation.env]"] = (feature, env)
-        for platform, target in scope.get("target", {}).items():
-            platform_env = target.get("activation", {}).get("env")
-            if isinstance(platform_env, dict):
-                tables[f"[{prefix}target.{platform}.activation.env]"] = (feature, platform_env)
-    return tables
-
-
-def _activation_scripts(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Return every activation *script* declaration in the manifest.
-
-    An activation script is a second export route this module cannot read: it is
-    a path to a shell script, and its contents are not part of the manifest. The
-    manifest declares none today, and the assertion that uses this keeps it that
-    way -- so the prohibitions above stay exhaustive rather than becoming a scan
-    of one of two mechanisms.
-
-    Args:
-        manifest: The parsed pixi manifest.
-
-    Returns:
-        Table location -> the declared scripts.
-    """
-    scripts: dict[str, Any] = {}
-    for feature, scope in _feature_scopes(manifest).items():
-        prefix = "" if feature == DEFAULT_FEATURE else f"feature.{feature}."
-        declared = scope.get("activation", {}).get("scripts")
-        if declared is not None:
-            scripts[f"[{prefix}activation].scripts"] = declared
-        for platform, target in scope.get("target", {}).items():
-            platform_scripts = target.get("activation", {}).get("scripts")
-            if platform_scripts is not None:
-                scripts[f"[{prefix}target.{platform}.activation].scripts"] = platform_scripts
-    return scripts
-
-
-def _task_tables(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Return every task table in the manifest, keyed by where it lives.
-
-    `[tasks]`, each `[feature.<name>.tasks]`, and the platform-scoped variants of
-    both. The platform-scoped tables hold no tasks today; they are read anyway,
-    because a task declared under one is as real as any other and would otherwise
-    escape every assertion in this module.
-
-    Args:
-        manifest: The parsed pixi manifest.
-
-    Returns:
-        Table location -> {task name: task definition}.
-    """
-    tables: dict[str, dict[str, Any]] = {}
-    for feature, scope in _feature_scopes(manifest).items():
-        prefix = "" if feature == DEFAULT_FEATURE else f"feature.{feature}."
-        tasks = scope.get("tasks")
-        if isinstance(tasks, dict):
-            tables[f"[{prefix}tasks]"] = tasks
-        for platform, target in scope.get("target", {}).items():
-            platform_tasks = target.get("tasks")
-            if isinstance(platform_tasks, dict):
-                tables[f"[{prefix}target.{platform}.tasks]"] = platform_tasks
-    return tables
-
-
-def _tasks(manifest: dict[str, Any]) -> list[tuple[str, str, Any]]:
-    """Return every task in the manifest as (table location, name, definition).
-
-    A list rather than a name-keyed mapping, deliberately. Keying by name lets a
-    task declared in two tables overwrite its twin, and the shadowed definition
-    then escapes every assertion that walks the mapping -- so a `migrate` with a
-    forbidden `env` in `[feature.dev.tasks]` could hide behind the clean one in
-    `[tasks]`. Every definition is asserted where it is declared.
-
-    Args:
-        manifest: The parsed pixi manifest.
-
-    Returns:
-        One entry per declaration, in manifest order.
-    """
-    return [
-        (table, str(name), definition)
-        for table, tasks in _task_tables(manifest).items()
-        for name, definition in tasks.items()
-    ]
-
-
-def _task_env(definition: Any) -> dict[str, Any]:
-    """Return the `env` table a task definition declares, or an empty one.
-
-    A task written as a bare command string declares no `env` at all, which is
-    the safe answer for both variables: absent locality means deployed, absent
-    process type means not a serving process.
-
-    Args:
-        definition: One task's definition, in either legal form.
-
-    Returns:
-        The declared environment, or `{}` when the task declares none.
-    """
-    if not isinstance(definition, dict):
-        return {}
-    env = definition.get("env")
-    return env if isinstance(env, dict) else {}
+    return load_manifest()
 
 
 def _environment_features(manifest: dict[str, Any]) -> dict[str, list[str]]:
@@ -296,9 +155,9 @@ def test_the_scanners_see_the_manifest_they_claim_to(manifest: dict[str, Any]) -
     reader that silently found nothing would pass all of them while checking
     nothing at all. This is the non-vacuity guard for the file.
     """
-    assert "[activation.env]" in _activation_tables(manifest)
-    assert "[feature.dev.activation.env]" in _activation_tables(manifest)
-    assert "[tasks]" in _task_tables(manifest)
+    assert "[activation.env]" in activation_envs(manifest)
+    assert "[feature.dev.activation.env]" in activation_envs(manifest)
+    assert "[tasks]" in task_tables(manifest)
     assert DEFAULT_FEATURE in _environment_features(manifest)
 
 
@@ -316,7 +175,7 @@ def test_default_environment_activation_env_declares_no_component_variable(manif
     Scoped to every environment that is not a developer environment, so today's
     `default` is covered and Epic 8's matrix is covered on the day it lands.
     """
-    tables = _activation_tables(manifest)
+    tables = activation_envs(manifest)
     offenders: list[str] = []
     for environment, features in _environment_features(manifest).items():
         if environment in DEVELOPER_ENVIRONMENTS:
@@ -349,7 +208,7 @@ def test_component_process_absent_from_every_activation_env(manifest: dict[str, 
     """
     offenders = sorted(
         location
-        for location, (_feature, table) in _activation_tables(manifest).items()
+        for location, (_feature, table) in activation_envs(manifest).items()
         if any(variable.upper() == PROCESS_VARIABLE for variable in table)
     )
     assert not offenders, (
@@ -371,7 +230,7 @@ def test_dev_feature_declares_local_runtime(manifest: dict[str, Any]) -> None:
     reader would *not* accept fails loudly here rather than quietly making every
     developer path deployed.
     """
-    tables = _activation_tables(manifest)
+    tables = activation_envs(manifest)
     location = f"[feature.{DECLARATION_FEATURE}.activation.env]"
     assert location in tables, (
         f"{location} is missing from pixi.toml. It is the one site AD-13 permits for the locality declaration."
@@ -397,8 +256,8 @@ def test_no_task_declares_component_runtime(manifest: dict[str, Any]) -> None:
     """
     offenders = sorted(
         f"{name} = {env[variable]!r} in {table}"
-        for table, name, definition in _tasks(manifest)
-        for env in [_task_env(definition)]
+        for table, name, definition in tasks(manifest)
+        for env in [task_env(definition)]
         for variable in env
         if variable.upper() == RUNTIME_VARIABLE
     )
@@ -420,9 +279,9 @@ def test_only_serving_process_tasks_declare_a_process_type(manifest: dict[str, A
     """
     offenders = sorted(
         f"{name} = {env[variable]!r} in {table}"
-        for table, name, definition in _tasks(manifest)
+        for table, name, definition in tasks(manifest)
         if name not in SERVING_PROCESS_TASKS
-        for env in [_task_env(definition)]
+        for env in [task_env(definition)]
         for variable in env
         if variable.upper() == PROCESS_VARIABLE
     )
@@ -470,9 +329,9 @@ def test_serving_process_tasks_declare_no_runtime(manifest: dict[str, Any]) -> N
     """
     offenders = sorted(
         f"{name} = {env[variable]!r} in {table}"
-        for table, name, definition in _tasks(manifest)
+        for table, name, definition in tasks(manifest)
         if name in SERVING_PROCESS_TASKS
-        for env in [_task_env(definition)]
+        for env in [task_env(definition)]
         for variable in env
         if variable.upper() == RUNTIME_VARIABLE
     )
@@ -493,7 +352,7 @@ def test_no_activation_script_offers_an_unchecked_export_route(manifest: dict[st
     has to be extended rather than quietly bypassed by an `export
     COMPONENT_RUNTIME=local` in a file nothing reconciles.
     """
-    declared = _activation_scripts(manifest)
+    declared = activation_scripts(manifest)
     assert not declared, (
         f"pixi.toml declares activation scripts: {sorted(declared)}. "
         f"A script can export {COMPONENT_PREFIX}* variables that the activation-env assertions in this module "

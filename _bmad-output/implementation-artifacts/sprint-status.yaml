@@ -185,7 +185,7 @@ development_status:
   cpm-operate-s03-the-inventory-is-a-governed-table: done
   cpm-operate-s04-day-one-is-observed: done
   cpm-operate-s05-an-authenticated-github-allowance: done
-  cpm-operate-s06-published-conda-currency-on-the-local-stack: backlog
+  cpm-operate-s06-published-conda-currency-on-the-local-stack: done
   cpm-operate-s07-ninety-days-of-evidence-purged-nightly: backlog
   cpm-operate-s08-a-collector-re-run-for-one-package-from-the-page: backlog
   cpm-operate-s09-an-operator-digest: backlog

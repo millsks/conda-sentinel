@@ -436,8 +436,8 @@ different fact, with its own allowance and its own daily sweep offset two hours
 from this one — see "The licence collector reads the channels you already
 declared" below. Size what you ask of `api.anaconda.org` for both.
 
-**It ships monitoring nothing, and that is the intended behaviour rather than a
-gap.** Two settings decide what it observes:
+**Deployed, it ships monitoring nothing, and that is the intended behaviour
+rather than a gap.** Two settings decide what it observes:
 
 ```python
 # config/settings/base.py
@@ -445,27 +445,48 @@ CPM_MONITORED_CHANNELS: tuple[str, ...] = ()
 CPM_MONITORED_PLATFORMS: tuple[str, ...] = ()
 ```
 
-Both ship **empty**. Which conda channels and which platforms this product
-watches is PRD Open Question 4 and is unresolved: a component that picked one for
-you would record facts about a surface nobody chose, permanently, in an
+Both ship **empty deployed**. Which conda channels and which platforms this
+product watches is PRD Open Question 4 and is unresolved: a component that picked
+one for you would record facts about a surface nobody chose, permanently, in an
 append-only log nothing may correct — the same trade the inventory watchlist
 makes above, and for the same reason.
 
-**What the failure looks like until you declare them.** Every collection fails.
-The task raises a `CondaChannelError` naming the setting, the run's ledger row
-finalizes `failed` carrying that message, and **no evidence row is written at
-all** — there is nothing honest to write, because every row must name the channel
-and platform it is about and an empty declaration names neither. A component in
-this state starts, serves and reports normally; it simply records no conda
-package evidence.
+**Locally they are declared**, in `config/settings/local.py` — the module only a
+local run loads (`manage.py`'s default, the local stack's, `seed-demo`'s):
 
-**Declare them by pull request**, in `config/settings/base.py`, beside the
-watchlist that ships unpopulated for the same reason. Each entry is a single
-lower-case path segment: a channel is the segment `api.anaconda.org` serves a
-package under (`conda-forge`, `bioconda`, an internal mirror's name), and a
-platform is a conda subdir (`linux-64`, `osx-arm64`, `win-64`, `noarch`). The
-declaration is read at **run** time, so a change takes effect on the next
-collection.
+```python
+# config/settings/local.py
+CPM_MONITORED_CHANNELS: tuple[str, ...] = ("conda-forge",)
+CPM_MONITORED_PLATFORMS: tuple[str, ...] = ("noarch", "linux-64")
+```
+
+That is what the local stack observes and nothing else: the demo inventory is
+resolved against conda-forge's own index, so conda-forge is the one channel every
+local package is already known on, and `noarch` sits beside `linux-64` because a
+package published only as `noarch` is installable everywhere. `production.py` and
+`test.py` inherit `base.py`'s empty values, so a deployment and the suite both
+still fail closed. It is a code literal rather than a variable in `pixi.toml`: the
+settings read neither name from the environment, and a variable would be a
+declaration nothing reads.
+
+**What the failure looks like, deployed, until you declare them.** Every
+collection fails. The task raises a `CondaChannelError` naming the setting, the
+run's ledger row finalizes `failed` carrying that message, and **no evidence row
+is written at all** — there is nothing honest to write, because every row must
+name the channel and platform it is about and an empty declaration names
+neither. A component in this state starts, serves and reports normally; it
+simply records no conda package evidence.
+
+**Declare them by pull request**, in `config/settings/base.py` for a deployment
+and in `config/settings/local.py` for what a local run observes, beside the
+watchlist that ships unpopulated for the same reason. Never through the
+environment: which surfaces this product records evidence about is a decision
+worth a reviewer, not an unreviewed export, and neither module reads either name
+from a variable. Each entry is a single lower-case path segment: a channel is the
+segment `api.anaconda.org` serves a package under (`conda-forge`, `bioconda`, an
+internal mirror's name), and a platform is a conda subdir (`linux-64`,
+`osx-arm64`, `win-64`, `noarch`). The declaration is read at **run** time, so a
+change takes effect on the next collection.
 
 **A declaration is refused whole rather than read for the entries that parse.** An
 entry that is blank, is not a string, carries a path separator, or repeats another
@@ -553,9 +574,10 @@ validator and remember nothing, so **they re-transfer their whole document on
 every run**, and a `304` from one of them is a source answering a question nobody
 asked, which the row records as `error`. Both are recorded as deferred work on
 `CPM-CURRENCY-S04`. **The full-inventory sweep below now schedules this collector
-daily** -- but its selection is empty until the two settings above are declared,
-so an undeclared component sweeps nothing rather than failing every package. See
-"Which packages a sweep offers".
+daily** -- but deployed its selection is empty until the two settings above are
+declared, so an undeclared component sweeps nothing rather than failing every
+package; locally `local.py` declares conda-forge, so the sweep offers every
+package. See "Which packages a sweep offers".
 
 **A misconfiguration and a transient failure leave this task the same way.** An
 undeclared channel raises out of `cpm.collect.conda_package` like any other
@@ -895,9 +917,10 @@ arrived at — and the channel the answer came from.
 **It needs no source declaration of its own.** Unlike the two security collectors
 above it, this one has no adapter slot: a licence is stated by the channels
 `CPM_MONITORED_CHANNELS` already names (see the published-package section above),
-and it reads that same declaration. It ships observing nothing for exactly the
-reason the published-package collector does — the setting is empty until you
-declare it — and starts observing on the next tick once you do.
+and it reads that same declaration. Deployed, it ships observing nothing for
+exactly the reason the published-package collector does — the setting is empty
+until you declare it — and starts observing on the next tick once you do;
+locally `local.py` declares conda-forge, so it observes from the first sweep.
 `CPM_MONITORED_PLATFORMS` is **not** read: a licence is a property of the package
 a channel serves rather than of a build, so there is one row per channel and no
 platform column.
@@ -1647,8 +1670,9 @@ dispatch with nothing enqueued.** The resolver reads conda-forge's
 index has no PyPI identity resolved by it: its run records `not_found`, nothing is
 written to the package, and it is offered again next cadence.
 
-**The published-package sweep selects nothing until the two settings above are
-declared**, and that is deliberate rather than a gap. Its question applies to
+**Deployed, the published-package sweep selects nothing until the two settings
+above are declared** — locally `local.py` declares conda-forge and it offers
+every package — and that is deliberate rather than a gap. Its question applies to
 every package, so an undeclared component would otherwise enqueue the whole
 inventory and fail every one of those collections naming the setting — ten
 thousand `failed` rows a day, out of the box. Instead the selection is empty, the
@@ -1662,8 +1686,9 @@ enqueued task raises *before* the ledger opens, so an undeclared component would
 leave ten thousand tasks a day with no record at all that they ran. They are two
 separate declarations: declaring an advisory source does not declare a KEV source,
 and withdrawing either leaves the other collecting. The licence sweep is quiet for
-a different reason -- it declares no source at all, and selects nothing until
-`CPM_MONITORED_CHANNELS` is declared, exactly as the published-package sweep does.
+a different reason -- it declares no source at all, and deployed it selects
+nothing until `CPM_MONITORED_CHANNELS` is declared, exactly as the
+published-package sweep does; locally `local.py` declares conda-forge for both.
 
 **Once a source is declared it offers every package** — including packages whose
 `primary_purl` names no version and packages with no package URL at all. That is
@@ -2034,23 +2059,25 @@ single instant, so all of a package's rows tie on `observed_at`, and without a
 key the answer would be whichever row was inserted last — which changes when you
 reorder `CPM_MONITORED_CHANNELS`, silently.
 
-**The key is the channel, then the platform, both ascending, then the newest row
-for that pair.** Alphabetical is arbitrary and is chosen only because it is
-*fixed*: the same evidence produces the same verdict on every replay. The row
-references the observation, so the channel and platform the verdict concerns are
-readable from it.
+**The key is: a pair that answered `ok` before one that did not; then the
+channel, then the platform, both ascending; then the newest row for that pair.**
+The first part is what makes a two-platform declaration honest: a pure-Python
+package on conda-forge publishes only `noarch`, so a sweep over `("noarch",
+"linux-64")` writes it one `ok` row and one `not_found` row at the same instant,
+and on channel-then-platform alone `linux-64` would sort first and the package
+would read `not_found` while its own `noarch` row said it was current. A
+sentinel is the verdict only when *no* pair at that instant answered `ok`, and
+the preference never reaches across sweeps — a package withdrawn from a channel
+reads today's `not_found`, not yesterday's `ok`. Alphabetical for the rest is
+arbitrary and is chosen only because it is *fixed*: the same evidence produces
+the same verdict on every replay. The row references the observation, so the
+channel and platform the verdict concerns are readable from it.
 
-Two costs follow, and both are real:
-
-- A package current on one channel and behind on another gets the
-  first-sorting channel's verdict.
-- **A channel that simply does not carry the package answers `not_found`**, and
-  if that channel sorts first, `not_found` becomes the package's conda verdict
-  even where a later-sorting channel publishes the authority's exact version. Read
-  the referenced observation before acting on a conda `not_found`.
-
-A verdict per pair is a larger table than this one's `(package, policy_run)` key
-describes, and it is not built here.
+One cost remains, and it is real: a package current on one pair and behind on
+another gets the verdict of whichever `ok` pair sorts first. Read the referenced
+observation before acting on a conda verdict you did not expect. A verdict per
+pair is a larger table than this one's `(package, policy_run)` key describes,
+and it is not built here.
 
 ## The feedstock presence policy: does it exist, and is anybody maintaining it
 

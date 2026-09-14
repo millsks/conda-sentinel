@@ -225,11 +225,18 @@ queue holding two items looks like a queue.
       packages an hour, so the 146 resolved packages take several sweeps to cover.
       Until each has reached a package, feedstock presence, upstream-release currency
       and Python 3.14 readiness read <span class="cs-state unknown">unknown</span>.
-    - **Unreachable on the local stack at all** — published-conda currency needs
-      `CPM_MONITORED_CHANNELS`, which is empty; 3.14 verification is only ever
-      triggered by hand. So `not_applicable` on the readiness column, `awaiting_build`
-      on remediation and priority buckets `p8`/`p9` never appear locally, whatever you
-      wait for.
+    - **Unreachable on the local stack at all** — 3.14 verification is only ever
+      triggered by hand, so `not_applicable` on the readiness column and priority
+      bucket `p8` never appear locally, whatever you wait for (`p9` fires on
+      `inferred_not_ready`, which the locally swept `python_readiness` can produce).
+      Published-conda currency is *not* on this list any more:
+      `config/settings/local.py` declares `conda-forge` for every local run, so
+      `conda_package` and `license` observe on the stack, the column fills as the
+      sweep reaches each package. With licence findings written locally the
+      licence-driven buckets `p4`/`p7` are one recorded rule set away (the shipped
+      `license_rules` is empty; see the note below), and remediation can now find a
+      fix on the published-conda surface as well as on PyPI and the source; only
+      `awaiting_build` still needs a hand-triggered build.
 
 !!! note "One column still comes out flat, deliberately"
 
@@ -286,9 +293,12 @@ To reproduce what a past run concluded, pass its cut-off as well; see
 
 ## Why a fresh deployment sees nothing
 
-**Every collector ships inert.** None names an upstream, a channel, a catalogue or an
-advisory source. On a real deployment nothing is observed until you declare where to
-look — see [Operating Conda-Sentinel](operations.md).
+**Every collector ships inert, deployed.** None names an upstream, a channel, a
+catalogue or an advisory source. On a real deployment nothing is observed until you
+declare where to look — see [Operating Conda-Sentinel](operations.md). The one
+local exception is the published-conda surface: `config/settings/local.py` declares
+`conda-forge`, so `conda_package` and `license` observe on a local run without any
+declaration of yours.
 
 The seeder exists so you do not have to do that to see the product work.
 

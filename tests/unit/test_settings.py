@@ -15,10 +15,14 @@ import pytest
 import yaml
 from django.core.exceptions import ImproperlyConfigured
 
+from conda_sentinel.collectors import license as license_collector
 from conda_sentinel.collectors.conda_package import CHANNELS_SETTING
 from conda_sentinel.collectors.conda_package import COLLECTOR_NAME as CONDA_PACKAGE_NAME
+from conda_sentinel.collectors.conda_package import MAX_MONITORED_CHANNELS
 from conda_sentinel.collectors.conda_package import PLATFORMS_SETTING
 from conda_sentinel.collectors.conda_package import CondaPackageCollector
+from conda_sentinel.collectors.conda_package import declaration_fault
+from conda_sentinel.collectors.conda_package import monitored
 from conda_sentinel.collectors.feedstock import COLLECTOR_NAME as FEEDSTOCK_NAME
 from conda_sentinel.collectors.feedstock import FeedstockCollector
 from conda_sentinel.collectors.github import GITHUB_TOKEN_SETTING
@@ -47,6 +51,7 @@ from conda_sentinel.core import roles
 from config.authorization import claims
 from config.local_dev import keys
 from config.locality import LOCAL as LOCAL_RUNTIME
+from config.locality import PROCESS_ENV_VAR
 from config.locality import RUNTIME_ENV_VAR
 from config.startup.allowlist import CONTRIBUTABLE_KEYS
 from tests.collectors import A_GITHUB_TOKEN
@@ -57,6 +62,7 @@ from tests.pixi_manifest import REPO_ROOT
 from tests.pixi_manifest import load_manifest
 from tests.pixi_manifest import task_env
 from tests.pixi_manifest import tasks
+from tests.pixi_manifest import variable_sites
 from tests.settings_import import evicted_settings_modules
 
 # AD-23's declared windows, in seconds, and the values the environment-driven
@@ -1279,6 +1285,25 @@ EVERY_SETTINGS_MODULE = (BASE, LOCAL, PRODUCTION, TEST)
 #: and it would keep passing while the two drifted apart.
 MONITORED_SETTINGS = (CHANNELS_SETTING, PLATFORMS_SETTING)
 
+#: The published-conda surface `config/settings/local.py` declares and the other
+#: three modules do not (`CPM-OPERATE-S06`). Spelled here, once, as the expected
+#: value rather than read back from the module: a case that read `local.py` and
+#: asserted what it found would pass on any declaration at all, and the point is
+#: that the local stack observes conda-forge on `noarch` and `linux-64` and
+#: nothing else.
+LOCAL_MONITORED_CHANNELS = ("conda-forge",)
+LOCAL_MONITORED_PLATFORMS = ("noarch", "linux-64")
+
+#: What each settings module is expected to declare, per setting. `base`,
+#: `production` and `test` ship empty -- deployed and in the suite the choice is
+#: still PRD Open Question 4's -- and `local` declares the surface above.
+EXPECTED_MONITORED_SURFACES: dict[str, dict[str, tuple[str, ...]]] = {
+    BASE: {CHANNELS_SETTING: (), PLATFORMS_SETTING: ()},
+    PRODUCTION: {CHANNELS_SETTING: (), PLATFORMS_SETTING: ()},
+    TEST: {CHANNELS_SETTING: (), PLATFORMS_SETTING: ()},
+    LOCAL: {CHANNELS_SETTING: LOCAL_MONITORED_CHANNELS, PLATFORMS_SETTING: LOCAL_MONITORED_PLATFORMS},
+}
+
 #: The keys `CELERY_BEAT_SCHEDULE` carries, one per per-package collector
 #: (`CPM-CURRENCY-S05`). Named here because a *key* is the one part of an entry
 #: that names nothing else in the repository -- `django_celery_beat` uses it as
@@ -1482,17 +1507,18 @@ def test_the_phased_dispatches_are_exactly_the_three_that_declare_an_offset():
 
 
 # ---------------------------------------------------------------------------
-# CPM-CURRENCY-S04 -- the monitored channels and platforms, declared and empty.
+# CPM-CURRENCY-S04 -- the monitored channels and platforms, declared and empty;
+# CPM-OPERATE-S06 -- and declared locally, in `local.py` alone.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.usefixtures("any_settings_module")
 @pytest.mark.parametrize("module", EVERY_SETTINGS_MODULE, ids=lambda name: name.rpartition(".")[2])
 @pytest.mark.parametrize("setting", MONITORED_SETTINGS)
-def test_the_monitored_surfaces_are_declared_and_ship_empty(module: str, setting: str):
-    """PRD Open Question 4: the mechanism ships, the choice does not (`CPM-FR-10`).
+def test_the_monitored_surfaces_are_declared_and_ship_empty_except_locally(module: str, setting: str):
+    """PRD Open Question 4: the mechanism ships, the choice does not -- deployed (`CPM-FR-10`).
 
-    Two halves, and both are load bearing.
+    Three parts, and each is load bearing.
 
     *Declared.* `CollectorsConfig.ready()` refuses to boot a settings module that
     carries neither name, so a module that dropped one would be a component that
@@ -1501,23 +1527,105 @@ def test_the_monitored_surfaces_are_declared_and_ship_empty(module: str, setting
     deployed component actually runs under is `production.py` -- exactly the one a
     case reading only `base` cannot see.
 
-    *Empty.* Which conda channels and platforms this product watches is an
-    operator's decision and is unresolved. A default here would answer it, and the
-    component would record evidence about a surface nobody chose -- permanently,
-    in an append-only log nothing may correct. What the emptiness buys is a run
-    that fails loudly naming the setting, which
-    `tests/integration/django_apps/test_conda_package.py` asserts end to end.
+    *Empty, deployed and in the suite.* Which conda channels and platforms this
+    product watches is an operator's decision and is unresolved. A default in
+    `base.py` would answer it, and the component would record evidence about a
+    surface nobody chose -- permanently, in an append-only log nothing may
+    correct. What the emptiness buys is a run that fails loudly naming the
+    setting, which `tests/integration/django_apps/test_conda_package.py` asserts
+    end to end -- and `test.py` staying empty is what keeps that case honest.
+
+    *Declared locally* (`CPM-OPERATE-S06`). `local.py` is the module only local
+    runs load, and it declares exactly conda-forge on `noarch` and `linux-64`, so
+    the published-conda surface and the licence collector work on a developer's
+    machine instead of selecting nothing for ever. Asserted as an exact value
+    rather than as "non-empty": what the local stack observes is a reviewed
+    literal, and a second channel appearing here is a change worth this case
+    failing.
     """
+    # A fifth settings module fails here by name rather than as a `KeyError` on
+    # the lookup below: the expectation table is a decision per module, and one
+    # nobody has made yet is not a module this case may pass.
+    assert set(EXPECTED_MONITORED_SURFACES) == set(EVERY_SETTINGS_MODULE)
     settings_module = importlib.import_module(module)
 
     declared = getattr(settings_module, setting)
 
-    assert declared == ()
+    assert declared == EXPECTED_MONITORED_SURFACES[module][setting]
     # A tuple rather than a list, and asserted rather than assumed: a mutable
     # default in a settings module is one an importer can append to, and "which
     # surfaces does this component observe" is not a question an import order may
     # answer.
     assert isinstance(declared, tuple)
+
+
+@pytest.mark.usefixtures("any_settings_module")
+def test_the_local_monitored_surface_is_one_the_collector_accepts():
+    """`CPM-OPERATE-S06`: the local declaration passes both collectors' own rules.
+
+    Read from the freshly imported module rather than from the constants above,
+    so that what is checked is what `local.py` assigns. Two collectors read the
+    declaration and `CollectorsConfig.ready()` runs both their shape checks, so
+    both are asked here and none of their rules is respelled: each
+    `declaration_fault` -- the shape check boot refuses on -- returns nothing;
+    each run-time rule (`conda_package.monitored`, `license.monitored_channels`)
+    accepts what it reads, which is what pins `noarch` and `linux-64` to conda's
+    subdir vocabulary and conda-forge to a single path segment; and the channel
+    count fits each collector's `MAX_MONITORED_CHANNELS`, so a local collection
+    stays inside the soft time limit the ceilings are derived from.
+    """
+    local = importlib.import_module(LOCAL)
+
+    channels = getattr(local, CHANNELS_SETTING)
+    platforms = getattr(local, PLATFORMS_SETTING)
+
+    assert declaration_fault(channels, setting=CHANNELS_SETTING, what="channel") == ""
+    assert declaration_fault(platforms, setting=PLATFORMS_SETTING, what="platform") == ""
+    assert len(channels) <= MAX_MONITORED_CHANNELS
+    accepted = monitored(channels, platforms)
+    assert accepted.channels == LOCAL_MONITORED_CHANNELS
+    assert accepted.platforms == LOCAL_MONITORED_PLATFORMS
+
+    assert license_collector.CHANNELS_SETTING == CHANNELS_SETTING
+    assert license_collector.declaration_fault(channels) == ""
+    assert len(channels) <= license_collector.MAX_MONITORED_CHANNELS
+    assert license_collector.monitored_channels(channels) == LOCAL_MONITORED_CHANNELS
+
+
+def test_no_pixi_table_declares_the_monitored_surfaces():
+    """`CPM-OPERATE-S06`: the local default is a settings literal, not a variable.
+
+    The epic's first criterion said "the `dev` feature's activation env", and the
+    story built it as a declaration in `local.py` instead: which surfaces the
+    product records evidence about is, by `base.py`'s own rule, a reviewed code
+    literal worth a pull request, never an unreviewed export -- and the settings
+    modules read neither name from the environment, so a variable in the manifest
+    would be a declaration nothing reads. Every route from the manifest to a
+    process is scanned through `tests/pixi_manifest.py`'s one walker: every
+    activation env, platform scopes included; the text of every activation
+    script; and every task's own `env`. Each site found is listed by name.
+    """
+    manifest = load_manifest()
+
+    assert variable_sites(manifest, MONITORED_SETTINGS) == []
+
+
+def test_the_manifest_scan_sees_the_sites_it_claims_to():
+    """The non-vacuity guard for the case above: the walker finds a name that *is* declared.
+
+    Every assertion built on `variable_sites` is that something is absent, so a
+    walker that silently found nothing would pass all of them while checking
+    nothing at all. `CPM_SWEEP_ON_BEAT_START` is declared in the `dev` feature's
+    activation env and `COMPONENT_PROCESS` in the serving tasks' `env`, and both
+    must come back naming their table.
+    """
+    manifest = load_manifest()
+
+    sites = variable_sites(manifest, (SWEEP_ON_BEAT_START_SETTING, RUNTIME_ENV_VAR, PROCESS_ENV_VAR))
+
+    assert f"{SWEEP_ON_BEAT_START_SETTING} in [feature.dev.activation.env]" in sites
+    assert f"{RUNTIME_ENV_VAR} in [feature.dev.activation.env]" in sites
+    assert any(site.startswith(f"{PROCESS_ENV_VAR} in ") and " in [tasks]" in site for site in sites), sites
 
 
 @pytest.mark.usefixtures("any_settings_module")
