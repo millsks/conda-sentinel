@@ -8,6 +8,7 @@ reading repository files, no network, no database.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from fnmatch import fnmatch
 from pathlib import Path
@@ -138,6 +139,16 @@ REDIS_PORT = "6379"
 # already has. Neither is a gate step: AD-18 keeps `pixi run ci` the one
 # sequence CI runs, and neither script's container is declared by a job.
 REDIS_GATE_TASK = "gate-redis"
+
+# CPM-OPERATE-S10's scale spike: a second `spike_*.py` module, run by a task
+# whose body is a script on `gate-postgres`'s terms (a container, a readiness
+# loop, `docker rm -f` on exit). It differs from R-1's spike in every constant
+# above but the directory and the prefix -- it runs in `dev`, not in an
+# environment of its own, because it needs nothing the runtime set lacks -- so
+# it is admitted by its own test rather than by widening `SPIKE_*` into a
+# roster. What keeps it out of the gate is what keeps R-1's out: its name.
+SCALE_SPIKE_TASK = "spike-scale"
+SCALE_SPIKE_MODULE = SPIKE_DIRECTORY / "spike_evidence_scale.py"
 
 
 @pytest.fixture(scope="module")
@@ -849,6 +860,56 @@ def test_the_redis_gate_script_is_runnable_as_a_task(manifest: dict[str, Any]) -
     assert named, f"the {REDIS_GATE_TASK} task names no script: {tasks[REDIS_GATE_TASK]['cmd']!r}"
     missing = sorted(token for token in named if not (REPO_ROOT / token).is_file())
     assert missing == [], f"the {REDIS_GATE_TASK} task runs scripts that do not exist: {missing}"
+
+
+def test_the_scale_spike_is_runnable_as_a_task_and_never_a_gate_step(manifest: dict[str, Any]) -> None:
+    """CPM-OPERATE-S10's spike runs on demand, in `dev`, through its script, and never inside the gate.
+
+    Reconciled with the tree rather than written down, in five parts: the task
+    pins `dev` (the documented "you never need `-e`" rule) and is not a gate
+    step; the script it runs exists; the script's pytest line names a spike
+    module that exists and carries the prefix the gate's collection rule
+    excludes; that line passes `-s` (the plans are printed, and the story
+    records what is printed) and `-m spike`; and the module's `pytestmark`
+    carries the marker the `-m` expression selects, so the two cannot drift
+    apart into a run that collects nothing. A renamed module or script would
+    otherwise leave the gate green and the task failing with "file not found"
+    -- the failure `test_the_spike_task_names_a_file_that_exists` guards for
+    R-1's spike.
+    """
+    tasks = _all_tasks(manifest)
+
+    assert SCALE_SPIKE_TASK in tasks, f"{SCALE_SPIKE_TASK} must stay runnable as a task of its own"
+    assert tasks[SCALE_SPIKE_TASK].get("default-environment") == "dev"
+    assert SCALE_SPIKE_TASK not in tasks[GATE_TASK]["depends-on"], f"{SCALE_SPIKE_TASK} must not be a gate step"
+
+    named = [token for token in tasks[SCALE_SPIKE_TASK]["cmd"].split() if token.endswith(".sh")]
+    assert named, f"the {SCALE_SPIKE_TASK} task names no script: {tasks[SCALE_SPIKE_TASK]['cmd']!r}"
+    missing = sorted(token for token in named if not (REPO_ROOT / token).is_file())
+    assert missing == [], f"the {SCALE_SPIKE_TASK} task runs scripts that do not exist: {missing}"
+
+    script = (REPO_ROOT / named[0]).read_text(encoding="utf-8")
+    module = SCALE_SPIKE_MODULE.relative_to(REPO_ROOT).as_posix()
+    assert SCALE_SPIKE_MODULE.is_file(), f"{module} does not exist"
+    assert SCALE_SPIKE_MODULE.name.startswith(SPIKE_MODULE_PREFIX), (
+        f"{module} must be named {SPIKE_MODULE_PREFIX}*.py, or `pytest tests/` collects it in the gate"
+    )
+    assert f'SPIKE_MODULE="{module}"' in script, (
+        f"{named[0]} must run {module}; it is the only thing that names the spike"
+    )
+    pytest_lines = [line for line in script.splitlines() if "pytest" in line and '"${SPIKE_MODULE}"' in line]
+    assert len(pytest_lines) == 1, f"{named[0]} must invoke pytest on the module exactly once, found {pytest_lines}"
+    (invocation,) = pytest_lines
+    assert " -s" in invocation, f"{named[0]} must pass -s, or the plans the story records never reach the log"
+    marker = re.search(r"-m (\w+)", invocation)
+    assert marker is not None, f"{named[0]} must select the spike by marker: {invocation!r}"
+
+    pytestmark = re.search(r"^pytestmark = (.+)$", SCALE_SPIKE_MODULE.read_text(encoding="utf-8"), re.MULTILINE)
+    assert pytestmark is not None, f"{module} declares no module-level pytestmark"
+    assert f"pytest.mark.{marker.group(1)}" in pytestmark.group(1), (
+        f"{named[0]} selects `-m {marker.group(1)}` and {module}'s pytestmark is {pytestmark.group(1)}: "
+        "the two must agree, or the run collects nothing"
+    )
 
 
 def test_reference_application_keeps_its_three_os_matrix(workflows: Workflows) -> None:

@@ -42,6 +42,9 @@ htmlcov/
 .nox/
 .coverage
 .coverage.*
+# CPM-OPERATE-S10: `pixi run spike-scale` copies each run's plans and timings
+# here; the story carries the recorded run, the directory carries the rest.
+.spike-runs/
 .cache
 nosetests.xml
 coverage.xml

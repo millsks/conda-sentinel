@@ -3373,10 +3373,15 @@ beneath. Every product role may read it; nothing on it writes.
 ## Ninety days of evidence, purged nightly
 
 `CPM-OPERATE-S07`. Evidence is append-only and, until this story, nothing had
-ever removed a row from any table: at ten thousand packages the seven daily
-tables grow roughly seventy thousand rows a day between them, the collection
-ledger the same, and no index led with a time column. The decision is **ninety days, purged
-nightly**, and it is one setting and one admin process:
+ever removed a row from any table, and no index led with a time column. What a
+day adds at ten thousand packages was measured rather than estimated by
+`CPM-OPERATE-S10` ([Measuring at scale](#measuring-at-scale)): with one row per
+package per day per reader key on the eleven purged tables (two keys on the
+seven multi-key ones), nine collector runs per package per day on the ledger
+and a policy run's rows on the eight derived tables, one day is `350,019` rows
+across the twenty-one purged tables -- and that is what the nightly purge
+removes at steady state. The decision is **ninety days, purged nightly**, and
+it is one setting and one admin process:
 
 ```sh
 pixi run stack-run prune_evidence --dry-run   # rehearse: records the counts, removes nothing
@@ -3496,13 +3501,91 @@ Django's collector so a `PROTECT` relation still refuses, and then issues one
 licenses that one call and the purge's one manager delete by count; a second
 deletion path anywhere fails the gate.
 
-Every cut-off scan has an index that leads with its time column: a bare
-`observed_at` index on each of the eleven purged evidence tables, `finished_at`
-and `started_at` on `collection_runs`, `finished_at` and `evidence_cutoff` on
-`policy_runs`. They are declared on the models and reconciled by the migration
-audit; the plans were measured on PostgreSQL rather than assumed, and the story
-records them. On a table with a handful of rows the planner will still choose a
-sequential scan — that is the planner being right, not the index being absent.
+The indexes, and what each actually serves, as `CPM-OPERATE-S10` measured on
+PostgreSQL 17 at `CPM-NFR-1`'s scale rather than assumed (the subsection below
+says how). A bare `observed_at` index on each of the eleven purged evidence
+tables serves the purge's per-table count of rows past the cut-off (`_older`, an
+index-range count in about a millisecond) and the digest's "observed within
+target" reads; **it does not serve the purge's batch selections.** Those walk
+the primary key — `id > watermark ORDER BY id LIMIT 1000`, the cut-off as a
+filter — which on a table written day by day meets the oldest day first, then
+probe the `(package, -observed_at)` index once per candidate for a newer row and
+once per candidate *per surviving policy run* for the replay floor: with ninety
+runs inside the retention that is 89,000 probes per batch of a thousand, fixed
+by the batch size and the run count rather than by the table. On the ledger,
+`finished_at` and `started_at` serve the purge's two cut-off scans and the
+policy run's cut-off choice; `evidence_cutoff` on `policy_runs` serves the floor
+rule's probe; and `(package, -started_at)` — the one index that story added,
+on a measured before/after plan — serves the package page's newest-runs read,
+which had been reading every run the package ever had to keep twenty. They are
+declared on the models and reconciled by the migration audit.
+
+The measured night: the steady-state purge — one day's rows on every purged
+table — finished in 84.96 s end to end, `vulnerability_findings` 21.43 s and
+`kev_findings` 17.51 s of it; every per-package read the policy run and the
+package page make is one probe of its `(package, -observed_at)` index on four
+or five buffers, under 0.03 ms. Two evidence tables *are* sequentially scanned
+by product queries, and the story records them rather than claiming otherwise:
+`kev_findings` and `vulnerability_findings`, as the hashed *citing* side of the
+advisory tables' selections, because kev's roster key crosses a join no index
+can carry; three derived tables are hashed the same way as the citing side of
+three other selections, the planner declining a foreign-key index that exists.
+Neither is a whole-table question and neither is an index that can be added;
+both are deferred work. The ledger's two sequential scans — the coverage
+screen's per-collector aggregate and the cut-off choice's refusal-path count —
+ask about every row. **Monthly range partitioning by `observed_at` is not
+adopted**: the purge finishes inside a one-hour nightly window with more than
+the 4× margin the story required, and the story's verdict says which clause of
+its rule that rests on. On a table with a handful of rows — `policy_runs` holds
+one row per run inside the retention — the planner will still choose a
+sequential scan; that is the planner being right, not the index being absent.
+
+### Measuring at scale
+
+`pixi run spike-scale` is the measurement, re-runnable. It needs Docker: the
+script starts a throwaway `postgres:17` (container `pg-spike`, port 55433, the
+image the gate uses; it refuses if one is already running, and removes its own
+on every exit), seeds ten thousand packages × ninety-one days on every purged
+evidence table — one row per package per day per reader key, two keys on the
+seven multi-key tables, one package in a hundred absent after the first day so
+the floor rule's keep path runs — nine finished collection runs per package per
+day on the ledger, ninety policy runs with their rows on every derived table,
+and the rollup, with raw SQL over `generate_series` honouring every model
+`CheckConstraint`, day-major as production writes; then runs `EXPLAIN (ANALYZE,
+BUFFERS)` over the SQL the product's own readers issue (the rollup's
+per-package reads on every table, the cut-off choice on both its paths, the
+package page, the listing, the coverage screen, the digest's freshness
+figures, the purge's selections and `--dry-run`'s count), times one batch's
+own `DELETE`, and then the purge, end to end. On an Apple M4 laptop under
+Docker Desktop (the story records the environment) it takes about seven and a
+half minutes: about four and a half to seed 16,218,000 evidence rows, 8,109,828
+ledger rows and 7,200,000 derived rows, 84.96 s for the purge, the rest
+measuring. Every run is copied to `.spike-runs/<timestamp>.log`.
+
+It asserts the seeded counts, that every per-package read stays under a buffer
+ceiling, that no measured plan sequentially scans an evidence, ledger or
+derived table outside the shapes it records, and that the purge removed exactly
+one day per table while keeping every package's newest row — the absent
+packages' included — and every row a surviving policy run reads; timings are
+printed and recorded in the story, never asserted, because a wall-clock number
+is a fact about the machine. What the seed is not: one row per package per day
+over-states the fourteen- and thirty-day-target tables; one platform and two
+advisories per package under-states key cardinality; the `protected` path (a
+citation committed between selection and delete) is not exercised at scale.
+The gate runs the seeder alone at three packages by two days
+(`tests/integration/django_apps/test_evidence_scale_seed.py`), so a renamed
+column fails in CI's PostgreSQL job rather than after a Docker run.
+
+Two figures an operator can reason from. **`--batch 250`** costs the same
+probes per candidate row and restarts the walk four times as often, and the
+selections that hash a citing table pay that hash once per batch: four times
+per table, not once. **Lowering `CPM_EVIDENCE_RETENTION_DAYS` by N days** makes
+the next purge remove N days' rows — N times the one-day figures above, in the
+same batches — and it logs `retention.cutoff_moved` before it does.
+
+Re-run it before changing an evidence index, the floor rule, the purge's
+batching or the scale the product is sized for, and re-record the numbers
+rather than carrying these forward.
 
 ## Replaying a policy run: reproducing what the system concluded
 

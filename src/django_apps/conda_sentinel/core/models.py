@@ -141,6 +141,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "COLLECTION_RUN_FINISHED_INDEX",
+    "COLLECTION_RUN_PACKAGE_INDEX",
     "COLLECTION_RUN_STARTED_INDEX",
     "FINISHED_AT_FIELD",
     "POLICY_RUN_CUTOFF_INDEX",
@@ -209,6 +210,15 @@ FINISHED_AT_FIELD: Final[str] = "finished_at"
 #: each purged table declares an index whose first field is its cut-off column.
 COLLECTION_RUN_FINISHED_INDEX: Final[str] = "collection_runs_finished"
 COLLECTION_RUN_STARTED_INDEX: Final[str] = "collection_runs_started"
+
+#: The package page's read of the ledger (`CPM-OPERATE-S10`): the newest runs
+#: on one package, `ORDER BY started_at DESC, id DESC LIMIT 20`. The foreign
+#: key's own index finds the package's rows, but a package with nine collectors
+#: and ninety days of retention has 819 of them, one per page in a ledger
+#: written day by day, and the plan read every one to keep twenty. Measured
+#: before and after in the story; leading with the package and descending on
+#: the start makes the read twenty index entries deep.
+COLLECTION_RUN_PACKAGE_INDEX: Final[str] = "collection_runs_pkg_started"
 POLICY_RUN_FINISHED_INDEX: Final[str] = "policy_runs_finished"
 POLICY_RUN_CUTOFF_INDEX: Final[str] = "policy_runs_cutoff"
 
@@ -983,6 +993,11 @@ class CollectionRun(RunLedgerModel):
             # grows by the inventory every day.
             models.Index(fields=[FINISHED_AT_FIELD], name=COLLECTION_RUN_FINISHED_INDEX),
             models.Index(fields=["started_at"], name=COLLECTION_RUN_STARTED_INDEX),
+            # The package page's newest-runs read (`CPM-OPERATE-S10`): the
+            # package first, then the start descending, so the twenty newest
+            # are the first twenty entries rather than the top of a sort over
+            # every run the package ever had.
+            models.Index(fields=["package", "-started_at"], name=COLLECTION_RUN_PACKAGE_INDEX),
         ]
 
     def __str__(self) -> str:

@@ -296,12 +296,14 @@ python_files = [
 ]
 markers = [
   "integration: marks tests as integration tests requiring real I/O, network, or DB",
-  # R-1's django-storages fitness spike. It runs only in the `spike-storage`
-  # pixi environment, via `pixi run spike-storage`, and never in the gate --
-  # `test-cov` runs `pytest tests/`, and `python_files` below does not match the
-  # `spike_*.py` module the spike lives in, so collection never reaches it.
-  # The marker is registered here so `-m spike` selects rather than warns.
-  "spike: marks the R-1 django-storages fitness spike; runs only in the spike-storage environment",
+  # The spikes: R-1's django-storages fitness spike (`pixi run spike-storage`,
+  # in its own environment) and CPM-OPERATE-S10's evidence-scale spike
+  # (`pixi run spike-scale`, against a throwaway postgres:17). Neither runs in
+  # the gate -- `test-cov` runs `pytest tests/`, and `python_files` above does
+  # not match the `spike_*.py` modules they live in, so collection never
+  # reaches them. The marker is registered here so `-m spike` selects rather
+  # than warns.
+  "spike: marks a spike (R-1 storage fitness; CPM-OPERATE-S10 evidence scale); never collected by the gate",
   # FR-16's claim marker. `@pytest.mark.forbidden_state("<state_id>")` says "this
   # test configures that forbidden state and asserts the refusal", and
   # tests/unit/startup/test_refusal_coverage_audit.py reconciles the claims

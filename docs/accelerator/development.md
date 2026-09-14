@@ -33,6 +33,19 @@ run R-1's fitness spike — see [Object storage fitness (R-1)](#object-storage-f
 it goes away when Epic 7 has acted on the verdict. All three share a
 solve-group, so packages common to them resolve to identical versions.
 
+There are two spikes under `tests/spikes/`, both named `spike_*.py` so the
+gate never collects them, both marked `spike`, each with its own task:
+`pixi run spike-storage` (R-1, above) and `pixi run spike-scale`
+(`CPM-OPERATE-S10`: seeds a throwaway `postgres:17` with ten thousand packages
+times ninety-one days on every purged evidence table, the ledger and every
+policy run's derived rows, `EXPLAIN (ANALYZE, BUFFERS)` over the product's own
+queries, the nightly purge end to end; needs Docker, takes about seven and a
+half minutes, copies its run to `.spike-runs/`; verdict and numbers in
+`docs/conda-sentinel/operations.md`, "Measuring at scale"). The second runs in
+the `dev` environment, because it needs nothing the runtime set lacks — what
+keeps it out of the gate is its name and its container, not its environment;
+its seeder alone runs in the gate at three packages by two days.
+
 **You never need `-e` for a task.** `pixi run <task>` resolves without a flag
 and without prompting. `pixi task list` shows each task with its description.
 
