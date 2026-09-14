@@ -442,6 +442,21 @@ CPM_SWEEP_ON_BEAT_START = env.bool("CPM_SWEEP_ON_BEAT_START", default=False)
 # every module, and config/settings/test.py empties it unconditionally so a
 # developer's export never enters the suite.
 CPM_GITHUB_TOKEN = env.str("CPM_GITHUB_TOKEN", default="").strip()
+# Where the daily operator digest goes (CPM-OPERATE-S09). Both empty by
+# default, and empty means what it says: the digest is composed and stored --
+# the Digests page reads it -- and delivered nowhere. A webhook URL must be
+# https:// and name a host; an address must carry an @; anything else is refused
+# at boot by CollectorsConfig.ready(), naming the setting and never the value.
+# The URL may carry a credential (`https://user:secret@host/path`), so on the
+# credential's own terms it is read from the environment, never from a
+# checked-in file -- tests/unit/test_settings.py scans pixi.toml, compose.yaml,
+# the Dockerfile and the workflows for both names -- and no log line, ledger
+# row, delivery record or exception names more than its host. Read once, at
+# settings import, stripped; config/settings/test.py empties both
+# unconditionally so a developer's export never mails the suite anywhere. The
+# names are collectors/digest.py's WEBHOOK_URL_SETTING and EMAIL_SETTING.
+CPM_DIGEST_WEBHOOK_URL = env.str("CPM_DIGEST_WEBHOOK_URL", default="").strip()
+CPM_DIGEST_EMAIL = env.str("CPM_DIGEST_EMAIL", default="").strip()
 # How long evidence and run-ledger rows are kept, in days (CPM-OPERATE-S07).
 # Ninety by default -- the product owner's decision -- and refused below one at
 # boot by CollectorsConfig.ready(), naming this setting: there is no "forever"
@@ -908,6 +923,26 @@ CELERY_BEAT_SCHEDULE = {
         # of them would be a fourth phased entry, which is a change to the
         # reconciliation test this entry does not make; the lag is stated in
         # docs/conda-sentinel/operations.md instead.
+    },
+    # The one entry that is not a sweep (CPM-OPERATE-S09): the daily operator
+    # digest, `cpm.policy.digest`. An interval, as the rule above requires, and
+    # the reconciliation leaves it alone because it fires another task -- the
+    # boot reconciliation and the start dispatch both read only entries firing
+    # `cpm.collect.sweep`, which tests/unit/django_apps/test_sweep.py asserts
+    # against this very entry. The countdown is strictly greater than the
+    # largest sweep offset (the readiness sweep's three hours): not an
+    # ordering -- the digest lands on the `policy` queue and the dispatches on
+    # `collect`, and nothing orders work across queues -- only a head start,
+    # so the phased dispatches of the same tick have been enqueued, and
+    # usually recorded, by the time the digest reads the ledger. Under
+    # BROKER_VISIBILITY_TIMEOUT_SECONDS below for the reason every countdown
+    # here is; tests/unit/test_settings.py pins the strict inequality. No kwargs: the window ends at the instant
+    # it runs, and where it is delivered is CPM_DIGEST_WEBHOOK_URL and
+    # CPM_DIGEST_EMAIL above, read at call time.
+    "cpm-digest": {
+        "task": "cpm.policy.digest",
+        "schedule": timedelta(days=1),
+        "options": {"countdown": 3 * 60 * 60 + 30 * 60},
     },
 }
 # How long the Redis transport waits for a delivered message to be acknowledged

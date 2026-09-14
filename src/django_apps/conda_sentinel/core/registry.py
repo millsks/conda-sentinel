@@ -55,6 +55,7 @@ from django.db.models import QuerySet
 from conda_sentinel.core.collection import Collector
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from collections.abc import Mapping
 
 __all__ = [
@@ -65,6 +66,7 @@ __all__ = [
     "register",
     "registered_collectors",
     "registrations",
+    "selected_package_ids",
     "selects",
     "swept_collectors",
     "unregister",
@@ -236,8 +238,9 @@ def selects(collector: type[Collector], package_id: int) -> bool:
     **The selection is asked, never re-derived.** Each collector declares its
     precondition beside its refusals, and restating any of them here would be
     the second table that hook's docstring exists to prevent. What this function
-    knows is only the *shapes* a selection takes, and it answers each without
-    reading ten thousand keys:
+    knows is only the *shapes* a selection takes -- the same three
+    `selected_package_ids` reads whole -- and it answers each without reading
+    ten thousand keys:
 
     * A lazy queryset over `identity.Package` (`pk` names the package) or over a
       table that references one (`package_id` does) is narrowed by a filter and
@@ -275,33 +278,65 @@ def selects(collector: type[Collector], package_id: int) -> bool:
     if selection is None:
         return False
     if isinstance(selection, QuerySet):
-        return _queryset_selects(collector, selection, package_id)
-    if isinstance(selection, GeneratorType):
-        logger.info(SELECTION_NOT_ASKED_EVENT, collector=collector.name, reason="generator", package_id=package_id)
-        return False
-    items = list(selection)
-    if not all(isinstance(item, int) and not isinstance(item, bool) for item in items):
-        logger.warning(
-            SELECTION_NOT_ASKED_EVENT,
-            collector=collector.name,
-            reason="items_are_not_keys",
-            package_id=package_id,
-            sample=repr(items[:3]),
-        )
-        return False
-    return package_id in items
+        column = _package_column(collector, selection)
+        return bool(selection.filter(**{column: package_id}).exists())
+    keys = _package_keys(collector, selection, package_id=package_id)
+    return keys is not None and package_id in keys
 
 
-def _queryset_selects(collector: type[Collector], selection: QuerySet[Any], package_id: int) -> bool:
-    """Ask a queryset selection whether it holds one package, refusing a shape that cannot be narrowed.
+def selected_package_ids(
+    collector: type[Collector], *, selection: Iterable[int] | None = None
+) -> frozenset[int] | None:
+    """Return one collector's whole selection as package keys, or `None` for a shape this cannot read.
+
+    The operator digest's question (`CPM-OPERATE-S09`): which packages can this
+    collector be asked about, so that the ones its evidence table has not
+    observed inside its freshness target can be counted. The same three shapes
+    `selects` narrows, read whole:
+
+    * A queryset over `identity.Package` or over a table with a `package_id`
+      column is read by that column. A sliced or combined queryset is refused
+      exactly as `selects` refuses it.
+    * A generator is not iterated -- see `selects` -- and answers `None` with
+      `SELECTION_NOT_ASKED_EVENT` logged once, so the figure is absent rather
+      than a zero that reads as fresh.
+    * Any other iterable is materialised, provided every item is an `int`.
+
+    Args:
+        collector: The registered class.
+        selection: What `selectable_packages()` answered, when the caller has
+            already asked -- the digest asks once per collector and reads the
+            per-package/run-scoped decision off the same answer. `None` means
+            ask here.
+
+    Returns:
+        The keys, or `None` when the collector is not swept per package or the
+        selection is a shape this cannot read as keys.
+
+    Raises:
+        CollectorRegistryError: When the selection is a queryset of a shape
+            this cannot read. See `selects`.
+
+    """
+    answered = collector.selectable_packages() if selection is None else selection
+    if answered is None:
+        return None
+    if isinstance(answered, QuerySet):
+        column = _package_column(collector, answered)
+        return frozenset(int(key) for key in answered.values_list(column, flat=True))
+    return _package_keys(collector, answered)
+
+
+def _package_column(collector: type[Collector], selection: QuerySet[Any]) -> str:
+    """Return which column of a queryset selection names the package, refusing a shape that cannot be narrowed.
 
     Args:
         collector: The class, for the refusal's wording.
         selection: The queryset it answered.
-        package_id: The package.
 
     Returns:
-        Whether a row for the package exists in the narrowed selection.
+        `pk` for a queryset over `identity.Package`, `package_id` for one over
+        a table that references it.
 
     Raises:
         CollectorRegistryError: For a sliced or combined queryset, or one over a
@@ -320,17 +355,46 @@ def _queryset_selects(collector: type[Collector], selection: QuerySet[Any], pack
         raise CollectorRegistryError(message)
     options = selection.model._meta  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
     if options.label == PACKAGE_MODEL_LABEL:
-        column = "pk"
-    elif any(field.attname == PACKAGE_COLUMN for field in options.concrete_fields):
-        column = PACKAGE_COLUMN
-    else:
-        message = (
-            f"{collector.__name__} (name={collector.name!r}) answered a selection over {options.label}, which "
-            f"is neither {PACKAGE_MODEL_LABEL} nor a table with a {PACKAGE_COLUMN!r} column, so nothing here "
-            f"knows which column names the package."
+        return "pk"
+    if any(field.attname == PACKAGE_COLUMN for field in options.concrete_fields):
+        return PACKAGE_COLUMN
+    message = (
+        f"{collector.__name__} (name={collector.name!r}) answered a selection over {options.label}, which "
+        f"is neither {PACKAGE_MODEL_LABEL} nor a table with a {PACKAGE_COLUMN!r} column, so nothing here "
+        f"knows which column names the package."
+    )
+    raise CollectorRegistryError(message)
+
+
+def _package_keys(
+    collector: type[Collector], selection: Iterable[int], *, package_id: int | None = None
+) -> frozenset[int] | None:
+    """Return a non-queryset selection as package keys, or `None` with the reason logged.
+
+    Args:
+        collector: The class, for the log line.
+        selection: A generator, or any other iterable.
+        package_id: The package a `selects` call was asking about, for the log
+            line; `None` when the whole selection is being read.
+
+    Returns:
+        The keys, or `None` for a generator or for items that are not keys.
+
+    """
+    if isinstance(selection, GeneratorType):
+        logger.info(SELECTION_NOT_ASKED_EVENT, collector=collector.name, reason="generator", package_id=package_id)
+        return None
+    items = list(selection)
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in items):
+        logger.warning(
+            SELECTION_NOT_ASKED_EVENT,
+            collector=collector.name,
+            reason="items_are_not_keys",
+            package_id=package_id,
+            sample=repr(items[:3]),
         )
-        raise CollectorRegistryError(message)
-    return bool(selection.filter(**{column: package_id}).exists())
+        return None
+    return frozenset(items)
 
 
 def registrations() -> Mapping[str, type[Collector]]:

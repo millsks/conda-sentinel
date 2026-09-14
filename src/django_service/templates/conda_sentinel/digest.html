@@ -1,0 +1,163 @@
+{% extends "conda_sentinel/base.html" %}
+{% load i18n health %}
+
+{% block title %}{% translate "Digests" %}{% endblock title %}
+
+{% block content %}
+  <div class="app-h">
+    <div>
+      <h2>{% translate "Operator digest" %}</h2>
+      <div class="sub">
+        {% if digest %}
+          {% translate "the day ending" %} {{ digest.window_end|date:"Y-m-d H:i" }}Z
+          &middot;
+          {% if digest.changed %}{% translate "changed since the previous digest" %}{% else %}{% translate "nothing changed since the previous digest" %}{% endif %}
+        {% else %}
+          {% translate "composed once a day from the run ledger, the inventory and the package table" %}
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% if not digest %}
+    {% comment %}
+      The empty state, said rather than left blank: on a fresh stack this is the
+      state until the first daily tick, and a page with nothing on it reads as a
+      page that is broken.
+    {% endcomment %}
+    <div class="panel">
+      <div class="body">
+        <span class="chip tone-unknown">{% translate "no digest yet" %}</span>
+        <div class="ev" style="margin-top:8px">
+          {% translate "The first digest is composed a day after beat starts, or now with" %}
+          <span class="mono">pixi run stack-run compose_digest</span>.
+        </div>
+      </div>
+    </div>
+  {% else %}
+    <div class="cards" style="grid-template-columns:minmax(0,2fr) minmax(260px,1fr)">
+      <div class="panel">
+        <header>
+          <h4>{% translate "The digest" %}</h4>
+          <span class="hx">{% translate "as delivered, byte for byte" %}</span>
+        </header>
+        <div class="body">
+          {% comment %}
+            The stored text, not a rendering of the figures: it is what the webhook
+            and the mail carried, so an operator can hold the page against either.
+            Collector names appear as the ledger spells them.
+          {% endcomment %}
+          <pre class="record">{{ digest.text }}</pre>
+        </div>
+      </div>
+
+      <div class="panel">
+        <header><h4>{% translate "Deliveries" %}</h4></header>
+        <div class="body">
+          <dl class="kv" style="grid-template-columns:110px minmax(0,1fr)">
+            {% for delivery in digest.deliveries %}
+              <dt>{{ delivery.channel|label }}</dt>
+              <dd>
+                <span class="chip {% if delivery.state == 'delivered' %}tone-ok{% else %}tone-error{% endif %}">{{ delivery.state|label }}</span>
+                <span class="mono">{{ delivery.target }}</span>
+                {% if delivery.detail %}<div class="ev stale">{{ delivery.detail }}</div>{% endif %}
+              </dd>
+            {% empty %}
+              <dt>{% translate "channels" %}</dt>
+              <dd>
+                <span class="chip tone-unknown">{% translate "stored only" %}</span>
+                <div class="ev">{% translate "no webhook URL and no address is declared" %}</div>
+              </dd>
+            {% endfor %}
+            <dt>{% translate "trace" %}</dt>
+            <dd class="mono">{% if digest.trace_id %}{{ digest.trace_id }}{% else %}{% translate "none" %}{% endif %}</dd>
+            <dt>{% translate "window" %}</dt>
+            <dd class="mono">{{ digest.window_start|date:"Y-m-d H:i" }}Z &rarr; {{ digest.window_end|date:"Y-m-d H:i" }}Z</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:12px">
+      <header>
+        <h4>{% translate "Figures per collector" %}</h4>
+        <span class="hx">{% translate "every registered collector, over the window" %}</span>
+      </header>
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>{% translate "Collector" %}</th>
+            <th>{% translate "Dispatches" %}</th>
+            <th>{% translate "Collections" %}</th>
+            <th>{% translate "Rate-limited" %}</th>
+            <th>{% translate "Past freshness target" %}</th>
+            <th>{% translate "Never observed" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in collector_rows %}
+            <tr>
+              <td class="pkg">{{ row.name }}</td>
+              <td>{{ row.dispatches }}</td>
+              <td>{{ row.collections }}</td>
+              <td class="num">{{ row.rate_limited }}</td>
+              <td class="num">{{ row.past_freshness_target }}</td>
+              <td class="num">{{ row.never_observed }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel" style="margin-top:12px">
+      <header><h4>{% translate "Overall" %}</h4></header>
+      <div class="body">
+        <dl class="kv" style="grid-template-columns:150px minmax(0,1fr)">
+          {% for row in overall_rows %}
+            <dt>{{ row.label }}</dt>
+            <dd>{{ row.value }}</dd>
+          {% endfor %}
+        </dl>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:12px">
+      <header>
+        <h4>{% translate "Previous digests" %}</h4>
+        <span class="hx">{% translate "the last thirty, newest first" %}</span>
+      </header>
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>{% translate "Composed" %}</th>
+            <th>{% translate "Changed" %}</th>
+            <th>{% translate "Deliveries" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for earlier in history %}
+            <tr>
+              <td class="mono">{{ earlier.observed_at|date:"Y-m-d H:i" }}Z</td>
+              <td>
+                {% if earlier.changed %}
+                  <span class="chip tone-info">{% translate "changed" %}</span>
+                {% else %}
+                  <span class="chip tone-unknown">{% translate "unchanged" %}</span>
+                {% endif %}
+              </td>
+              <td>
+                {% for delivery in earlier.deliveries %}
+                  <span class="chip {% if delivery.state == 'delivered' %}tone-ok{% else %}tone-error{% endif %}">{{ delivery.channel|label }}: {{ delivery.state|label }}</span>
+                {% empty %}
+                  <span class="chip tone-unknown">{% translate "stored only" %}</span>
+                {% endfor %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="3"><span class="ev">{% translate "no earlier digest" %}</span></td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+{% endblock content %}

@@ -1405,11 +1405,12 @@ monitoring everywhere else.
 
 Beat's interval entries start their clock when they are created, so a fresh
 component sweeps nothing for a day and its weekly surfaces for a week — unless
-you tell beat to enqueue its first tick the moment it starts. Four settings
+you tell beat to enqueue its first tick the moment it starts. Six settings
 govern what a sweep reads, when the first one fires, how fast the two
-GitHub-reading collectors may go, and how long what they observe is kept; the
-second is `CPM-OPERATE-S04`'s, the third `CPM-OPERATE-S05`'s and the fourth
-`CPM-OPERATE-S07`'s:
+GitHub-reading collectors may go, how long what they observe is kept, and where
+the daily digest goes; the second is `CPM-OPERATE-S04`'s, the third
+`CPM-OPERATE-S05`'s, the fourth `CPM-OPERATE-S07`'s and the last two
+`CPM-OPERATE-S09`'s:
 
 | Setting | Default | Declared where | Does |
 |---|---|---|---|
@@ -1417,6 +1418,8 @@ second is `CPM-OPERATE-S04`'s, the third `CPM-OPERATE-S05`'s and the fourth
 | `CPM_SWEEP_ON_BEAT_START` | off | the `dev` pixi environment declares `1`; nothing production-bound does | beat enqueues its first tick the moment it starts — [what fires at start](asynchronous-work.md#a-running-beat-does-not-mean-anything-has-run) |
 | `CPM_GITHUB_TOKEN` | empty | **your shell, the gitignored `.env`, or your deployment's secret store — never a checked-in file**: no pixi table, task `env`, compose service, `Dockerfile` or workflow carries it, and the suite scans all of them | the credential `source_release` and `feedstock` send to `https://api.github.com`, and with it GitHub's authenticated allowances — [the arithmetic](#the-upstream-release-collector-reads-github-with-or-without-a-credential) |
 | `CPM_EVIDENCE_RETENTION_DAYS` | `90` | your environment; refused at boot below `1` or above `3650`, naming the setting | how many days of evidence and run-ledger rows the nightly `prune-evidence` process keeps; a replay reaches any run still in the ledger — [the purge](#ninety-days-of-evidence-purged-nightly) |
+| `CPM_DIGEST_WEBHOOK_URL` | empty | **your environment, on the credential's terms — never a checked-in file**; refused at boot unless `https://` with a host, naming the setting and never the value | where the daily digest is posted as JSON; the URL may carry a credential, and nothing this product writes names more than its host — [the digest](#the-daily-digest) |
+| `CPM_DIGEST_EMAIL` | empty | your environment; refused at boot without an `@`, naming the setting | the one address the daily digest is mailed to, through `DJANGO_EMAIL_BACKEND`; empty with the URL empty means the digest is **stored only** — [the digest](#the-daily-digest) |
 
 `CPM_GITHUB_TOKEN` wants a credential with **no permissions selected**: every
 endpoint the two collectors read is public, and the token exists to be counted,
@@ -1493,7 +1496,8 @@ name for the same reason.
 `CPM-OPERATE-S02` declares three `[[admin_processes]]` in `component.toml` on
 exactly `prune`'s terms — each a root pixi task running a management command,
 `schedule = "deployment-repository"`, no cadence in the component —
-`CPM-OPERATE-S03` a fourth and `CPM-OPERATE-S07` a fifth. The mechanism, and the
+`CPM-OPERATE-S03` a fourth, `CPM-OPERATE-S07` a fifth and `CPM-OPERATE-S09` a
+sixth. The mechanism, and the
 environment such a job must carry, is the accelerator's
 [deployment page](../accelerator/deployment.md):
 
@@ -1504,6 +1508,7 @@ environment such a job must carry, is the accelerator's
 | `policy-run` | `pixi run policy-run` | `run_policy [--version V]` | enqueues `cpm.policy.run` at the newest recorded version |
 | `import-watchlist` | `pixi run import-watchlist` | `import_watchlist --replace` | **writes**: brings the `inventory` table into line with the reviewed file, one audited transaction per row; retires what the file no longer names |
 | `prune-evidence` | `pixi run prune-evidence` | `prune_evidence [--dry-run] [--batch N]` | **deletes**: evidence and run-ledger rows older than `CPM_EVIDENCE_RETENTION_DAYS`, in bounded batches, one collection run recorded per table — [the purge](#ninety-days-of-evidence-purged-nightly). Schedule it nightly. |
+| `digest` | `pixi run digest` | `compose_digest` | enqueues `cpm.policy.digest` — the same task beat fires daily; for a first deploy, or after the webhook or address changes — [the digest](#the-daily-digest) |
 
 Locally the same commands run against the stack through `pixi run stack-run
 <command>`; deployed, the deployment repository schedules `pixi run <task>`. None
@@ -1532,11 +1537,15 @@ Three things to know before scheduling any of them:
   fires, and it fires the daily and the weekly surfaces at once against
   allowances that were sized for one collector per tick. `ingest` and
   `policy-run` are the two that belong on a cadence.
-- **The first three need a reachable broker**, unlike `prune` and
+- **The first three and `digest` need a reachable broker**, unlike `prune` and
   `prune-evidence`: each is one `.delay()`, so a job environment without
   `REDIS_URL` (or with `CELERY_TASK_ALWAYS_EAGER` set) does the work in the job
   itself rather than on a worker. The two prunes and the import talk to the
   database and nothing else.
+- **`digest` is a one-shot too.** Beat already fires `cpm.policy.digest` once a
+  day; run the admin process after a first deploy, or after changing where the
+  digest goes, and not on a cadence beside beat — two digests a day would each
+  be honest and the second would say nothing changed.
 - **An `ingest` with no declared adapter fails on the worker before the recorder
   opens**, so nothing reaches the Coverage screen or the run ledger — the failure
   is visible only in flower or the worker log. The command itself exits 0 with
@@ -3268,6 +3277,99 @@ about it is an open question.
 One row per package per run, never updated, every relation `PROTECT`. The
 reasoning and the consequences are exactly the seven sibling tables', above.
 
+## The daily digest
+
+`CPM-OPERATE-S09`. A sweep that fails for three days is found on the Coverage
+screen when a reviewer asks; nothing tells the operator, and silence and health
+look the same. So once a day — the `cpm-digest` beat entry, three and a half
+hours after the tick, on the `policy` queue — `cpm.policy.digest` composes a
+digest from the
+run ledger, the inventory and the package table, delivers it to whatever you
+declared, and stores it as one append-only `operator_digests` row that the
+**Digests** screen (`/conda-sentinel/digests/`) reads. By hand:
+
+```sh
+pixi run stack-run compose_digest   # then open /conda-sentinel/digests/
+```
+
+**What it counts.** The window begins where the previous digest's ended when
+that lies within two days of now — so a late tick loses no rows and a by-hand
+run double-counts nothing — and is otherwise the twenty-four hours ending when
+the task runs. Per registered collector, in registry order: for a collector
+swept per package, its **dispatches** (ledger rows scoped to no package) and
+its **collections** (rows scoped to one), each by run state; for a run-scoped
+collector every row is a collection. **Rate-limited** is the failed
+collections that were refused without a call — the allowance spent, or the
+declared credential refused earlier in the window — counted by the marker both
+refusal texts carry, never by matching their prose. **Past freshness target**
+and **never observed** are, for a collector with a target and a selection, how
+many of the packages it can be asked about have a row in its evidence table
+but none inside that target, and how many have no row at all; the Coverage
+screen's stale count is the first alone, so the two together read higher than
+it, and the split is deliberate — a source that stopped answering and a
+selection that outgrew the sweep call for different action. Overall: the
+nightly purge's runs by state, reported once rather than as a collector;
+inventory entries **ingested** (active) and **absent** (retired); packages by
+confidence, summed into **resolved** (`verified`) and **unresolved**
+(`inventory-derived` and `unmapped`) — the identity review set's complement
+and its size, on the same rule the Packages screen's queue uses; and the
+newest finished policy run's version, age and state, or that none has
+finished. A newest run that failed reads as failed.
+
+**A day in which nothing changed still delivers, in one line.** `changed` is
+whether the figures equal the previous digest's; when they do, the text is one
+sentence naming the most recent digest that *did* change and carrying the
+standing problems — every collector still failing, still refused on its
+allowance, still past its target — so a sweep failing for three days is never
+reported as "nothing changed" and nothing more. The figures hold the policy
+run's ending rather than its age, so a quiet day compares equal to the day
+before; the two freshness figures are measured from the instant the digest
+runs, so a package crossing its target on an otherwise quiet day makes that
+day `changed`, which is the reading wanted. The mail subject carries
+`(unchanged)` on such a day.
+
+**Where it goes.** Two declarations, both empty by default:
+
+- `CPM_DIGEST_WEBHOOK_URL` — the digest is posted as JSON
+  (`subject`, `text`, `window_start`, `window_end`, `changed`, `figures`) with a
+  ten-second timeout and **no retry**. The URL must be `https://` and name a
+  host; anything else refuses the component at boot, naming the setting and
+  never the value.
+- `CPM_DIGEST_EMAIL` — the text is mailed to that one address, subject
+  `conda-sentinel digest YYYY-MM-DD`, from `DEFAULT_FROM_EMAIL`, through
+  whatever `DJANGO_EMAIL_BACKEND` declares. An address without an `@` refuses
+  the component at boot the same way.
+
+Both declared, both delivered; neither declared, the digest is **stored
+only** — composed, on the Digests screen, delivered nowhere, and the log says
+so under `digest.stored_only`. Every digest logs `digest.composed` (the row,
+the window, whether it changed, how many collectors it counted) and each
+channel that accepted it `digest.delivered` (channel, target). A delivery that
+fails — a webhook answering `500`, a mail backend that will not connect — is a
+`failed` entry on the row naming the channel, the target and the status or
+the exception's class, logged under `digest.delivery_failed`, and **the task
+still returns**: the row is the record, and a digest that could not be
+delivered is exactly the one the screen has to show. The one failure the task
+does raise is a row that could not be written *after* delivery — logged first
+under `digest.store_failed` with what each channel answered, so the record is
+at least in the log. The webhook body and the text both carry the task's
+trace id.
+
+**The credential rule.** A webhook URL may carry a credential
+(`https://user:secret@hooks.example.test/x`), which is why it comes from your
+environment on the GitHub token's own terms — never a checked-in file; the
+suite scans `pixi.toml`, `compose.yaml`, the `Dockerfile` and the workflows for
+both names. No log line, ledger row, delivery record, page or exception this
+product writes names more than the URL's **host**; the address is the record's
+`target` for the mail channel. The test settings empty both, so a developer's
+export never has the suite's digests delivered anywhere.
+
+**The screen.** `/conda-sentinel/digests/` shows the newest digest's text as
+it was delivered, its figures per collector and overall, what each channel
+answered, and the trace id of the task that composed it — the same id every
+log line of that run carries — with the thirty digests before it listed
+beneath. Every product role may read it; nothing on it writes.
+
 ## Ninety days of evidence, purged nightly
 
 `CPM-OPERATE-S07`. Evidence is append-only and, until this story, nothing had
@@ -3334,11 +3436,13 @@ correctness:
    purge left running as `failed`, saying so.
 
 **Never purged, and named:** `package_health` (the rollup); `packages` and every
-`identity` table; every `workflow` table; and the three human-audit evidence
+`identity` table; every `workflow` table; the three human-audit evidence
 tables, `identity_overrides`, `inventory_changes` and `package_recollections` —
 one row per human act, the audit trail of the governed writes and of every
-"Collect now" press, excluded by the product owner's decision and reversible
-by it.
+"Collect now" press; and `operator_digests`, one row a day, the operator's own
+record of what the system reported and where it was delivered, which cannot
+grow faster than the calendar and is worth more the older it gets. All excluded
+by the product owner's decision and reversible by it.
 
 **A table that fails does not stop the night, and a row refused is not a row
 lost.** A database error on one table finalises that table's record `failed`,

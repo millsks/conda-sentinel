@@ -257,6 +257,7 @@ if TYPE_CHECKING:
     from conda_sentinel.core.transport import Transport
 
 __all__ = [
+    "ALLOWANCE_REFUSAL_MARKER",
     "COLLECTION_CREDENTIAL_REFUSED_EVENT",
     "COLLECTION_FAILED_EVENT",
     "COLLECTION_NOT_APPLICABLE_EVENT",
@@ -362,6 +363,15 @@ COLLECTION_NOT_APPLICABLE_EVENT: Final[str] = "collection.not_applicable"
 #: *the same string the ledger row's `detail` column carries* on every path --
 #: which is also what `CollectionResult.detail` promises a caller.
 EVENT_KEYS: Final[tuple[str, ...]] = ("collector", "package_id", "source")
+
+#: The phrase every refusal that spends no allowance carries in its `detail`
+#: (`CPM-OPERATE-S09`). Two texts end a run this way -- the allowance is spent,
+#: or the declared credential was refused earlier in the window -- and the
+#: operator digest counts both as *rate-limited* by finding this marker rather
+#: than by matching either sentence, which would drift the first time one was
+#: edited. Declared once, written by `_call_refusal` and read by
+#: `collectors/digest.py`; nothing else composes a `detail` around it.
+ALLOWANCE_REFUSAL_MARKER: Final[str] = "[allowance refused]"
 
 #: The shortest window that means anything. Zero is permitted and means "never
 #: skip": a collector that should observe on every run says so by declaring it,
@@ -1827,7 +1837,8 @@ class Collector(ABC):
         if not self._limiter.acquire(collector=self._name, limit=self._rate_limit, now=now, cost=self.request_cost):
             detail = (
                 f"{self._name} has spent its allowance of {self._rate_limit.calls} requests per "
-                f"{self._rate_limit.per}; the call was refused rather than issued unlimited (CPM-AD-20)."
+                f"{self._rate_limit.per}; the call was refused rather than issued unlimited (CPM-AD-20). "
+                f"{ALLOWANCE_REFUSAL_MARKER}"
             )
             logger.warning(
                 COLLECTION_REFUSED_EVENT,
@@ -1864,7 +1875,7 @@ class Collector(ABC):
         return (
             f"the declared credential was refused earlier in this allowance window, so no call to {source} was "
             f"issued; it is tried again when the window turns at {refused.until.isoformat()} (CPM-OPERATE-S05). "
-            f"The refusal recorded: {refused.detail}"
+            f"The refusal recorded: {refused.detail} {ALLOWANCE_REFUSAL_MARKER}"
         )
 
     def _failed_sweep(self, *, detail: str, run: RunHandle) -> CollectionResult:

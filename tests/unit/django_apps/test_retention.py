@@ -297,6 +297,7 @@ def test_the_roster_and_the_exclusions_are_exactly_the_evidence_models() -> None
     assert purged | EXCLUDED_EVIDENCE == classified
     assert {
         "collectors.InventoryChange",
+        "collectors.OperatorDigest",
         "collectors.PackageRecollection",
         "identity.IdentityOverride",
     } == EXCLUDED_EVIDENCE

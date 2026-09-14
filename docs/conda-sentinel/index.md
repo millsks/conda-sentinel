@@ -111,6 +111,7 @@ is no work, and a reviewer who reads that goes away satisfied.
 | Queues | what is left to do, ranked, scoped to your role |
 | Reports | six recurring questions — KEV, feedstock lag, Python 3.14, licences, unmapped identities, stale evidence |
 | Coverage | what the product **cannot** see |
+| Digests | what the system reported to the operator each day, and where it was delivered |
 
 Everything on them is also on the [API](development.md#the-api), from the same
 projection — so a number in a dashboard and a number on a screen cannot disagree.

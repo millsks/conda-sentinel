@@ -80,6 +80,7 @@ from django.db import connection
 
 from conda_sentinel.core import collection
 from conda_sentinel.core.clock import FixedClock
+from conda_sentinel.core.collection import ALLOWANCE_REFUSAL_MARKER
 from conda_sentinel.core.collection import COLLECTION_CREDENTIAL_REFUSED_EVENT
 from conda_sentinel.core.collection import COLLECTION_FAILED_EVENT
 from conda_sentinel.core.collection import COLLECTION_NOT_APPLICABLE_EVENT
@@ -966,8 +967,11 @@ def test_a_credential_refused_earlier_this_window_fails_fast_without_a_fetch_unt
     assert transport.calls == [locator, locator]
     assert len(limiter.asks) == 2  # noqa: PLR2004 - the fail-fast run asked the allowance for nothing
     assert second.detail.startswith("the declared credential was refused earlier in this allowance window")
+    assert ALLOWANCE_REFUSAL_MARKER in second.detail
     assert window_end(limit=FIXTURE_RATE_LIMIT, now=first_window).isoformat() in second.detail
-    assert second.detail.endswith(first.detail)
+    # The recorded refusal is carried whole, and the marker the digest counts by
+    # ends the sentence (`CPM-OPERATE-S09`).
+    assert second.detail.endswith(f"{first.detail} {ALLOWANCE_REFUSAL_MARKER}")
     assert third.detail == first.detail
     assert [event["event"] for event in captured_events] == [
         COLLECTION_FAILED_EVENT,
@@ -1046,6 +1050,7 @@ def test_a_spent_rate_limit_refuses_the_call_and_still_writes_a_row(
     run = _finished_run()
     assert run.detail == result.detail
     assert "allowance" in run.detail
+    assert ALLOWANCE_REFUSAL_MARKER in run.detail
     assert [event["event"] for event in captured_events] == [COLLECTION_REFUSED_EVENT]
     assert captured_events[0]["cost"] == FIXTURE_REQUEST_COST
 
@@ -2521,6 +2526,7 @@ def test_a_sweep_whose_credential_is_refused_says_so_and_fails_fast_for_the_rest
     assert first.state is RunState.FAILED
     assert first.detail == f"the declared credential was refused by fixture.invalid: {refusal}"
     assert second.detail.startswith("the declared credential was refused earlier in this allowance window")
+    assert ALLOWANCE_REFUSAL_MARKER in second.detail
     assert third.detail == first.detail
     assert transport.calls == [FIXTURE_SWEEP_SOURCE, FIXTURE_SWEEP_SOURCE]
     assert dict(transport.sent_headers[0] or {})["Authorization"] == THE_BEARER

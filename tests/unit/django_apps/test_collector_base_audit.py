@@ -246,9 +246,22 @@ UNBOUNDED_TIMEOUT_FORM: Final[str] = "timeout=None"
 # than a widened rule because the exemption is spent per occurrence per module:
 # a third module reaching the cache fails this file exactly as the second one
 # would have before this story recorded it.
+# core/delivery.py -- the one outbound POST (`CPM-OPERATE-S09`). The operator
+# digest is the first thing this product *sends*, and `Transport.fetch` is
+# GET-only by contract, so the POST has a seam of its own: one `requests.post`
+# with one stated timeout, a throwaway call rather than a mounted session
+# because the seam's contract is that there is no retry. A second call there,
+# or one anywhere else, fails this gate exactly as a second session would.
+# collectors/digest.py -- the one caller of that seam, on core/collection.py's
+# terms: the digest hands the seam its declared ten seconds, which is what makes
+# "the POST carries a timeout" true by construction rather than by the deliverer
+# remembering. It constructs no session and issues no request; only the keyword
+# is licensed here.
 RECORDED_EXEMPTIONS: Final[dict[str, dict[str, int]]] = {
     "config/authorization/jwks.py": {"requests.get(...)": 1, STATED_TIMEOUT_FORM: 1},
+    "django_apps/conda_sentinel/collectors/digest.py": {STATED_TIMEOUT_FORM: 1},
     "django_apps/conda_sentinel/core/collection.py": {STATED_TIMEOUT_FORM: 1},
+    "django_apps/conda_sentinel/core/delivery.py": {"requests.post(...)": 1, STATED_TIMEOUT_FORM: 1},
     "django_apps/conda_sentinel/core/rate_limit.py": {
         "cache.add(...)": 1,
         "cache.get(...)": 1,

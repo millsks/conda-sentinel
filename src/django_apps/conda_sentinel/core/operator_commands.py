@@ -1,7 +1,7 @@
-"""What the three operator commands share (`CPM-OPERATE-S02`).
+"""What the operator commands share (`CPM-OPERATE-S02`).
 
-`ingest_inventory` and `dispatch_sweep` live in `collectors`, `run_policy` in
-`policies`, and each does the same two things after its own validation: call an
+`ingest_inventory`, `dispatch_sweep` and `compose_digest` live in `collectors`,
+`run_policy` in `policies`, and each does the same two things after its own validation: call an
 existing task's `.delay()`, then print one line that depends on whether settings
 made that call run the task inline or hand it to a worker. The answer to that
 question and the words that follow a task id belong to neither application, so
@@ -22,7 +22,7 @@ from typing import Final
 
 from celery import current_app
 
-__all__ = ["WHERE_TO_WATCH_A_COLLECTION", "WHERE_TO_WATCH_A_POLICY_RUN", "runs_eagerly"]
+__all__ = ["WHERE_TO_WATCH_A_COLLECTION", "WHERE_TO_WATCH_A_DIGEST", "WHERE_TO_WATCH_A_POLICY_RUN", "runs_eagerly"]
 
 #: Where an enqueued collection's outcome becomes visible, said on the human
 #: line because a task id alone sends an operator looking for a result backend.
@@ -32,6 +32,10 @@ WHERE_TO_WATCH_A_COLLECTION: Final[str] = "watch it on the Coverage screen, or i
 #: screen: that screen is collectors and their ledger, and a policy run never
 #: appears on it. The home page's "rollup computed" stamp is what moves.
 WHERE_TO_WATCH_A_POLICY_RUN: Final[str] = 'watch the home page\'s "rollup computed" stamp, or flower'
+
+#: Where an enqueued digest becomes visible (`CPM-OPERATE-S09`): its own page,
+#: which shows the row and what each declared channel answered.
+WHERE_TO_WATCH_A_DIGEST: Final[str] = "read it on the Digests page, or watch flower"
 
 
 def runs_eagerly() -> bool:

@@ -251,3 +251,15 @@ schedule = "deployment-repository"
 name = "prune-evidence"
 task = "prune-evidence"
 schedule = "deployment-repository"
+
+# The sixth (`CPM-OPERATE-S09`): the operator digest by hand. Beat already
+# fires `cpm.policy.digest` once a day from `CELERY_BEAT_SCHEDULE`; this is the
+# same task enqueued on demand -- after a first deploy, or after the webhook or
+# address it is delivered to changes -- declared as `policy-run` is: a root pixi
+# task running a management command, the cadence the deployment repository's,
+# no `COMPONENT_PROCESS`.
+
+[[admin_processes]]
+name = "digest"
+task = "digest"
+schedule = "deployment-repository"

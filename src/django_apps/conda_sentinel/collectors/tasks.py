@@ -84,6 +84,7 @@ from django.db import transaction
 
 from conda_sentinel.collectors.advisories import advisory_source
 from conda_sentinel.collectors.conda_package import CondaPackageCollector
+from conda_sentinel.collectors.digest import compose_digest
 from conda_sentinel.collectors.feedstock import FeedstockCollector
 from conda_sentinel.collectors.kev import COLLECTOR_NAME as KEV_COLLECTOR_NAME
 from conda_sentinel.collectors.kev import KevCollector
@@ -109,6 +110,8 @@ from conda_sentinel.core.collection import SweepOutcome
 from conda_sentinel.core.ledger import collection_run
 from conda_sentinel.core.ledger import current_trace_id
 from conda_sentinel.core.outcomes import OutcomeState
+from conda_sentinel.core.queues import Queue
+from conda_sentinel.core.queues import task_name
 from conda_sentinel.core.rate_limit import RateLimit
 from conda_sentinel.core.transport import MAX_TIMEOUT
 from conda_sentinel.core.transport import Transport
@@ -137,6 +140,7 @@ __all__ = [
     "COLLECT_RESOLVE_IDENTITY_TASK_NAME",
     "COLLECT_SOURCE_RELEASE_TASK_NAME",
     "COLLECT_VULNERABILITY_TASK_NAME",
+    "DIGEST_TASK_NAME",
     "INGEST_TASK_NAME",
     "INVENTORY_SOURCE",
     "MAX_COUNT",
@@ -159,6 +163,7 @@ __all__ = [
     "collect_source_release",
     "collect_sweep",
     "collect_vulnerability",
+    "compose_operator_digest",
     "declare_inventory_adapter",
     "declared_inventory_adapter",
     "ingest_inventory",
@@ -273,6 +278,18 @@ COLLECT_RESOLVE_IDENTITY_TASK_NAME: Final[str] = "cpm.collect.resolve_identity"
 #: test_py314_verification.py` pins the string against `core/queues.py`'s example so
 #: the two cannot drift.
 VERIFY_PY314_TASK_NAME: Final[str] = "cpm.verify.py314_build"
+
+#: The operator digest's declared name (`CPM-OPERATE-S09`), and the second task
+#: this module declares outside the `cpm.collect.` namespace. **`cpm.policy.`
+#: is what routes it**: the digest makes no collection -- it reads the ledger,
+#: the inventory and the package table, renders a text and posts it once -- so
+#: it is a scheduled read over the whole inventory, which is the `policy`
+#: queue's workload class (`CPM-AD-20`), and a daily digest queued behind the
+#: nightly sweeps would arrive as a `collect` worker's leftovers. Composed from
+#: `core/queues.py`'s parts rather than written out, for the reason
+#: `core/tasks.py`'s `POLICY_RUN_TASK_NAME` gives: a literal would be a second
+#: spelling of a namespace whose whole purpose is that there is one.
+DIGEST_TASK_NAME: Final[str] = task_name(Queue.POLICY, "digest")
 
 #: `SWEEP_TASK_NAME` is the one task name in this module that is **not** declared
 #: here. `CPM-CURRENCY-S05`'s dispatch task names no collector, because it takes
@@ -1992,3 +2009,33 @@ def collect_sweep(*, collector: str) -> str:
 
     """
     return str(dispatch(collector=collector, clock=SystemClock()).state.value)
+
+
+@shared_task(name=DIGEST_TASK_NAME)  # type: ignore[untyped-decorator]
+def compose_operator_digest() -> int:
+    """Compose the day's operator digest, deliver it where declared, and store it (`CPM-OPERATE-S09`).
+
+    The task `CELERY_BEAT_SCHEDULE`'s `cpm-digest` entry fires once a day, three
+    hours after the last phased sweep so the first digest sees the day's
+    dispatches, and the one `compose_digest` management command enqueues by hand.
+    What it does is `collectors/digest.py`'s: the twenty-four hours of ledger rows
+    ending now, per collector and overall, rendered as text, delivered to the
+    declared webhook and address -- or stored only when nothing is declared -- and
+    written as one append-only `operator_digests` row that the Digests page reads.
+
+    It takes no argument: the window ends at the instant it runs, which is what
+    "the day's digest" means, and the channels are settings read at call time.
+    It declares **no schedule and no time limit** (`CPM-AD-20`, `CPM-AD-9`), and
+    it constructs `SystemClock()` at this boundary and passes it down, so the
+    composer itself reads no wall clock (`CPM-AD-26`).
+
+    **A delivery that fails does not fail the task.** Every refusal is a `failed`
+    entry on the row and a logged event; the row is the record, and a digest the
+    beat could not deliver is exactly the one the page has to show.
+
+    Returns:
+        The stored row's primary key, so the celery result and the command's
+        report both name the record.
+
+    """
+    return int(compose_digest(clock=SystemClock()).pk)

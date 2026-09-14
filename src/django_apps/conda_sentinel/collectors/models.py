@@ -164,6 +164,7 @@ __all__ = [
     "CONDA_PACKAGE_READ_INDEX",
     "CONDA_PACKAGE_TIME_INDEX",
     "COUNTS_PRESENT_CONSTRAINT",
+    "DIGEST_READ_INDEX",
     "ESTABLISHED_ABSENCE_CONSTRAINT",
     "FEEDSTOCK_FACTS_CONSTRAINT",
     "FEEDSTOCK_READ_INDEX",
@@ -226,6 +227,7 @@ __all__ = [
     "InventorySnapshot",
     "KevFinding",
     "LicenseFinding",
+    "OperatorDigest",
     "PackageRecollection",
     "PyPIReleaseSnapshot",
     "PythonReadinessAssessment",
@@ -835,6 +837,10 @@ INVENTORY_CHANGE_READ_INDEX: Final[str] = "inv_change_entry_observed"
 #: package, which the detail page shows beneath the run ledger
 #: (`CPM-OPERATE-S08`). Named on `INVENTORY_CHANGE_READ_INDEX`'s terms.
 RECOLLECTION_READ_INDEX: Final[str] = "recollection_pkg_observed"
+
+#: The one read `operator_digests` serves: the newest digest, and the thirty
+#: before it, which is the whole of the Digests page (`CPM-OPERATE-S09`).
+DIGEST_READ_INDEX: Final[str] = "digest_observed"
 
 
 class InventoryReadError(ValueError):
@@ -3735,3 +3741,85 @@ class PackageRecollection(AppendOnlyModel):
         """
         when = "never" if self.observed_at is None else self.observed_at.isoformat()
         return f"recollection of package {self.package_id} by user {self.actor_id} at {when}: {self.collectors}"
+
+
+class OperatorDigest(AppendOnlyModel):
+    """One day's digest for the operator, as composed and as delivered. Table `operator_digests`.
+
+    `CPM-OPERATE-S09`. A sweep that fails for three days is otherwise found on
+    the Coverage screen when a reviewer asks; this row is what tells the
+    operator. Composed once a day by `collectors/digest.py` from the run ledger,
+    the inventory and the package table, delivered to whatever
+    `CPM_DIGEST_WEBHOOK_URL` and `CPM_DIGEST_EMAIL` declare, and stored here
+    whether or not anything was declared -- so the Digests page reads the same
+    record the webhook received.
+
+    **An operator record, never purged.** Evidence-classified because it is an
+    observation of the system's own state at one instant, on the terms the
+    human-audit tables take: append-only (`CPM-AD-2`), one row a day, excluded
+    from the nightly purge in `core/retention.py`. Thirty rows is a month and
+    three hundred and sixty-five a year; the table cannot grow faster than the
+    calendar.
+
+    **The deliveries are on the row, and the row is written after them.** The
+    base refuses an update, so the outcome of each delivery cannot be written
+    back onto a row stored first; the digest is delivered, then stored with what
+    each channel answered. Each entry is `{channel, target, state, detail}` --
+    `target` is the webhook's *host* or the address, never the URL, because a
+    webhook URL may carry a credential and this row outlives its rotation.
+
+    **`figures` is what `changed` compares.** The next day's digest is
+    `changed=False` when its figures equal these, and its `text` is then one
+    line naming the most recent digest that did change and carrying the
+    standing problems. The newest policy run is recorded by its version, its
+    ending and its state rather than its age, so a day in which nothing
+    happened compares equal to the day before; the two freshness figures --
+    packages past their collector's target, packages never observed -- are
+    measured from the instant the digest is composed, so a package crossing
+    its target on an otherwise quiet day makes that day `changed`, which is
+    the reading wanted.
+    """
+
+    #: The window the figures cover: the twenty-four hours ending at `observed_at`.
+    window_start = models.DateTimeField(_("window start"))
+    window_end = models.DateTimeField(_("window end"))
+
+    #: The numbers, keyed `collectors` (by collector name) and `overall`.
+    #: `collectors/digest.py` fixes the shape; the page reads it back.
+    figures = models.JSONField(_("figures"), default=dict, blank=True)
+
+    #: The rendered digest -- the bytes the webhook and the mail carried.
+    text = models.TextField(_("text"))
+
+    #: Whether `figures` differs from the previous digest's. `True` for the first.
+    changed = models.BooleanField(_("changed"))
+
+    #: What each declared channel answered, as `{channel, target, state, detail}`
+    #: entries; empty when nothing is declared and the digest was stored only.
+    deliveries = models.JSONField(_("deliveries"), default=list, blank=True)
+
+    #: The `trace_id` of the task that composed it, formatted `032x` (`CPM-AD-15`);
+    #: empty when no span was active, which never blocks the write.
+    trace_id = models.CharField(_("trace id"), max_length=_TRACE_ID_LENGTH, blank=True, default="")
+
+    class Meta:
+        """The table, newest first."""
+
+        db_table = "operator_digests"
+        verbose_name = _("operator digest")
+        verbose_name_plural = _("operator digests")
+        ordering = ("-observed_at", "-id")
+        indexes = [
+            models.Index(fields=["-observed_at"], name=DIGEST_READ_INDEX),
+        ]
+
+    def __str__(self) -> str:
+        """Return the window, whether anything changed, and how many deliveries there were.
+
+        Returns:
+            A one-line summary.
+
+        """
+        when = "never" if self.observed_at is None else self.observed_at.isoformat()
+        state = "changed" if self.changed else "unchanged"
+        return f"digest at {when}: {state}, {len(self.deliveries or [])} delivery(ies)"

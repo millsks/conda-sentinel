@@ -217,6 +217,12 @@ body{margin:0}
 .chip.tone-info::before{background:transparent;border:1.5px solid currentColor;border-top-color:transparent}
 .chip.sm{font-size:10px;padding:1px 6px 1px 6px}
 
+/* a stored record reproduced verbatim -- the operator digest's text as it was
+ * delivered (CPM-OPERATE-S09). Wrapped rather than scrolled: a sentence that
+ * runs off the panel is one an operator does not read. */
+.record{font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--ink);margin:0;
+  white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
+
 /* the evidence footline that sits under every claimed value */
 .ev{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:3px;
   display:flex;gap:6px;align-items:center;white-space:nowrap}

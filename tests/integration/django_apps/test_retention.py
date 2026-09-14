@@ -972,7 +972,7 @@ def test_the_collection_ledger_is_purged_with_finished_and_stale_unfinished_rows
 
 @pytest.mark.django_db
 def test_the_purge_never_touches_the_excluded_tables_or_the_rollup() -> None:
-    """Never: `package_health`, packages, identity, workflow and the two human-audit tables."""
+    """Never: `package_health`, packages, identity, workflow, the human-audit tables and the digests."""
     an_ended_collection_run(finished_at=days_ago(100))
     package = a_package()
     a_release(package, version="2.0.0", at=days_ago(120))
@@ -996,6 +996,8 @@ def test_the_purge_never_touches_the_excluded_tables_or_the_rollup() -> None:
     assert "package_health" not in results
     assert "identity_overrides" not in results
     assert "inventory_changes" not in results
+    assert "package_recollections" not in results
+    assert "operator_digests" not in results
     assert Package.objects.filter(pk=package.pk).exists()
     assert PackageHealth.objects.filter(package=package).exists()
 

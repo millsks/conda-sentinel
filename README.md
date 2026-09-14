@@ -84,7 +84,7 @@ pixi run local-stack-down  # after honcho died without Ctrl-C: free 8000 and 555
 pixi run stack-shell       # a Django shell against the stack, not the SQLite file
 pixi run stack-run <cmd>   # any management command against the stack
 
-# Operating it: the five admin processes a deployment schedules. Three enqueue an
+# Operating it: the six admin processes a deployment schedules. Four enqueue an
 # existing task -- through stack-run they land on the stack's worker; through bare
 # `pixi run <task>` in the default local environment they run inline against the
 # SQLite file, because that environment makes every task eager. The fourth writes:
@@ -93,12 +93,16 @@ pixi run stack-run <cmd>   # any management command against the stack
 # CPM_INVENTORY_SOURCE=database (the dev environment's declaration). The fifth
 # deletes, nightly: evidence and run-ledger rows older than
 # CPM_EVIDENCE_RETENTION_DAYS (90), in bounded batches, never a package's newest
-# row per table and never a row a retained policy run read at its cut-off.
+# row per table and never a row a retained policy run read at its cut-off. The
+# sixth composes the operator digest beat already sends daily -- delivered to
+# CPM_DIGEST_WEBHOOK_URL and/or CPM_DIGEST_EMAIL (both empty by default: stored
+# only, on /conda-sentinel/digests/) -- for a first deploy or a changed address.
 pixi run stack-run import_watchlist     # the file into the table  (deployed: pixi run import-watchlist)
 pixi run stack-run ingest_inventory     # observe the inventory    (deployed: pixi run ingest)
 pixi run stack-run dispatch_sweep --all # sweep every collector    (deployed: pixi run sweep)
 pixi run stack-run run_policy           # compute the verdicts     (deployed: pixi run policy-run)
 pixi run stack-run prune_evidence --dry-run  # rehearse the purge  (deployed: pixi run prune-evidence)
+pixi run stack-run compose_digest       # today's digest, now      (deployed: pixi run digest)
 ```
 
 `pixi run ci` is the gate, and it is the same sequence locally and in CI:

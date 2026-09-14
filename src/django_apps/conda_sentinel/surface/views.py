@@ -99,6 +99,9 @@ from conda_sentinel.surface.detail import last_recollection
 from conda_sentinel.surface.detail import recent_runs
 from conda_sentinel.surface.detail import traces_for
 from conda_sentinel.surface.detail import work_on
+from conda_sentinel.surface.digest import collector_rows
+from conda_sentinel.surface.digest import newest_and_history
+from conda_sentinel.surface.digest import overall_rows
 from conda_sentinel.surface.exports import EXPORT_JOB_KIND
 from conda_sentinel.surface.exports import REPORT_SLUG_PARAMETER
 from conda_sentinel.surface.exports import export_csv
@@ -624,6 +627,46 @@ class CoverageView(RoleRequiredMixin, TemplateView):
         context.update(
             coverage=coverage_of(),
             collectors=collector_health(now=SystemClock().now()),
+        )
+        return context
+
+
+class DigestView(RoleRequiredMixin, TemplateView):
+    """The operator digest: what the system reported today, and where it went (`CPM-OPERATE-S09`).
+
+    The newest `operator_digests` row -- its text, its figures per collector and
+    overall, what each declared channel answered and the trace id of the task
+    that composed it -- and the thirty digests before it as a list. An empty
+    state when none has been composed, which on a fresh stack is the state until
+    the first `cpm-digest` tick or a `compose_digest` by hand.
+
+    Reads through `surface/digest.py` only: the composer imports the delivery
+    seam, which a request may not reach, and the page is the read surface
+    `CPM-AD-10` makes it.
+    """
+
+    required_roles: ClassVar[frozenset[str]] = frozenset(PRODUCT_ROLES)
+    template_name = "conda_sentinel/digest.html"
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        """Return the newest digest, its projection, and the history.
+
+        Args:
+            **kwargs: Django's context.
+
+        Returns:
+            The context.
+
+        """
+        context = super().get_context_data(**kwargs)
+        # One read: the newest and its history come from the same slice, so a
+        # row inserted mid-request cannot appear twice or out of place.
+        digest, history = newest_and_history()
+        context.update(
+            digest=digest,
+            collector_rows=collector_rows(digest) if digest is not None else [],
+            overall_rows=overall_rows(digest) if digest is not None else [],
+            history=history,
         )
         return context
 

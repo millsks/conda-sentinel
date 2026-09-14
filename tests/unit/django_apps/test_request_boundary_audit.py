@@ -52,7 +52,7 @@ SRC_ROOT: Final[Path] = Path(conda_sentinel.__file__ or "").parent
 
 #: The modules a request may not reach, and what each one is.
 #:
-#: **Named modules rather than a pattern**, because the rule is about four specific
+#: **Named modules rather than a pattern**, because the rule is about five specific
 #: capabilities and a pattern would either miss one or catch a module that merely
 #: sounds like it. Each entry carries what a reader who hit this gate needs to know:
 #: not that it is forbidden, but which of `CPM-AD-9`'s four kinds of work it is.
@@ -70,6 +70,11 @@ FORBIDDEN_FROM_A_REQUEST: Final[dict[str, str]] = {
         "thousand packages"
     ),
     f"{IMPORT_ROOT}.collectors.sweep": ("the full-inventory collector sweep, which enqueues one task per package"),
+    f"{IMPORT_ROOT}.core.delivery": (
+        "the outbound webhook POST the operator digest is delivered through (`CPM-OPERATE-S09`). A delivery is a "
+        "task's, never a request's: the Digests page reads the stored row through `surface/digest.py` and reaches "
+        "neither the composer nor this seam"
+    ),
 }
 
 #: Import edges the walk does not follow, and why each is licensed.

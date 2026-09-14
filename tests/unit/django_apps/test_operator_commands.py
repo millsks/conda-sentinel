@@ -58,8 +58,9 @@ from tests.pixi_manifest import task_env
 from tests.pixi_manifest import tasks_named
 
 #: The admin processes `CPM-OPERATE-S02` declared, the one `CPM-OPERATE-S03`
-#: added and the nightly purge `CPM-OPERATE-S07` added, and the management
-#: command each root task must invoke. The task name
+#: added, the nightly purge `CPM-OPERATE-S07` added and the digest
+#: `CPM-OPERATE-S09` added, and the management command each root task must
+#: invoke. The task name
 #: is the `[[admin_processes]]` `task` and the `[tasks]` key; the command is what
 #: `python manage.py` is given.
 ADMIN_PROCESSES: Final[dict[str, str]] = {
@@ -68,6 +69,7 @@ ADMIN_PROCESSES: Final[dict[str, str]] = {
     "policy-run": "run_policy",
     "import-watchlist": "import_watchlist --replace",
     "prune-evidence": "prune_evidence",
+    "digest": "compose_digest",
 }
 
 #: The one admin process that predates this story, so a case about "exactly

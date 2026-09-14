@@ -542,6 +542,7 @@ the worker, beat and flower lines are unaffected.
 | Queues | `/conda-sentinel/queues/<queue>/` | you are doing the work |
 | Reports | `/conda-sentinel/reports/<slug>/` | a recurring question — KEV, feedstock lag, licences |
 | Coverage | `/conda-sentinel/coverage/` | you want to know what the product **cannot** see |
+| Digests | `/conda-sentinel/digests/` | you want yesterday's picture in one text — every collector's dispatches, collections and refusals, the inventory, the packages, the newest policy run — and where it was delivered; `pixi run stack-run compose_digest` composes one now |
 
 Start at **Coverage** on an unfamiliar deployment. It is the screen that says how much
 of what you are looking at is a conclusion and how much is a gap.

@@ -451,11 +451,20 @@ EVIDENCE_ROSTER: Final[tuple[EvidenceTable, ...]] = (
     EvidenceTable("collectors.IdentityResolutionSnapshot", (PACKAGE_KEY,)),
 )
 
-#: The three evidence tables the purge never touches: one row per human act --
-#: the audit trail of the two governed writes, and of every manual recollection
-#: (`CPM-OPERATE-S08`). The product owner may reverse this.
+#: The four evidence tables the purge never touches. Three are one row per
+#: human act -- the audit trail of the two governed writes, and of every manual
+#: recollection (`CPM-OPERATE-S08`). The fourth, `operator_digests`, is one row
+#: a day: the operator's own record of what the system reported and where it
+#: was delivered (`CPM-OPERATE-S09`), which cannot grow faster than the
+#: calendar and is worth more the older it gets. The product owner may reverse
+#: any of this.
 EXCLUDED_EVIDENCE: Final[frozenset[str]] = frozenset(
-    {"collectors.InventoryChange", "collectors.PackageRecollection", "identity.IdentityOverride"},
+    {
+        "collectors.InventoryChange",
+        "collectors.OperatorDigest",
+        "collectors.PackageRecollection",
+        "identity.IdentityOverride",
+    },
 )
 
 
