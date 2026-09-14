@@ -36,6 +36,8 @@ from typing import Final
 from django.conf import settings
 
 from conda_sentinel.surface.reports import REPORTS_BY_SLUG
+from conda_sentinel.surface.reports import excluded_count
+from conda_sentinel.surface.reports import exclusion_sentence
 from conda_sentinel.surface.reports import report_rows
 from conda_sentinel.surface.reports import report_values
 from conda_sentinel.surface.search import SEARCH_PARAM
@@ -126,6 +128,11 @@ def export_csv(report: Report, *, limit: int | None = None, search: str = "") ->
     provenance = (
         f"evidence_cutoff={produced.evidence_cutoff or 'none'}; policy_versions={' '.join(produced.policy_versions)}"
     )
+    # `CPM-OPERATE-S11`: a report that leaves packages out says so on the file
+    # that leaves the system, in the same sentence the page states, so the CSV
+    # cannot be read as complete by somebody who never saw the screen.
+    if report.excludes is not None:
+        provenance += f"; excluded={exclusion_sentence(report, excluded=excluded_count(report, search=search))}"
     return buffer.getvalue(), len(produced.rows), provenance
 
 

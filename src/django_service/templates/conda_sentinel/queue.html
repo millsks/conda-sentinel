@@ -16,6 +16,22 @@
         &middot; {% translate "owned by" %} {{ owner_label }}
         {% if search %}&middot; {% blocktranslate trimmed %}name contains &ldquo;{{ search }}&rdquo;{% endblocktranslate %}{% endif %}
       </div>
+      {% if absent_not_offered is not None %}
+        {% comment %}
+          CPM-OPERATE-S11. Only the identity queue: the selection leaves out every
+          unresolved package the inventory no longer listed at the run's cut-off,
+          and a queue that silently omitted them would read as "nothing to do".
+          The count is read off the rollup rows the last run stamped, which is the
+          same count the selection logged.
+        {% endcomment %}
+        <div class="sub absent-not-offered">
+          {% blocktranslate count total=absent_not_offered trimmed %}
+            {{ total }} package absent from the inventory is not offered, across all packages as of the newest run
+          {% plural %}
+            {{ total }} packages absent from the inventory are not offered, across all packages as of the newest run
+          {% endblocktranslate %}
+        </div>
+      {% endif %}
     </div>
   </div>
 
@@ -60,6 +76,8 @@
           <tr>
             <td class="pkg">
               <a href="{% url 'conda_sentinel:package-detail' row.canonical_name %}">{{ row.canonical_name }}</a>
+              {% absence_tag row.inventory_absent_since row.inventory_last_listed as absent %}
+              {% if absent %}<span class="conf tone-notfound">{{ absent }}</span>{% endif %}
             </td>
             <td>
               {% if row.bucket %}<span class="pbucket {{ row.bucket|tone }}">{{ row.bucket|label }}</span>{% endif %}

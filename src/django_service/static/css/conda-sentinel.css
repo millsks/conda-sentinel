@@ -264,6 +264,25 @@ body{margin:0}
 .conf.tone-ok{color:var(--ok)}
 .conf.tone-warn{color:var(--warn)}
 .conf.tone-unknown{color:var(--unk)}
+/* CPM-OPERATE-S11: the text tag an absent package carries beside its name. `--nf`
+ * because that is what the next ingestion recorded about it; wrapping allowed,
+ * because the tag is a sentence and a name cell is narrow. */
+.conf.tone-notfound{color:var(--nf);white-space:normal}
+
+/* CPM-OPERATE-S11: what a surface left out, said above the list it shows. The
+ * identity queue's line sits under the heading in the `.sub` voice; the report's
+ * and the feedstock-gap list's block borrows the freshness bar's shape, because
+ * an exclusion is provenance -- the list is complete only with it. */
+.absent-not-offered{color:var(--nf)}
+.excluded{display:flex;flex-wrap:wrap;align-items:center;gap:0;border:1px solid var(--line);
+  border-left:3px solid var(--nf);background:var(--surface-2);font-family:var(--mono);font-size:11px}
+.excluded div{min-width:0;padding:7px 13px;border-right:1px solid var(--line-2);display:flex;gap:7px;
+  align-items:baseline;color:var(--muted)}
+.excluded div:last-child{border-right:0}
+.excluded b{color:var(--ink-2);font-weight:500;min-width:0;overflow-wrap:anywhere}
+.excluded .lbl{text-transform:uppercase;letter-spacing:.07em;font-size:9.5px}
+.freshbar .excluded{border:0;border-left:1px solid var(--line-2);background:transparent}
+.main-pane>.excluded{margin:12px 12px 0}
 
 /* sidebar + main split */
 .split{display:grid;grid-template-columns:236px minmax(0,1fr);gap:0;border:1px solid var(--line);

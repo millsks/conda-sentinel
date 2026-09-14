@@ -287,7 +287,7 @@ class Finding(NamedTuple):
 #: keeps this detector's precision a decision somebody wrote down rather than a
 #: property nobody checked.
 #:
-#: One entry. `identity/services.py`'s `_require_confidence_is_earned` refuses a
+#: Two entries. `identity/services.py`'s `_require_confidence_is_earned` refuses a
 #: resolution claiming a confidence above `unmapped` while nothing was
 #: established; `record_resolution` holds the `CPM-FR-2` downgrade refusal, which
 #: compares the *stored* confidence against `verified` twice and selects no
@@ -295,6 +295,16 @@ class Finding(NamedTuple):
 #: row, not about what the system may claim outward on a rollup row: `CPM-AD-4`
 #: binds the second, `CPM-FR-1` and `CPM-FR-2` the first, and they meet only in
 #: naming the same three values.
+#:
+#: `workflow/opening.py`'s `_open_identity_items` (`CPM-OPERATE-S11`) opens an
+#: identity review item for each package the selection offers *at* `unmapped`
+#: and for no other: the selection offers every unresolved confidence, and the
+#: identity queue is for the one the gate blanks everything on. It was a
+#: queryset filter on `Package` before the opening became cut-off bound -- the
+#: same test, in SQL, which this scan does not read -- and is a comparison now
+#: because the selection hands over packages rather than a queryset. It selects
+#: no status, writes no rollup column, and is the rule that always decided which
+#: packages get identity work.
 #:
 #: Counted and scoped, not merely named. An entry keyed by file alone would
 #: licence the whole file, so the *next* test added to `identity/services.py`
@@ -304,6 +314,9 @@ RECORDED_EXEMPTIONS: Final[dict[str, dict[str, int]]] = {
     "django_apps/conda_sentinel/identity/services.py": {
         f"{COMPARISON_FORM} in _require_confidence_is_earned": 1,
         f"{COMPARISON_FORM} in record_resolution": 2,
+    },
+    "django_apps/conda_sentinel/workflow/opening.py": {
+        f"{COMPARISON_FORM} in _open_identity_items": 1,
     },
 }
 

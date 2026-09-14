@@ -50,9 +50,11 @@ from conda_sentinel.workflow.models import WorkflowTransition
 from conda_sentinel.workflow.services import WorkflowError
 from conda_sentinel.workflow.services import apply_transition
 from conda_sentinel.workflow.services import open_item
+from conda_sentinel.workflow.states import SYSTEM_TRANSITIONS
 from conda_sentinel.workflow.states import TRANSITIONS
 from conda_sentinel.workflow.states import ItemState
 from conda_sentinel.workflow.states import Queue
+from conda_sentinel.workflow.states import transition_for
 from tests.factories import UserFactory
 
 if TYPE_CHECKING:
@@ -64,6 +66,9 @@ NOW: Final[datetime] = datetime(2026, 9, 4, 6, 12, tzinfo=UTC)
 LATER: Final[datetime] = NOW + timedelta(hours=1)
 
 A_JUSTIFICATION: Final[str] = "Internal fork; the affected code path is not reachable from our entry points."
+
+#: How many moves a person may make, as `docs/conda-sentinel/the-queues.md` documents them.
+SEVEN_HUMAN_MOVES: Final[int] = 7
 
 
 def a_package(name: str = "aiohttp") -> Package:
@@ -699,6 +704,24 @@ def test_no_transition_returns_an_item_to_open() -> None:
     one somebody adds later.
     """
     assert [t for t in TRANSITIONS if t.to_state == ItemState.OPEN.value] == []
+    assert [t for t in SYSTEM_TRANSITIONS if t.to_state == ItemState.OPEN.value] == []
+
+
+@pytest.mark.django_db
+def test_the_human_table_is_unchanged_by_the_products_own() -> None:
+    """`CPM-OPERATE-S11` added a second table rather than rows to this one.
+
+    The product's close is declared in `SYSTEM_TRANSITIONS` and applied by
+    `close_for_absence`; `transition_for` reads only `TRANSITIONS`, so no
+    `apply_transition` call -- however its arguments are spelled -- can make the
+    product's move, and the documented human table keeps its seven rows.
+    """
+    human_moves = {(t.from_state, t.to_state) for t in TRANSITIONS}
+    system_moves = {(t.from_state, t.to_state) for t in SYSTEM_TRANSITIONS}
+
+    assert len(TRANSITIONS) == SEVEN_HUMAN_MOVES
+    assert all(transition_for(*move) is None for move in system_moves - human_moves)
+    assert all(t.required_roles for t in TRANSITIONS), "every human move names who may make it"
 
 
 @pytest.mark.django_db

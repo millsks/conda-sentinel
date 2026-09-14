@@ -129,8 +129,10 @@ from conda_sentinel.surface.labels import role_label
 from conda_sentinel.surface.listing import DEFAULT_ORDERING
 from conda_sentinel.surface.listing import ORDERINGS
 from conda_sentinel.surface.listing import SORT_PARAM
+from conda_sentinel.surface.listing import feedstock_gap_exclusions
 from conda_sentinel.surface.listing import health_queryset
 from conda_sentinel.surface.listing import ordering_key
+from conda_sentinel.surface.queues import absent_unresolved_count
 from conda_sentinel.surface.queues import queue_items
 from conda_sentinel.surface.queues import queue_rows
 from conda_sentinel.surface.reports import REPORTS
@@ -146,6 +148,7 @@ from conda_sentinel.surface.theming import THEMES
 from conda_sentinel.surface.tone import INVENTORY_ACTIVE
 from conda_sentinel.surface.tone import INVENTORY_RETIRED
 from conda_sentinel.workflow.states import QUEUE_OWNERS
+from conda_sentinel.workflow.states import Queue
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
@@ -291,6 +294,10 @@ class PackageHealthView(RoleRequiredMixin, ListView):  # type: ignore[type-arg]
         context.update(
             columns=COLUMNS,
             rows=rows,
+            # `CPM-OPERATE-S11`: on the feedstock-gap surface, what the list left
+            # out and why -- `None` everywhere else, so the template draws the
+            # two lines for that surface and nothing for the others.
+            feedstock_gap=feedstock_gap_exclusions(dict(self.request.GET.lists())),
             # The *normalised* fragment among them, not the raw parameter: what goes
             # back into the box has to be what was actually matched, or a reader who
             # typed `scikit_learn` and got `scikit-learn` sees a box that disagrees
@@ -809,6 +816,12 @@ class QueueView(RoleRequiredMixin, ListView):  # type: ignore[type-arg]
             queue_label=queue_label(queue),
             owner_label=role_label(QUEUE_OWNERS[queue]),
             rows=queue_rows(queue, context["page_obj"].object_list),
+            # `CPM-OPERATE-S11`: the identity queue says how many unresolved
+            # packages it is not offering because the inventory no longer lists
+            # them. Read off the rollup, not by re-running the selection; `None`
+            # on the two queues the count is not about, so the template draws the
+            # line for one queue and never says "0" where nothing was left out.
+            absent_not_offered=absent_unresolved_count() if queue == Queue.IDENTITY_REVIEW.value else None,
             **search_context(self.request.GET.get(SEARCH_PARAM, "")),
         )
         return context

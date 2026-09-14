@@ -30,6 +30,7 @@ from conda_sentinel.core.permissions import PRODUCT_ROLES
 from conda_sentinel.core.queues import Queue
 from conda_sentinel.core.roles import ROLE_ENVIRONMENT_VARIABLES
 from conda_sentinel.workflow.states import QUEUE_OWNERS
+from conda_sentinel.workflow.states import SYSTEM_TRANSITIONS
 from conda_sentinel.workflow.states import TRANSITIONS
 from config.authorization.claims import CLAIMS_ENVIRONMENT_VARIABLES
 
@@ -242,6 +243,23 @@ def test_every_transition_is_in_the_documented_table() -> None:
 
     assert declared - rows == set(), f"undocumented transitions: {sorted(declared - rows)}"
     assert rows - declared == set(), f"documented transitions that do not exist: {sorted(rows - declared)}"
+
+
+def test_every_system_transition_is_in_its_own_documented_table() -> None:
+    """`CPM-OPERATE-S11`: the product's table is documented apart from the human one, row for row.
+
+    Anchored on the third column's `origin=system`, which no human row carries, so
+    the two tables cannot be read as one -- and the human table's own case above
+    keeps its pins because the system rows have three cells, not five.
+    """
+    page = text(QUEUES)
+    a_system_row = r"^\| `([a-z_]+)` \| `([a-z_]+)` \| (?:`origin=system`|the same)[^|]* \|$"
+    rows = {(match.group(1), match.group(2)) for match in re.finditer(a_system_row, page, re.MULTILINE)}
+    declared = {(transition.from_state, transition.to_state) for transition in SYSTEM_TRANSITIONS}
+
+    assert declared - rows == set(), f"undocumented system transitions: {sorted(declared - rows)}"
+    assert rows - declared == set(), f"documented system transitions that do not exist: {sorted(rows - declared)}"
+    assert "replayed run close nothing twice" in " ".join(page.split())
 
 
 def test_the_transition_that_demands_a_reason_is_marked_as_one() -> None:

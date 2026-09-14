@@ -28,12 +28,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from conda_sentinel.core.serializer_fields import StatusField
+from conda_sentinel.surface.reports import Report
+from conda_sentinel.surface.reports import excluded_count
 
 __all__ = [
     "CellSerializer",
+    "ExclusionSerializer",
     "HealthRowSerializer",
     "IdentitySerializer",
     "ObservationSerializer",
@@ -43,6 +47,7 @@ __all__ = [
     "ReportSerializer",
     "StatusTraceSerializer",
     "WorkItemSerializer",
+    "report_exclusion",
 ]
 
 
@@ -89,6 +94,15 @@ class HealthRowSerializer(serializers.Serializer[Any]):
     #: contract: an integrator zipping these against the column roster the schema
     #: publishes gets the same alignment the template relies on.
     cells = CellSerializer(many=True)
+
+    #: What the inventory said about the package at the run's cut-off
+    #: (`CPM-OPERATE-S11`, `CPM-AD-24`): both `null` for a listed package, both set
+    #: for one the inventory no longer lists. The same two rollup columns the
+    #: screen's tag is built from, so an integrator sees what a reader sees --
+    #: and never a boolean, because "absent" without "since when" is the half of
+    #: the fact that goes stale.
+    inventory_absent_since = serializers.DateTimeField(allow_null=True)
+    inventory_last_listed = serializers.DateTimeField(allow_null=True)
 
 
 class ObservationSerializer(serializers.Serializer[Any]):
@@ -193,18 +207,56 @@ class PackageDetailSerializer(serializers.Serializer[Any]):
     computed_at = serializers.DateTimeField()
     evidence_cutoff = serializers.DateTimeField()
     policy_versions = serializers.DictField(child=serializers.CharField())
+
+    #: The rollup row's two inventory-absence instants, on `HealthRowSerializer`'s
+    #: terms: beside the provenance rather than under `identity`, because absence
+    #: is an observation about the inventory at this row's cut-off and not a fact
+    #: about who the package is.
+    inventory_absent_since = serializers.DateTimeField(allow_null=True)
+    inventory_last_listed = serializers.DateTimeField(allow_null=True)
+
     identity = IdentitySerializer()
     traces = StatusTraceSerializer(many=True)
     work = WorkItemSerializer(many=True)
 
 
+class ExclusionSerializer(serializers.Serializer[Any]):
+    """What a report leaves out: how many packages, and why (`CPM-OPERATE-S11`).
+
+    Carried on the report and on every page of it rather than stated on the
+    screen alone, because the rows an integrator reads are the rows the exclusion
+    was applied to, and a JSON body that omitted the sentence would read as
+    complete to somebody who never saw the page.
+    """
+
+    count = serializers.IntegerField()
+    reason = serializers.CharField()
+
+
 class ReportSerializer(serializers.Serializer[Any]):
-    """One entry in the report roster: what it asks, and how often it is read."""
+    """One entry in the report roster: what it asks, how often it is read, and what it leaves out."""
 
     slug = serializers.CharField()
     title = serializers.CharField()
     asks = serializers.CharField()
     cadence = serializers.CharField()
+
+    #: `null` for the five reports that exclude nothing; the count and the reason
+    #: for the one that does, over the whole report -- the roster has no search.
+    excluded = serializers.SerializerMethodField()
+
+    @extend_schema_field(ExclusionSerializer(allow_null=True))
+    def get_excluded(self, report: Report) -> dict[str, object] | None:
+        """Return the report's exclusion with its count, or `None`.
+
+        Args:
+            report: The roster entry.
+
+        Returns:
+            `{"count": N, "reason": "..."}` or `None`.
+
+        """
+        return report_exclusion(report)
 
 
 class ReportPageSerializer(serializers.Serializer[Any]):
@@ -228,3 +280,26 @@ class ReportPageSerializer(serializers.Serializer[Any]):
     #: **Every** version the rows carry, not one. `CPM-AD-11` stamps a map per row
     #: and a replay leaves rows from two runs behind.
     policy_versions = serializers.ListField(child=serializers.CharField())
+
+    #: What the report left out of these rows, or `null` for a report that
+    #: declares no exclusion. The count is over the report the page belongs to,
+    #: on the terms `ReportPage.excluded` states.
+    excluded = ExclusionSerializer(allow_null=True)
+
+
+def report_exclusion(report: Report, *, search: str = "") -> dict[str, object] | None:
+    """Return the exclusion a report declares, with its count, in the API's shape.
+
+    Args:
+        report: Which report.
+        search: The fragment the rows were narrowed by, for a page; the roster
+            passes none.
+
+    Returns:
+        `{"count": N, "reason": "..."}`, or `None` for a report that excludes
+        nothing.
+
+    """
+    if report.excludes is None:
+        return None
+    return {"count": excluded_count(report, search=search), "reason": str(report.excludes.reason)}

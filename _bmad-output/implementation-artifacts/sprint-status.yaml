@@ -179,7 +179,7 @@ development_status:
   epic-nl-retrospective: optional
 
   # CPM-EP-OPERATE: Operating the inventory (sprint-change-proposal-2026-09-13)
-  epic-operate: in-progress
+  epic-operate: done
   cpm-operate-s01-a-shell-against-the-stack-carries-its-environment: done
   cpm-operate-s02-ingest-sweep-and-run-are-commands: done
   cpm-operate-s03-the-inventory-is-a-governed-table: done
@@ -190,7 +190,7 @@ development_status:
   cpm-operate-s08-a-collector-re-run-for-one-package-from-the-page: done
   cpm-operate-s09-an-operator-digest: done
   cpm-operate-s10-the-evidence-tables-at-ten-thousand-packages: done
-  cpm-operate-s11-an-absent-package-leaves-the-queues: backlog
+  cpm-operate-s11-an-absent-package-leaves-the-queues: done
   epic-operate-retrospective: optional
 
 # CPM-EP-NL is blocked behind the CPM-NL-S01 fitness spike and is post-MVP; the status

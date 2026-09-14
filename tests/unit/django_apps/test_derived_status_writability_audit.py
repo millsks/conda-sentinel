@@ -652,6 +652,27 @@ def test_the_rollup_carries_a_status_field_for_this_rule_to_be_about() -> None:
     assert editable_status_fields(rollup) == [], matched
 
 
+def test_the_rollups_absence_columns_are_not_statuses_and_are_not_editable() -> None:
+    """`CPM-OPERATE-S11`'s two columns sit outside this rule's convention, and are locked down anyway.
+
+    `inventory_absent_since` and `inventory_last_listed` are instants, not
+    verdicts: absence is an observation the inventory collector made, and the
+    columns carry neither `choices` nor a status-shaped name, so this audit does
+    not reach them and `CPM-AD-4`'s gate does not apply. They are `editable=False`
+    all the same, because only the after-run step may write them -- and this
+    case is what says that was decided rather than forgotten.
+    """
+    rollup = next(model for model in derived_state_models() if model._meta.label == THE_ROLLUP_MODEL_LABEL)  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
+    columns = [
+        rollup._meta.get_field(name)  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
+        for name in ("inventory_absent_since", "inventory_last_listed")
+    ]
+
+    assert all(not is_derived_status_name(column.name) for column in columns)
+    assert all(not column.editable for column in columns)
+    assert all(column.null and not column.choices for column in columns)
+
+
 def test_the_editability_detector_would_notice_an_editable_status() -> None:
     """The anti-vacuity guard for the case above, which today inspects nothing.
 

@@ -71,6 +71,31 @@
     </aside>
 
     <div class="main-pane">
+      {% if feedstock_gap %}
+        {% comment %}
+          CPM-OPERATE-S11. The feedstock-gap surface is one of the two surfaces
+          allowed to leave a package out, and it says so with the counts and the
+          reasons: the inventory-absent packages it excludes on purpose, and the
+          unmapped packages the confidence gate reports unknown for, which the
+          facet never listed and nothing said until now.
+        {% endcomment %}
+        <div class="excluded">
+          <div>
+            {% blocktranslate count total=feedstock_gap.absent_from_inventory with reason=feedstock_gap.absent_reason trimmed %}
+              {{ total }} package excluded: {{ reason }}
+            {% plural %}
+              {{ total }} packages excluded: {{ reason }}
+            {% endblocktranslate %}
+          </div>
+          <div>
+            {% blocktranslate count total=feedstock_gap.unmapped trimmed %}
+              {{ total }} unmapped package reports unknown rather than absent and is not listed
+            {% plural %}
+              {{ total }} unmapped packages report unknown rather than absent and are not listed
+            {% endblocktranslate %}
+          </div>
+        </div>
+      {% endif %}
       <div class="applied">
         <span>{% translate "Sorted by" %}</span>
         {% for key in orderings %}
@@ -98,6 +123,10 @@
             <tr>
               <td class="pkg">
                 <a href="{% url 'conda_sentinel:package-detail' row.canonical_name %}">{{ row.canonical_name }}</a>
+                {% comment %} CPM-OPERATE-S11: an absent package is labelled, never dropped.
+                   Text off the rollup's two columns; the row's statuses are unchanged. {% endcomment %}
+                {% absence_tag row.inventory_absent_since row.inventory_last_listed as absent %}
+                {% if absent %}<span class="conf tone-notfound">{{ absent }}</span>{% endif %}
               </td>
               <td><span class="pbucket {{ row.priority|tone }}">{{ row.priority|label }}</span></td>
               {% comment %} `default_if_none` rather than an `{% if %}`: a score of zero is a real score

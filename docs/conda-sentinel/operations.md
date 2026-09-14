@@ -55,7 +55,13 @@ From then on a row is added, changed or retired on
 `/conda-sentinel/inventory/` -- each with a required reason and an audit row in
 the same transaction, naming the person -- or by importing a revised file
 (`--replace` retires every active row the file no longer names; nothing is ever
-deleted). The column contract, the bounds and the editing rules are documented
+deleted). A retired row is recorded absent by the next ingestion, and the next
+policy run acts on that observation at its cut-off: the package leaves the
+identity review queue, its open queue items are closed by the product with a
+reason, its rollup row is stamped `inventory_absent_since` and every surface
+labels it; the feedstock-gap report alone excludes it and says so. Reactivating
+the row reverses all of it at the following run, with no manual step
+([managing the inventory](managing-the-inventory.md#what-absence-does)). The column contract, the bounds and the editing rules are documented
 beside the files, in `src/django_apps/conda_sentinel/collectors/data/README.md`;
 [Managing the inventory](managing-the-inventory.md) walks an addition end to
 end. Both files ship inside the wheel, under `conda_sentinel/collectors/data/`;
@@ -3315,6 +3321,15 @@ confidence, summed into **resolved** (`verified`) and **unresolved**
 and its size, on the same rule the Packages screen's queue uses; and the
 newest finished policy run's version, age and state, or that none has
 finished. A newest run that failed reads as failed.
+
+The digest's **ingested** and **absent** counts read the governed inventory
+table (`retired_at`, as it stands when the digest is composed), while the
+queues, the "absent from the inventory" labels and the feedstock-gap
+exclusions read the cut-off-bound snapshot log at the newest policy run's
+cut-off ([managing the inventory](managing-the-inventory.md#what-absence-does)).
+A row retired on the page is absent to the digest at once and absent to the
+queues only after the next ingestion has recorded it and the next run has read
+it, so the two can differ by one ingestion; neither is wrong.
 
 **A day in which nothing changed still delivers, in one line.** `changed` is
 whether the figures equal the previous digest's; when they do, the text is one

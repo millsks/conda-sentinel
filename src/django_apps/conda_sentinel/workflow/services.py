@@ -33,6 +33,15 @@ advisory it saw last night. `get_or_create` on the finding key finds the existin
 item -- whatever state it has reached -- and touches nothing. An accepted finding
 stays accepted.
 
+**The product closes an item in exactly one circumstance, and it is not a person's
+path.** `close_for_absence` (`CPM-OPERATE-S11`) resolves the open items of a package
+the inventory no longer lists. It takes the same lock and appends the same audit row
+in the same transaction, but it reads `workflow/states.py`'s *system* table rather
+than the human one, checks no role -- the product holds none and borrows nobody's --
+and writes the transition with `origin="system"` and no actor, under the constraint
+that exactly one of the two names an author. `apply_transition` stays a person's
+path: an actor is required there and nothing routes the product through it.
+
 **On the `AD-` prefix.** A bare `AD-n` in this repository is an *inherited* platform
 decision; a decision from this product's own architecture spine always carries the
 `CPM-` prefix.
@@ -48,13 +57,18 @@ import structlog
 from django.db import transaction
 
 from conda_sentinel.core.permissions import granted_roles
+from conda_sentinel.workflow.models import SYSTEM_ORIGIN
 from conda_sentinel.workflow.models import WorkflowItem
 from conda_sentinel.workflow.models import WorkflowTransition
 from conda_sentinel.workflow.states import TERMINAL_STATES
 from conda_sentinel.workflow.states import ItemState
+from conda_sentinel.workflow.states import system_transition_for
 from conda_sentinel.workflow.states import transition_for
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from conda_sentinel.collectors.absence import Absence
     from conda_sentinel.core.clock import Clock
     from conda_sentinel.core.finding_keys import FindingKeyed
     from conda_sentinel.identity.models import Package
@@ -62,12 +76,15 @@ if TYPE_CHECKING:
     from django_service.users.models import User
 
 __all__ = [
+    "ITEM_CLOSED_FOR_ABSENCE_EVENT",
     "ITEM_OPENED_EVENT",
     "TRANSITION_APPLIED_EVENT",
     "TRANSITION_REFUSED_EVENT",
+    "ClosedItem",
     "OpenedItem",
     "WorkflowError",
     "apply_transition",
+    "close_for_absence",
     "open_item",
     "open_keyed_item",
 ]
@@ -83,6 +100,11 @@ logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 ITEM_OPENED_EVENT: str = "workflow.item_opened"
 TRANSITION_APPLIED_EVENT: str = "workflow.transition_applied"
 TRANSITION_REFUSED_EVENT: str = "workflow.transition_refused"
+
+#: The product's own close, logged apart from a person's move because an operator
+#: reading a run of them is asking a different question -- "what left the inventory
+#: last night" rather than "who did what".
+ITEM_CLOSED_FOR_ABSENCE_EVENT: str = "workflow.item_closed_for_absence"
 
 
 class WorkflowError(Exception):
@@ -114,6 +136,7 @@ def open_item(
     package: Package,
     queue: str,
     clock: Clock,
+    epoch: Sequence[tuple[str, str]] = (),
 ) -> OpenedItem:
     """Open a queue item for a finding, or return the one that already exists.
 
@@ -123,12 +146,15 @@ def open_item(
         package: The package the work is about.
         queue: The queue to open it in, as a `Queue` value.
         clock: The clock both stamps are read from (`CPM-AD-26`).
+        epoch: Facts appended to the declared key, on `FindingKeyed.finding_key`'s
+            terms: the listing epoch of a package that has been absent and is listed
+            again (`CPM-OPERATE-S11`). Empty for the ordinary key.
 
     Returns:
         The item, and whether this call created it.
 
     """
-    key, facts = evidence.finding_key()
+    key, facts = evidence.finding_key(epoch=epoch)
     return open_keyed_item(finding_key=key, finding_facts=facts, package=package, queue=queue, clock=clock)
 
 
@@ -260,6 +286,152 @@ def apply_transition(  # noqa: PLR0913 - see the docstring: each argument is a s
         queue=moved_queue,
     )
     return item
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedItem:
+    """What the product's close produced, and whether it wrote anything.
+
+    The flag is what lets the opening step count the items *it* closed rather
+    than the items that are closed: a person can resolve an item between the
+    step's read and its lock, and that item is theirs, not the run's.
+    """
+
+    item: WorkflowItem
+    written: bool
+
+
+def close_for_absence(*, item_id: int, absence: Absence, clock: Clock) -> ClosedItem:
+    """Resolve one item because the inventory no longer lists its package.
+
+    The product's one transition (`CPM-OPERATE-S11`, `CPM-AD-22`), on the system
+    table `workflow/states.py` declares. Under the same lock and in the same
+    transaction as a person's move, with the same audit row -- authored by
+    `origin="system"` rather than by an actor, and carrying a justification that
+    names the absence and the last-listed date, because a product closing work
+    without saying what it saw is a person's worst case with a different author.
+
+    **Idempotent on replay.** A terminal item is returned untouched rather than
+    refused: a replayed run (`CPM-FR-22`) meets the items the run it replays
+    already closed, and "nothing to do" is the honest answer there. Nothing is
+    ever re-opened by this path -- the system table has no `(*, open)` row any
+    more than the human one does.
+
+    **A claim is released.** An `in_progress` item is claimed by somebody, and
+    `CLAIMED_ONLY_IN_PROGRESS` makes a claim meaningless in any other state, so
+    the move clears `claimed_by` as a person's resolve does; the audit row is what
+    tells the claimant why their work went away.
+
+    Args:
+        item_id: The item to close, by primary key -- the row this locks, not one a
+            caller read earlier.
+        absence: What the inventory said about the package at the run's cut-off.
+            Must be an absence; a listed package has nothing to close over.
+        clock: The clock the stamps are read from (`CPM-AD-26`).
+
+    Returns:
+        The item, resolved, and whether this call resolved it -- `written` is
+        `False` for an item that had already reached an ending.
+
+    Raises:
+        WorkflowError: When the item does not exist; when `absence` does not
+            record an absence at all -- closing work over a package the inventory
+            still lists is a decision only a person may make; or when the item's
+            stored state is one `ItemState` does not declare, which is a row the
+            machine cannot reason about and must not quietly read as finished.
+
+    """
+    if not absence.absent or absence.since is None:
+        message = (
+            f"item {item_id} was asked to be closed for absence, but the inventory reading given does not "
+            f"record an absence. The product closes work only over a package the inventory no longer lists; "
+            f"anything else is a person's decision (CPM-AD-22)."
+        )
+        raise WorkflowError(message)
+
+    with transaction.atomic():
+        item = WorkflowItem.objects.select_for_update().filter(pk=item_id).first()
+        if item is None:
+            message = f"no workflow item has id {item_id}."
+            raise WorkflowError(message)
+
+        if item.state not in ItemState.values:
+            message = (
+                f"item {item.pk} is in the state {item.state!r}, which workflow/states.py does not declare. The "
+                f"product cannot tell whether such an item is finished, so it is left alone and reported rather "
+                f"than read as resolved."
+            )
+            raise WorkflowError(message)
+        declared = system_transition_for(item.state)
+        if declared is None:
+            # Already finished: a replay's ordinary case, and not a refusal.
+            return ClosedItem(item=item, written=False)
+
+        now = clock.now()
+        from_state = item.state
+        justification = _absence_justification(absence)
+
+        item.state = declared.to_state
+        item.claimed_by = None
+        item.changed_at = now
+        item.save(update_fields=("state", "claimed_by", "changed_at"))
+
+        # In the same transaction (`CPM-AD-23`), authored by the product: no actor,
+        # an origin, and the reason -- the constraint on the model refuses a row
+        # that names neither or both.
+        WorkflowTransition.objects.create(
+            item=item,
+            from_state=from_state,
+            to_state=declared.to_state,
+            queue=item.queue,
+            actor=None,
+            origin=SYSTEM_ORIGIN,
+            justification=justification,
+            occurred_at=now,
+        )
+
+    logger.info(
+        ITEM_CLOSED_FOR_ABSENCE_EVENT,
+        item=item.pk,
+        finding_key=item.finding_key,
+        package=item.package_id,
+        queue=item.queue,
+        from_state=from_state,
+        to_state=declared.to_state,
+        since=absence.since.isoformat(),
+    )
+    return ClosedItem(item=item, written=True)
+
+
+def _absence_justification(absence: Absence) -> str:
+    """Return what the product's audit row says about why it closed the item.
+
+    **Stored audit text, not a label.** The sentence is written into
+    `workflow_transitions.justification` and read back for as long as the row
+    exists, so it is composed in English and never through `gettext`: a
+    translation would make the same close read differently to two readers of one
+    row, and a later change to the wording would leave old rows saying something
+    the current code no longer says. `SystemTransition.describes` in
+    `workflow/states.py` is on the same terms.
+
+    Args:
+        absence: The reading, known to record an absence.
+
+    Returns:
+        A sentence naming the absence and, when the inventory ever listed the
+        package, the last-listed date -- and without that clause when no listing
+        is recorded, which is what a purged `ok` row leaves behind. Dates rather
+        than instants, on the terms the surface's tag uses: a reader is placing
+        the event in a calendar.
+
+    """
+    since = absence.since.date().isoformat() if absence.since is not None else "an unrecorded date"
+    if absence.last_listed is None:
+        return f"closed by the product: the inventory no longer lists the package (absent since {since})."
+    return (
+        f"closed by the product: the inventory no longer lists the package (absent since {since}, last listed "
+        f"{absence.last_listed.date().isoformat()})."
+    )
 
 
 def _require_expected(item: WorkflowItem, *, expected_state: str, to_state: str, actor: User) -> None:

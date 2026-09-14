@@ -1,8 +1,11 @@
 """The template's half of `CPM-AD-24`: values in, no decisions taken.
 
-Three filters and nothing else. `tone` looks a status up in `surface/tone.py`, `label`
-looks it up in `surface/labels.py`, and `querystring` rebuilds a URL with one parameter
-changed so the pager and the sort links keep the filters a reader has applied.
+Three filters and one more tag. `tone` looks a status up in `surface/tone.py`, `label`
+looks it up in `surface/labels.py`, `querystring` rebuilds a URL with one parameter
+changed so the pager and the sort links keep the filters a reader has applied, and
+`absence_tag` prints the one text tag an absent package carries (`CPM-OPERATE-S11`)
+-- a tag rather than a filter because it reads two columns, and blank for a listed
+package because there is no tag to print rather than a value to hide.
 
 **`tone` and `label` take the same value and answer different questions**, which is why
 a chip passes it to both: the value picks the colour, the label is what is printed, and
@@ -22,10 +25,13 @@ from typing import TYPE_CHECKING
 
 from django import template
 
+from conda_sentinel.surface.labels import absence_tag as absence_tag_of
 from conda_sentinel.surface.labels import display_label
 from conda_sentinel.surface.tone import tone_of
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from django.http import QueryDict
 
 register = template.Library()
@@ -93,3 +99,18 @@ def querystring(query: QueryDict, **changes: object) -> str:
         else:
             updated[key] = str(value)
     return updated.urlencode()
+
+
+@register.simple_tag(name="absence_tag")
+def absence_tag(since: datetime | None, last_listed: datetime | None) -> str:
+    """Return the text tag an absent package carries, or nothing for a listed one.
+
+    Args:
+        since: The rollup row's `inventory_absent_since`.
+        last_listed: The rollup row's `inventory_last_listed`.
+
+    Returns:
+        `surface/labels.py`'s `absence_tag`, unchanged.
+
+    """
+    return absence_tag_of(since, last_listed)

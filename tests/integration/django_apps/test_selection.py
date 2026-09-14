@@ -42,6 +42,7 @@ from conda_sentinel.collectors.models import InventoryReadError
 from conda_sentinel.collectors.models import InventorySnapshot
 from conda_sentinel.collectors.models import snapshot_as_of
 from conda_sentinel.collectors.selection import QUEUE_SELECTED_EVENT
+from conda_sentinel.collectors.selection import select_unresolved
 from conda_sentinel.collectors.selection import unresolved_packages
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.identity.models import ESTABLISHED
@@ -454,8 +455,9 @@ def test_a_package_that_departs_after_the_cut_off_keeps_its_breadth_at_the_cut_o
     The package was observed with real usage before the cut-off and stopped being
     listed after it. At this cut-off the departure has not happened yet, so the
     package ranks on its counts -- an implementation that dropped
-    `observed_at__lte` from the fold would read the absence, rank the package last,
-    and every other case in this module would still pass.
+    `observed_at__lte` from the fold would read the absence, leave the package
+    out (`CPM-OPERATE-S11`), and every other case in this module would still pass.
+    At the later cut-off the departure has happened, and the package is not offered.
     """
     departs = _a_package("departs-later")
     _observed(departs, components=A_LARGE_COUNT, at=BEFORE_THE_CUTOFF)
@@ -463,23 +465,29 @@ def test_a_package_that_departs_after_the_cut_off_keeps_its_breadth_at_the_cut_o
     _observed(_a_package("stays"), components=A_MIDDLING_COUNT, at=BEFORE_THE_CUTOFF)
 
     assert _names(cutoff=CUTOFF) == ["departs-later", "stays"]
-    assert _names(cutoff=LATER_CUTOFF) == ["stays", "departs-later"]
+    assert _names(cutoff=LATER_CUTOFF) == ["stays"]
+    assert select_unresolved(cutoff=CUTOFF).left_out_for_absence == 0
+    assert select_unresolved(cutoff=LATER_CUTOFF).left_out_for_absence == 1
 
 
 @pytest.mark.django_db
 def test_the_fold_returns_what_the_per_package_read_returns_for_every_arrangement() -> None:
     """The module's central correctness claim, asserted by calling both.
 
-    `_breadth_at` says it returns "the same row `snapshot_as_of` returns for the
-    same `(package, cutoff)` pair", which is what makes the set-based read an
-    extension of `CPM-AD-25`'s rule rather than a second answer to its question.
+    `collectors/absence.py`'s `histories_at` -- the fold the selection reads its
+    breadth off -- says the surviving row is "the same row `snapshot_as_of` returns
+    for the same `(package, cutoff)` pair", which is what makes the set-based read
+    an extension of `CPM-AD-25`'s rule rather than a second answer to its question.
     Without a differential case the two can drift -- a changed tiebreak, a changed
     boundary, a changed absence rule -- and each would still look right on its own
     terms.
 
     Every arrangement this module has a case for is present in one table, and the
     comparison is made for all of them at two cut-offs, so the equivalence is a
-    property rather than an example.
+    property rather than an example. The absent package is asserted the other way
+    round: it is in the table, `snapshot_as_of` says its newest row is `not_found`,
+    and the queue has left it out (`CPM-OPERATE-S11`) -- so the differential claim
+    covers membership as well as breadth.
     """
     tied = _a_package("tied-at-one-instant")
     _observed(tied, components=A_LARGE_COUNT, at=BEFORE_THE_CUTOFF)
@@ -495,11 +503,20 @@ def test_the_fold_returns_what_the_per_package_read_returns_for_every_arrangemen
     _a_package("never-observed")
 
     for cutoff in (CUTOFF, LATER_CUTOFF):
-        for entry in unresolved_packages(cutoff=cutoff):
+        queue = unresolved_packages(cutoff=cutoff)
+        for entry in queue:
             row = snapshot_as_of(package_id=entry.package.pk, cutoff=cutoff)
             expected = (None, None) if row is None else (row.internal_component_count, row.internal_lob_count)
             assert (entry.internal_component_count, entry.internal_lob_count) == expected, (
                 f"the set-based read and snapshot_as_of disagree about {entry.package.canonical_name} "
+                f"at {cutoff.isoformat()}"
+            )
+        offered = {entry.package.pk for entry in queue}
+        for package in Package.objects.all():
+            row = snapshot_as_of(package_id=package.pk, cutoff=cutoff)
+            absent = row is not None and row.state == OutcomeState.NOT_FOUND.value
+            assert (package.pk not in offered) == absent, (
+                f"the queue and snapshot_as_of disagree about whether {package.canonical_name} is absent "
                 f"at {cutoff.isoformat()}"
             )
 
@@ -524,20 +541,47 @@ def test_a_package_with_no_snapshot_at_all_is_returned_and_ranked_last() -> None
 
 
 @pytest.mark.django_db
-def test_a_package_whose_latest_snapshot_is_an_absence_is_returned_and_ranked_last() -> None:
-    """`not_found` carries NULL counts by the check constraint, and NULL is not zero.
+def test_a_package_whose_latest_snapshot_is_an_absence_is_left_out_and_counted() -> None:
+    """`CPM-OPERATE-S11`: an absent package leaves the queue rather than sinking to the bottom.
 
     The package *was* observed with real usage once, and then the source stopped
-    listing it. What the queue must not do is keep ranking it on the old numbers:
-    the latest observation at the cut-off is the one that counts, and it observed
-    no counts at all.
+    listing it. Before this story the queue ranked it last for want of breadth;
+    now it is not offered at all -- a person asked to establish the identity of a
+    package the organisation no longer runs is a person asked to do nothing --
+    and the selection says how many it left out, because a queue that silently
+    omitted packages would read as "nothing to do".
     """
     departed = _a_package("stopped-being-listed")
     _observed(departed, components=A_LARGE_COUNT, at=BEFORE_THE_CUTOFF)
     _observed_nothing(departed, state=OutcomeState.NOT_FOUND.value, at=CUTOFF)
     _observed(_a_package("still-listed"), components=A_SMALL_COUNT)
 
-    assert _names() == ["still-listed", "stopped-being-listed"]
+    selection = select_unresolved(cutoff=CUTOFF)
+
+    assert [entry.package.canonical_name for entry in selection.packages] == ["still-listed"]
+    assert selection.left_out_for_absence == 1
+    assert _names() == ["still-listed"]
+
+
+@pytest.mark.django_db
+def test_a_package_listed_again_after_an_absence_is_offered_again() -> None:
+    """The reverse, with no manual step: a later `ok` row is the whole of re-listing.
+
+    The newest row at the cut-off decides, so a package the inventory dropped and
+    then listed again is back in the queue at the breadth its new listing recorded
+    -- and it is not counted as left out, because it was not.
+    """
+    returned = _a_package("listed-again")
+    _observed(returned, components=A_LARGE_COUNT, at=BEFORE_THE_CUTOFF - OBSERVATION_GAP)
+    _observed_nothing(returned, state=OutcomeState.NOT_FOUND.value, at=BEFORE_THE_CUTOFF)
+    _observed(returned, components=A_SMALL_COUNT, at=CUTOFF)
+    _observed(_a_package("always-listed"), components=A_MIDDLING_COUNT)
+
+    selection = select_unresolved(cutoff=CUTOFF)
+
+    assert [entry.package.canonical_name for entry in selection.packages] == ["always-listed", "listed-again"]
+    assert selection.packages[1].internal_component_count == A_SMALL_COUNT
+    assert selection.left_out_for_absence == 0
 
 
 @pytest.mark.django_db
@@ -603,12 +647,15 @@ def test_a_genuine_zero_outranks_every_package_with_no_breadth() -> None:
 
 
 @pytest.mark.django_db
-def test_the_three_no_breadth_states_are_ordered_among_themselves_by_the_key() -> None:
+def test_the_no_breadth_states_are_ordered_among_themselves_by_the_key() -> None:
     """AC 4's "in an order that is the same on SQLite and on PostgreSQL".
 
-    All three carry NULL for both counts, so nothing but the surrogate key
-    separates them -- and a NULL ordering left to the backend would put this whole
-    block at the *front* of the queue on one of them and at the back on the other.
+    Every no-breadth state carries NULL for both counts, so nothing but the
+    surrogate key separates them -- and a NULL ordering left to the backend would
+    put this whole block at the *front* of the queue on one of them and at the back
+    on the other. The absent package is created between the two so the key order
+    would have placed it in the middle; it is not there, because
+    `CPM-OPERATE-S11` leaves it out rather than ranking it.
     """
     unobserved = _a_package("no-snapshot")
     absent = _a_package("absent")
@@ -617,7 +664,7 @@ def test_the_three_no_breadth_states_are_ordered_among_themselves_by_the_key() -
     _observed_nothing(failed, state=OutcomeState.ERROR.value)
     _observed(_a_package("has-breadth"), components=A_SMALL_COUNT)
 
-    assert _names() == ["has-breadth", "no-snapshot", "absent", "errored"]
+    assert _names() == ["has-breadth", "no-snapshot", "errored"]
     assert unobserved.pk < absent.pk < failed.pk
 
 
@@ -790,6 +837,7 @@ def test_the_selection_logs_the_cut_off_it_read_as_of(captured_events: list[Even
     """
     _observed(_a_package("in-the-queue"), components=A_SMALL_COUNT)
     _a_package("verified-one", confidence=IdentityConfidence.VERIFIED.value)
+    _observed_nothing(_a_package("gone"), state=OutcomeState.NOT_FOUND.value)
 
     unresolved_packages(cutoff=CUTOFF)
 
@@ -797,6 +845,7 @@ def test_the_selection_logs_the_cut_off_it_read_as_of(captured_events: list[Even
     assert event["cutoff"] == CUTOFF.isoformat()
     assert event["selected"] == 1
     assert event["with_breadth"] == 1
+    assert event["left_out_for_absence"] == 1
 
 
 # ---------------------------------------------------------------------------

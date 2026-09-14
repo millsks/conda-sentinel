@@ -50,6 +50,7 @@ from conda_sentinel.core.models import PackageHealth
 from conda_sentinel.core.models import PolicyRun
 from conda_sentinel.core.outcomes import OutcomeState
 from conda_sentinel.core.policy_run import execute_policy_run
+from conda_sentinel.core.rollup import AFTER_RUN_COLUMNS
 from conda_sentinel.core.rollup import ROLLUP_WRITE_FAILED_EVENT
 from conda_sentinel.core.rollup import ROLLUP_WRITTEN_EVENT
 from conda_sentinel.core.rollup import STAMP_COLUMNS
@@ -604,10 +605,14 @@ def test_the_rollup_row_is_reachable_from_the_package_as_one_object() -> None:
 def test_the_row_carries_every_column_the_rollup_declares() -> None:
     """A full-row replace writes the whole row, which is only checkable against the whole row.
 
-    The stamps are enumerated by `core/rollup.py` and the contributable columns
-    are derived from the model, so the two together are every non-key field. A
-    field added to the rollup and forgotten by the writer would leave a column
-    the writer never sets -- which is exactly the merge this table must not do.
+    The stamps are enumerated by `core/rollup.py`, the contributable columns are
+    derived from the model, and the after-run columns (`CPM-OPERATE-S11`) are the
+    third enumeration, so the three together are every non-key field. A field
+    added to the rollup and forgotten by the writer would leave a column the
+    writer never sets -- which is exactly the merge this table must not do. The
+    after-run columns are the one pair the compose writes as `NULL` on purpose:
+    a listed package carries nothing there, and the step that fills them for an
+    absent one is `collectors/absence.py`'s, asserted in `test_absence.py`.
     """
     an_ended_collection_run()
     a_package("numpy")
@@ -619,7 +624,9 @@ def test_the_row_carries_every_column_the_rollup_declares() -> None:
         for field in PackageHealth._meta.concrete_fields  # noqa: SLF001 - `_meta` is Django's own public-by-convention API
         if not field.primary_key
     }
-    assert declared == STAMP_COLUMNS | contributable_columns()
+    assert declared == STAMP_COLUMNS | contributable_columns() | AFTER_RUN_COLUMNS
     row = PackageHealth.objects.get()
-    for column in declared:
+    for column in declared - AFTER_RUN_COLUMNS:
         assert getattr(row, f"{column}_id" if column in {"package", "policy_run"} else column) is not None
+    for column in AFTER_RUN_COLUMNS:
+        assert getattr(row, column) is None

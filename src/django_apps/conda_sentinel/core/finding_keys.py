@@ -157,8 +157,17 @@ class FindingKeyed(models.Model):
 
         abstract = True
 
-    def finding_key(self) -> tuple[str, str]:
+    def finding_key(self, *, epoch: Sequence[tuple[str, str]] = ()) -> tuple[str, str]:
         """Return this row's finding key and its readable facts.
+
+        Args:
+            epoch: Facts appended after the declared key fields, for a finding whose
+                work is filed under a *period* as well as under the facts -- the
+                instant a package's current inventory listing began
+                (`CPM-OPERATE-S11`), so the item the product closed when the package
+                left stays closed and fresh work opens beside it. Empty for the
+                ordinary key, and the ordinary key is byte-identical to what it was
+                before this argument existed.
 
         Returns:
             The bounded key and the readable form, as `finding_key_of` builds them.
@@ -182,4 +191,5 @@ class FindingKeyed(models.Model):
                 )
                 raise FindingKeyError(message) from missing
             facts.append((name, "" if value is None else str(value)))
+        facts.extend(epoch)
         return finding_key_of(table, self.package_id, facts)  # type: ignore[attr-defined]

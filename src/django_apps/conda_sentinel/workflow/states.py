@@ -29,6 +29,18 @@ compliance reviewer; everything else on this machine is work anybody in the prod
 can move along. The justification is required by the *declaration*, so the service
 refuses without one rather than each caller remembering.
 
+**The product has a table of its own, and it is one row wide in effect.**
+`SYSTEM_TRANSITIONS` declares the one move the product makes without a person
+(`CPM-OPERATE-S11`): every non-terminal state to `resolved`, when the inventory no
+longer lists the package the item is about. It is a separate table rather than
+rows in `TRANSITIONS` because the two answer different questions -- `TRANSITIONS`
+is what a *person* may do and carries the role each move requires; the product
+holds no role, so a row for it in the human table would either invent one or
+declare an empty set that reads as "nobody". `transition_for` reads only the human
+table, so `apply_transition` cannot be talked into the product's move, and
+`close_for_absence` reads only the system table, so the product cannot make a
+person's.
+
 **On the `AD-` prefix.** A bare `AD-n` in this repository is an *inherited* platform
 decision; a decision from this product's own architecture spine always carries the
 `CPM-` prefix.
@@ -52,11 +64,13 @@ __all__ = [
     "QUEUE_LENGTH",
     "QUEUE_OWNERS",
     "STATE_LENGTH",
+    "SYSTEM_TRANSITIONS",
     "TERMINAL_STATES",
     "TRANSITIONS",
     "ItemState",
     "Queue",
-    "Transition",
+    "SystemTransition",
+    "system_transition_for",
     "transition_for",
 ]
 
@@ -231,6 +245,75 @@ TRANSITIONS: Final[tuple[Transition, ...]] = (
         requires_justification=True,
     ),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SystemTransition:
+    """One move the product makes on its own, and what it records when it does.
+
+    No `required_roles`: the product holds none, and a role here would be a role
+    somebody could be granted to make the product's move by hand. What it carries
+    instead is the requirement that the audit row say *why* -- a product closing
+    work without a reason on the row is a person's worst case wearing a different
+    author.
+    """
+
+    from_state: str
+    to_state: str
+
+    #: What the audit row says happened, in the words a reviewer reads. **Stored
+    #: audit text**: the sentence is what the product's close is documented as
+    #: and what `close_for_absence`'s justification restates into the row, so it
+    #: is English and never a `gettext` promise -- a translated audit sentence
+    #: would read differently to two readers of one row.
+    describes: str
+
+    #: Always true for the product's move: a person can resolve without a reason
+    #: because the person is the reason; the product has to say what it saw.
+    requires_justification: bool = field(default=True)
+
+
+#: What the product may do without a person, and the whole of it.
+#:
+#: One move from every state a person could still act from: `resolved`, because
+#: the inventory no longer lists the package the item is about, and work on a
+#: package the organisation does not run is work nobody should be asked to do.
+#: Derived from `ItemState` less `TERMINAL_STATES` rather than written out, so a
+#: seventh non-terminal state joins here without an edit -- and a terminal one is
+#: never a source, on the terms `TERMINAL_STATES` states: nothing leaves an ending.
+#:
+#: `describes` and `requires_justification` are the same on every row, and that
+#: uniformity is the point: whichever state the item was in, the audit row reads
+#: the same and names the same reason, because the reason is about the package
+#: and not about the item's progress.
+SYSTEM_TRANSITIONS: Final[tuple[SystemTransition, ...]] = tuple(
+    SystemTransition(
+        from_state=state,
+        to_state=ItemState.RESOLVED.value,
+        describes="closed by the product: the inventory no longer lists the package",
+        requires_justification=True,
+    )
+    for state in ItemState.values
+    if state not in TERMINAL_STATES
+)
+
+
+def system_transition_for(from_state: str) -> SystemTransition | None:
+    """Return the product's declared move out of a state, if there is one.
+
+    Args:
+        from_state: The state the item is in.
+
+    Returns:
+        The declaration, or `None` for a terminal state -- which the product
+        treats as nothing to do rather than as a refusal, because a replay meets
+        the items it already closed.
+
+    """
+    for transition in SYSTEM_TRANSITIONS:
+        if transition.from_state == from_state:
+            return transition
+    return None
 
 
 def transition_for(from_state: str, to_state: str) -> Transition | None:

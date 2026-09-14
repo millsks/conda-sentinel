@@ -226,6 +226,22 @@ to move. [The queues](the-queues.md).
 
 None of the three writes a derived status. Nothing in the application layer can.
 
+### The one write the product makes on its own
+
+A fourth path to `workflow_transitions` is not a person's, and no role reaches it:
+
+| Path | Author | What it does |
+|---|---|---|
+| the policy run's `workflow.open_queue_items` step | `origin=system`, no actor | Closes the open items of a package the inventory no longer lists at the run's cut-off, with a justification naming the absence |
+
+It runs inside the policy run — a task, never a request — through
+`close_for_absence`, which reads the product's own transition table rather than the
+human one and checks no role: the product holds none and borrows nobody's account.
+Every row it writes names the product by `origin`; `actor` is empty, and the database
+refuses a transition that names neither an actor nor an origin, or both. `apply_transition`
+stays a person's path and takes an actor unconditionally
+([the queues](the-queues.md#the-products-own-table-one-move-one-circumstance)).
+
 ### The two governed writes carry a Django permission as well as a role
 
 The identity override and the inventory change are the two human writes `CPM-FR-3`
