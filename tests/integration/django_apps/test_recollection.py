@@ -522,24 +522,22 @@ def test_a_package_queryset_selection_is_asked_by_primary_key() -> None:
 def test_a_mapping_queryset_selection_is_asked_by_package_id_and_not_by_the_mappings_own_key() -> None:
     """`pypi_release` selects over `identity.PackageMapping`, and the helper filters its `package_id` column.
 
-    Built so no mapping's own primary key equals the target package's: two
-    mappings of other kinds on another package first, so the target's mapping
-    gets a third key. A helper filtering `pk` by mistake would then answer
-    `False` for the target and `True` for the other package, whose key the first
-    mapping happens to share.
+    Built so the target's mapping carries the *other* package's key as its own
+    primary key -- given explicitly, so the collision holds on PostgreSQL, whose
+    sequences do not rewind between tests, as well as on SQLite. A helper
+    filtering `pk` by mistake would then answer `False` for the target and
+    `True` for the other package.
     """
     other = _a_package("attrs")
     target = _a_package()
-    for kind in (MappingKind.FEEDSTOCK.value, MappingKind.SOURCE_REPOSITORY.value):
-        PackageMapping.objects.create(package=other, kind=kind, outcome=ESTABLISHED, resolved_at=NOW)
     mapping = PackageMapping.objects.create(
+        pk=other.pk,
         package=target,
         kind=MappingKind.RELEASE_ECOSYSTEM.value,
         outcome=ESTABLISHED,
         resolved_at=NOW,
     )
-    assert mapping.pk != target.pk
-    assert PackageMapping.objects.filter(pk=other.pk).exists(), "a mapping shares the other package's key"
+    assert mapping.pk == other.pk != target.pk
 
     assert selects(PyPIReleaseCollector, target.pk) is True
     assert selects(PyPIReleaseCollector, other.pk) is False
