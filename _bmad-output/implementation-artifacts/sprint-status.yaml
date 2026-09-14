@@ -189,7 +189,7 @@ development_status:
   cpm-operate-s07-ninety-days-of-evidence-purged-nightly: done
   cpm-operate-s08-a-collector-re-run-for-one-package-from-the-page: done
   cpm-operate-s09-an-operator-digest: done
-  cpm-operate-s10-the-evidence-tables-at-ten-thousand-packages: backlog
+  cpm-operate-s10-the-evidence-tables-at-ten-thousand-packages: done
   cpm-operate-s11-an-absent-package-leaves-the-queues: backlog
   epic-operate-retrospective: optional
 

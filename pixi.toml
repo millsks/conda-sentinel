@@ -838,6 +838,20 @@ gate-postgres = { cmd = "bash scripts/gate-postgres.sh", default-environment = "
 # runs (AD-18), and this needs a container it does not declare.
 gate-redis = { cmd = "bash scripts/gate-redis.sh", default-environment = "dev", description = "Run the suite against a throwaway redis:7, as the gate does" }
 
+# CPM-OPERATE-S10's scale spike, on `gate-postgres`'s terms: a throwaway
+# `postgres:17` (container `pg-spike`, port 55433), seeded with ten thousand
+# packages times ninety-one days on every purged evidence table and the run
+# ledger, `EXPLAIN (ANALYZE, BUFFERS)` over the product's own queries, and the
+# nightly purge end to end. The verdict on partitioning is recorded in the story
+# and in `docs/conda-sentinel/operations.md` ("Measuring at scale"); re-run this
+# before changing an evidence index, the floor rule or the purge's batching.
+#
+# A script for the reason its two siblings are (the readiness loop), and never
+# a gate step: the module is `spike_*.py`, which `python_files` does not match,
+# so `pytest tests/` never collects it and only this task names it. It takes
+# minutes and needs Docker; `pixi run ci` must stay the sequence CI runs.
+spike-scale = { cmd = "bash scripts/spike-scale.sh", default-environment = "dev", description = "CPM-OPERATE-S10: measure the evidence tables at ten thousand packages on postgres:17" }
+
 ci = { depends-on = [
   "precommit",  # ruff format + ruff lint (auto-fix) + mypy, over every file
   "build",      # the package is distributable: catches import and packaging errors
